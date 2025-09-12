@@ -8,7 +8,7 @@ steps: ["alignment", "deepvariant", "family_calling"] # Available steps: alignme
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
 scratch: "/pasteur/appa/scratch/fcliquet"
 
-# Pedigree file (optional - defaults to ${data}/pedigree.tsv)
+# Pedigree file (optional - defaults to {data}/pedigree.tsv)
 pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/pedigree.tsv"
 
 # Reference genomes

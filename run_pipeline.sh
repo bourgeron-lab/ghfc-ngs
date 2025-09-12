@@ -1,5 +1,7 @@
 #!/bin/bash
 
+unset HTTP_PROXY https_proxy http_proxy HTTPS_PROXY
+
 module load graalvm
 module load apptainer
 module load graphviz
@@ -11,6 +13,7 @@ ulimit -v unlimited
 ulimit -Sn 65536
 ulimit -u 65536
 export OPENBLAS_NUM_THREADS=1
+export NXF_ASSETS=$HOME/.nextflow/assets
 
 # Function to display usage
 usage() {

@@ -108,3 +108,10 @@ ulimit -Sn 65536
 ulimit -u 65536
 export OPENBLAS_NUM_THREADS=1
 ```
+
+To avoid a Nextflow issue with remote repositories, we need to unset the cluster proxy first, and then to set the environment variable used by nextflow as a PATH to stored temporary downloads of remote repositories. Here it is set up to be in the home of the user.
+
+```bash
+unset HTTP_PROXY https_proxy http_proxy HTTPS_PROXY
+export NXF_ASSETS=$HOME/.nextflow/assets
+```
