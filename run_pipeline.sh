@@ -138,7 +138,7 @@ if ! command -v nextflow &> /dev/null; then
 fi
 
 # Construct the command
-CMD="nextflow run main.nf"
+CMD="nextflow run bourgeron-lab/ghfc-ngs"
 CMD="$CMD -profile $PROFILE"
 CMD="$CMD -work-dir $WORK_DIR"
 
