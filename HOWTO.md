@@ -11,7 +11,7 @@ Create a script called `ghfc-ngs`, make it executable (`chmod +x`) and store it 
 ```bash
 #!/bin/bash
 
-bash -c "$(curl http://example.com/script.sh )" -s $@
+bash -c "$(curl -s https://raw.githubusercontent.com/bourgeron-lab/ghfc-ngs/refs/heads/main/run_pipeline.sh )" -s $@
 ```
 
 By default, this script exists in the `/pasteur/helix/projects/ghfc_wgs/tools/bin` directory.

@@ -62,6 +62,7 @@ workflow {
     Data directory   : ${params.data}
     Steps to run     : ${params.steps.join(', ')}
     Reference        : ${params.ref_name}
+    Work directory   : ${workflow.workDir}
     ========================================================================================
     """
     
