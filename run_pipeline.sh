@@ -140,13 +140,9 @@ if ! command -v nextflow &> /dev/null; then
     exit 1
 fi
 
-# Pull the latest version of the workflow
-echo "Pulling latest version of workflow..."
-nextflow pull bourgeron-lab/ghfc-ngs
-echo ""
 
 # Construct the command
-CMD="nextflow run bourgeron-lab/ghfc-ngs"
+CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
 CMD="$CMD -profile $PROFILE"
 CMD="$CMD -work-dir $WORK_DIR"
 
