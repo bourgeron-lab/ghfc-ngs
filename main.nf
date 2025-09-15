@@ -50,7 +50,7 @@ workflow {
     // Read and validate pedigree file
     def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
     
-    if (!file(pedigree_file).exists()) {
+    if (!new File(pedigree_file).exists()) {
         exit 1, "ERROR: Pedigree file not found: ${pedigree_file}"
     }
     
@@ -192,7 +192,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         def family_vcf_path = "${params.data}/vcf/families/${fid}.vcf.gz"
         def family_tbi_path = "${params.data}/vcf/families/${fid}.vcf.gz.tbi"
         
-        if (file(family_vcf_path).exists() && file(family_tbi_path).exists()) {
+        if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) {
             plan.family_calling.existing.add(fid)
         } else {
             plan.family_calling.needed.add(fid)
@@ -204,7 +204,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         def gvcf_path = "${params.data}/gvcf/${barcode}.g.vcf.gz"
         def gvcf_tbi_path = "${params.data}/gvcf/${barcode}.g.vcf.gz.tbi"
         
-        if (file(gvcf_path).exists() && file(gvcf_tbi_path).exists()) {
+        if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists()) {
             plan.deepvariant.existing.add(barcode)
         } else {
             // Only need DeepVariant if the individual's family needs family calling
@@ -220,7 +220,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         def cram_path = "${params.data}/cram/${barcode}.${params.ref_name}.cram"
         def crai_path = "${params.data}/cram/${barcode}.${params.ref_name}.cram.crai"
         
-        if (file(cram_path).exists() && file(crai_path).exists()) {
+        if (new File(cram_path).exists() && new File(crai_path).exists()) {
             plan.alignment.existing.add(barcode)
         } else {
             // Only need alignment if the individual needs DeepVariant
