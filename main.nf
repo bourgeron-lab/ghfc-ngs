@@ -328,10 +328,13 @@ def createChannels(analysis_plan) {
             .map { cram ->
                 def barcode = cram.name.tokenize('.')[0]
                 def crai_path = "${cram}.crai"
-                [barcode, cram, file(crai_path)]
+                [barcode, cram, crai_path]
             }
-            .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.alignment.needed && file("${cram}.crai").exists()
+            .filter { barcode, cram, crai_path -> 
+                barcode in analysis_plan.alignment.needed && new File(crai_path).exists()
+            }
+            .map { barcode, cram, crai_path ->
+                [barcode, cram, file(crai_path)]
             }
     } else {
         channels.cram_37_files = Channel.empty()
@@ -344,10 +347,13 @@ def createChannels(analysis_plan) {
             .map { cram ->
                 def barcode = cram.name.tokenize('.')[0]
                 def crai_path = "${cram}.crai"
-                [barcode, cram, file(crai_path)]
+                [barcode, cram, crai_path]
             }
-            .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.alignment.needed && file("${cram}.crai").exists()
+            .filter { barcode, cram, crai_path -> 
+                barcode in analysis_plan.alignment.needed && new File(crai_path).exists()
+            }
+            .map { barcode, cram, crai_path ->
+                [barcode, cram, file(crai_path)]
             }
     } else {
         channels.cram_38_files = Channel.empty()
@@ -359,10 +365,13 @@ def createChannels(analysis_plan) {
         .map { cram ->
             def barcode = cram.name.tokenize('.')[0]
             def crai_path = "${cram}.crai"
-            [barcode, cram, file(crai_path)]
+            [barcode, cram, crai_path]
         }
-        .filter { barcode, cram, crai -> 
-            barcode in analysis_plan.alignment.existing && file("${cram}.crai").exists()
+        .filter { barcode, cram, crai_path -> 
+            barcode in analysis_plan.alignment.existing && new File(crai_path).exists()
+        }
+        .map { barcode, cram, crai_path ->
+            [barcode, cram, file(crai_path)]
         }
     
     // Create channel for existing gVCF files
@@ -371,10 +380,13 @@ def createChannels(analysis_plan) {
         .map { gvcf ->
             def barcode = gvcf.name.tokenize('.')[0]
             def tbi_path = "${gvcf}.tbi"
-            [barcode, gvcf, file(tbi_path)]
+            [barcode, gvcf, tbi_path]
         }
-        .filter { barcode, gvcf, tbi -> 
-            barcode in analysis_plan.deepvariant.existing && file("${gvcf}.tbi").exists()
+        .filter { barcode, gvcf, tbi_path -> 
+            barcode in analysis_plan.deepvariant.existing && new File(tbi_path).exists()
+        }
+        .map { barcode, gvcf, tbi_path ->
+            [barcode, gvcf, file(tbi_path)]
         }
     
     return channels
