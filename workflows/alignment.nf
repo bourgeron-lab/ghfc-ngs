@@ -6,6 +6,8 @@
 // Include modules
 include { BWA_MEM2_ALIGN } from '../modules/bwa_mem2'
 include { BAZAM_BWA_MEM2_REALIGN } from '../modules/bazam_bwa_mem2'
+include { BAZAM_BWA_MEM2_REALIGN as BAZAM_BWA_MEM2_REALIGN_37 } from '../modules/bazam_bwa_mem2'
+include { BAZAM_BWA_MEM2_REALIGN as BAZAM_BWA_MEM2_REALIGN_38 } from '../modules/bazam_bwa_mem2'
 include { MERGE_UNITS } from '../modules/merge_units'
 include { INDEX_CRAM } from '../modules/index_cram'
 
@@ -55,7 +57,7 @@ workflow ALIGNMENT {
         [barcode, cram, crai, params.old_ref_37] 
     }
     
-    BAZAM_BWA_MEM2_REALIGN(
+    BAZAM_BWA_MEM2_REALIGN_37(
         cram_37_with_oldref,
         params.ref,
         params.bwa_mem2,
@@ -73,7 +75,7 @@ workflow ALIGNMENT {
         [barcode, cram, crai, params.old_ref_38] 
     }
     
-    BAZAM_BWA_MEM2_REALIGN(
+    BAZAM_BWA_MEM2_REALIGN_38(
         cram_38_with_oldref,
         params.ref,
         params.bwa_mem2,
@@ -87,7 +89,9 @@ workflow ALIGNMENT {
     )
     
     // Combine all final CRAM outputs
-    all_crams = MERGE_UNITS.out.cram.mix(BAZAM_BWA_MEM2_REALIGN.out.cram)
+    all_crams = MERGE_UNITS.out.cram
+        .mix(BAZAM_BWA_MEM2_REALIGN_37.out.cram)
+        .mix(BAZAM_BWA_MEM2_REALIGN_38.out.cram)
 
     emit:
     crams = all_crams    // channel: [barcode, cram_file, crai_file]
