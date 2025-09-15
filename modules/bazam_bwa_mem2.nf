@@ -5,9 +5,8 @@ process BAZAM_BWA_MEM2_REALIGN {
     publishDir "${data_dir}/cram", mode: 'copy'
 
     input:
-    tuple val(barcode), path(input_cram), path(input_crai)
+    tuple val(barcode), path(input_cram), path(input_crai), val(oldref)
     val ref
-    val oldref
     val bwa_mem2_path
     val bazam_path
     val samblaster_path

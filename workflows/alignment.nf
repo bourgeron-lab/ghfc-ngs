@@ -13,7 +13,8 @@ workflow ALIGNMENT {
     
     take:
     fastq_files     // channel: [barcode, unit, fastq1, fastq2, project, flowcell, dual, lane]
-    cram_files      // channel: [barcode, cram, crai]
+    cram_37_files   // channel: [barcode, cram, crai]
+    cram_38_files   // channel: [barcode, cram, crai]
     
     main:
     
@@ -49,11 +50,14 @@ workflow ALIGNMENT {
         params.ref_name   // val ref_name
     )
     
-    // Bazam realignment from existing CRAM files
+    // Bazam realignment from GRCh37 CRAM files
+    cram_37_with_oldref = cram_37_files.map { barcode, cram, crai -> 
+        [barcode, cram, crai, params.old_ref_37] 
+    }
+    
     BAZAM_BWA_MEM2_REALIGN(
-        cram_files,
+        cram_37_with_oldref,
         params.ref,
-        params.oldref,
         params.bwa_mem2,
         params.bazam,
         params.samblaster,
@@ -64,7 +68,23 @@ workflow ALIGNMENT {
         params.ref_name
     )
     
-
+    // Bazam realignment from GRCh38 CRAM files
+    cram_38_with_oldref = cram_38_files.map { barcode, cram, crai -> 
+        [barcode, cram, crai, params.old_ref_38] 
+    }
+    
+    BAZAM_BWA_MEM2_REALIGN(
+        cram_38_with_oldref,
+        params.ref,
+        params.bwa_mem2,
+        params.bazam,
+        params.samblaster,
+        params.sambamba,
+        params.samtools,
+        params.scratch,
+        params.data,
+        params.ref_name
+    )
     
     // Combine all final CRAM outputs
     all_crams = MERGE_UNITS.out.cram.mix(BAZAM_BWA_MEM2_REALIGN.out.cram)

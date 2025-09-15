@@ -92,7 +92,8 @@ workflow {
         
         ALIGNMENT(
             channels.fastq_files,
-            channels.cram_files_for_realignment
+            channels.cram_37_files,
+            channels.cram_38_files
         )
         
         aligned_crams = ALIGNMENT.out.crams
@@ -320,20 +321,36 @@ def createChannels(analysis_plan) {
         channels.fastq_files = Channel.empty()
     }
     
-    // Create CRAM channel for realignment
-    if (params.cram4realignment_pattern && analysis_plan.alignment.needed.size() > 0) {
-        channels.cram_files_for_realignment = Channel
-            .fromPath("${params.data}/cram4realignment/${params.cram4realignment_pattern}")
+    // Create CRAM channel for GRCh37 realignment
+    if (params.old_cram_37 && analysis_plan.alignment.needed.size() > 0) {
+        channels.cram_37_files = Channel
+            .fromPath("${params.old_cram_37}/*.cram")
             .map { cram ->
                 def barcode = cram.name.tokenize('.')[0]
                 def crai = file("${cram}.crai")
                 [barcode, cram, crai]
             }
             .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.alignment.needed 
+                barcode in analysis_plan.alignment.needed && crai.exists()
             }
     } else {
-        channels.cram_files_for_realignment = Channel.empty()
+        channels.cram_37_files = Channel.empty()
+    }
+    
+    // Create CRAM channel for GRCh38 realignment
+    if (params.old_cram_38 && analysis_plan.alignment.needed.size() > 0) {
+        channels.cram_38_files = Channel
+            .fromPath("${params.old_cram_38}/*.cram")
+            .map { cram ->
+                def barcode = cram.name.tokenize('.')[0]
+                def crai = file("${cram}.crai")
+                [barcode, cram, crai]
+            }
+            .filter { barcode, cram, crai -> 
+                barcode in analysis_plan.alignment.needed && crai.exists()
+            }
+    } else {
+        channels.cram_38_files = Channel.empty()
     }
     
     // Create channel for existing CRAM files
