@@ -2,7 +2,7 @@
 # Copy this file and modify the paths according to your setup
 
 # Pipeline steps control - ALL REQUIRED STEPS MUST BE LISTED
-steps: ["alignment", "deepvariant", "family_calling"] # Available steps: alignment, deepvariant, family_calling
+steps: ["alignment", "deepvariant", "family_calling", "bedgraphs"] # Available steps: alignment, deepvariant, family_calling, bedgraphs
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"

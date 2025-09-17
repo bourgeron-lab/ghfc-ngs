@@ -14,6 +14,7 @@ nextflow.enable.dsl = 2
 include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT } from './workflows/deepvariant'
 include { FAMILY_CALLING } from './workflows/family_calling'
+include { BEDGRAPHS } from './workflows/bedgraphs'
 
 /*
 ========================================================================================
@@ -29,11 +30,11 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, bedgraphs"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'bedgraphs']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -144,6 +145,19 @@ workflow {
         
         FAMILY_CALLING(family_gvcfs)
     }
+    
+    // Run bedgraphs generation if needed and allowed
+    if (analysis_plan.bedgraphs.needed.size() > 0 && 'bedgraphs' in params.steps) {
+        log.info "Running bedgraph generation for ${analysis_plan.bedgraphs.needed.size()} individuals..."
+        
+        // Filter CRAM files for individuals that need bedgraphs
+        bedgraphs_crams = all_available_crams
+            .filter { barcode, cram, crai -> 
+                barcode in analysis_plan.bedgraphs.needed 
+            }
+        
+        BEDGRAPHS(bedgraphs_crams)
+    }
 }
 
 /*
@@ -184,7 +198,8 @@ def createAnalysisPlan(families, individuals, family_members) {
     def plan = [
         alignment: [needed: [], existing: []],
         deepvariant: [needed: [], existing: []],
-        family_calling: [needed: [], existing: []]
+        family_calling: [needed: [], existing: []],
+        bedgraphs: [needed: [], existing: []]
     ]
     
     // Check existing family VCF files
@@ -230,6 +245,21 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing bedgraph files
+    individuals.each { barcode ->
+        def bedgraph_path = "${params.data}/bedgraphs/${barcode}.by${params.bin}.bedgraph.gz"
+        def bedgraph_tbi_path = "${params.data}/bedgraphs/${barcode}.by${params.bin}.bedgraph.gz.tbi"
+        
+        if (new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
+            plan.bedgraphs.existing.add(barcode)
+        } else {
+            // Only need bedgraphs if the step is requested and CRAM files exist or will be created
+            if ('bedgraphs' in params.steps && (barcode in plan.alignment.existing || barcode in plan.alignment.needed)) {
+                plan.bedgraphs.needed.add(barcode)
+            }
+        }
+    }
+    
     return plan
 }
 
@@ -249,6 +279,10 @@ def displayAnalysisSummary(analysis_plan) {
     FAMILY_CALLING:
         - Existing family VCFs: ${analysis_plan.family_calling.existing.size()} families
         - Need family calling: ${analysis_plan.family_calling.needed.size()} families
+    
+    BEDGRAPHS:
+        - Existing bedgraph files: ${analysis_plan.bedgraphs.existing.size()} individuals
+        - Need bedgraph generation: ${analysis_plan.bedgraphs.needed.size()} individuals
     ========================================================================================
     """
     
@@ -260,6 +294,9 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.family_calling.needed) {
         log.info "Families needing family calling: ${analysis_plan.family_calling.needed.join(', ')}"
+    }
+    if (analysis_plan.bedgraphs.needed) {
+        log.info "Individuals needing bedgraph generation: ${analysis_plan.bedgraphs.needed.join(', ')}"
     }
 }
 
@@ -281,6 +318,11 @@ def validateStepsAvailability(analysis_plan) {
         errors.add("Family calling step is required for ${analysis_plan.family_calling.needed.size()} families but not included in steps parameter")
     }
     
+    // Check if bedgraphs is needed but not available
+    if (analysis_plan.bedgraphs.needed.size() > 0 && !('bedgraphs' in params.steps)) {
+        errors.add("Bedgraphs step is required for ${analysis_plan.bedgraphs.needed.size()} individuals but not included in steps parameter")
+    }
+    
     if (errors) {
         log.error """
         ========================================================================================
@@ -289,7 +331,7 @@ def validateStepsAvailability(analysis_plan) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant, family_calling
+        Available steps: alignment, deepvariant, family_calling, bedgraphs
         ========================================================================================
         """
         exit 1, "Pipeline stopped due to missing required steps"
