@@ -26,6 +26,9 @@ process BAZAM_BWA_MEM2_REALIGN {
     mkdir -p ${scratch_dir}/tmp
     set -euo pipefail
 
+    echo "Starting Bazam + BWA-MEM2 realignment for sample ${barcode} at \$(date)"
+    echo "read_groupe: ${read_group}"
+
     java -Xmx12g -Dsamjdk.reference_fasta=${oldref} -jar ${bazam_path} -bam ${input_cram} \\
         | ${bwa_mem2_path} mem -Y -t ${task.cpus - 4} -p \\
             -R "${read_group}" \\
@@ -35,7 +38,11 @@ process BAZAM_BWA_MEM2_REALIGN {
         | ${sambamba_path} sort --tmpdir=${scratch_dir}/tmp/ -l 0 -m 50GiB -t ${task.cpus} -o /dev/stdout /dev/stdin \\
         | ${samtools_path} view -C -@${task.cpus} -T ${ref} -o ${barcode}.${ref_name}.cram -
 
+    echo "cram ${barcode}.${ref_name}.cram created successfully. \$(date)"
+
     ${samtools_path} index ${barcode}.${ref_name}.cram
+
+    echo "cram ${barcode}.${ref_name}.cram indexed successfully. \$(date)"
     """
 
     stub:
