@@ -29,6 +29,7 @@ process DV_MAKE_EXAMPLES {
                 --small_model_indel_gq_threshold "28" \\
                 --small_model_snp_gq_threshold "20" \\
                 --small_model_vaf_context_window_size "51" \\
+                --nosmall_model_call_multiallelics \\
                 --track_ref_reads \\
                 --trained_small_model_path "/opt/smallmodels/wgs" \\
                 --task \$i
