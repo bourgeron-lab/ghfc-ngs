@@ -127,6 +127,7 @@ workflow {
     all_available_gvcfs = channels.existing_gvcfs.mix(deepvariant_gvcfs ?: Channel.empty())
     
     // Run family calling if needed and allowed
+    def family_vcfs_output = Channel.empty()
     if (analysis_plan.family_calling.needed.size() > 0 && 'family_calling' in params.steps) {
         log.info "Running family calling for ${analysis_plan.family_calling.needed.size()} families..."
         
@@ -145,6 +146,7 @@ workflow {
             }
         
         FAMILY_CALLING(family_gvcfs)
+        family_vcfs_output = FAMILY_CALLING.out.family_vcfs
     }
     
     // Run VEP annotation if needed and allowed
@@ -152,7 +154,7 @@ workflow {
         log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
         
         // Get all available family VCFs (existing + newly created)
-        all_available_family_vcfs = channels.existing_family_vcfs.mix(FAMILY_CALLING.out.family_vcfs ?: Channel.empty())
+        all_available_family_vcfs = channels.existing_family_vcfs.mix(family_vcfs_output ?: Channel.empty())
         
         // Filter for families that need VEP annotation
         vep_vcfs = all_available_family_vcfs
