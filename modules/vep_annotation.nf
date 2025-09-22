@@ -1,41 +1,55 @@
 #!/usr/bin/env nextflow
 
 /*
- * Script to run VEP on split VCF files
+ * Simple VEP annotation module for family VCF files
  */
 
 nextflow.enable.dsl=2
 
-process runVEP {
+process VEP_ANNOTATION {
   /*
-  Run VEP on VCF files
+  Run VEP annotation on family VCF files
+
+  Parameters
+  ----------
+  fid : str
+    Family ID
+  vcf : path
+    Input VCF file
+  vcf_index : path
+    VCF index file (.tbi or .csi)
+  vep_config : val
+    Path to VEP configuration file
 
   Returns
   -------
-  Tuple of original VCF, split VCF file after running VEP, tabix index of that file, vep config file
+  Tuple of family ID, annotated VCF file, and its index
   */
 
-  publishDir "${params.data}/families/${fid}/vcfs",
-    pattern: "${fid}.${params.vep_config_name}.*.vcf.gz*",
-    mode:'copy'
+  tag "$fid"
 
+  publishDir "${params.output_dir}/families/${fid}/vcfs",
+    mode: 'copy',
+    pattern: "${fid}.${params.vep_config_name}.vcf.gz*"
+
+  container 'ensemblorg/ensembl-vep:release_110.1'
+  
   label 'vep'
 
   input:
-  tuple val(meta), val(fid), path(input), path(index), val(vep_config)
+  tuple val(fid), path(vcf), path(vcf_index), val(vep_config)
 
   output:
-  tuple val(meta), val(fid), path("${out}{.gz,}"), path("${out}{.gz,}.{tbi,csi}"), val("${vep_config}"), emit: files
+  tuple val(fid), path("${output_vcf}.gz"), path("${output_vcf}.gz.tbi"), emit: annotated_vcfs
 
   script:
-  index_type = meta.index_type
-  out = "${fid}.${params.vep_config_name}.${input.baseName}.vcf"
+  output_vcf = "${fid}.${params.vep_config_name}.vcf"
 
   """
   # Run VEP annotation
   vep \\
-      --input_file ${input} \\
-      --output_file ${out} \\
+      --input_file ${vcf} \\
+      --output_file ${output_vcf} \\
       --config ${vep_config} \\
       --compress_output bgzip \\
       --fork ${task.cpus} \\
@@ -44,12 +58,13 @@ process runVEP {
       --force_overwrite
 
   # Index the annotated VCF
-  tabix -f -p vcf ${out}.gz
+  tabix -f -p vcf ${output_vcf}.gz
   """
 
   stub:
+  output_vcf = "${fid}.${params.vep_config_name}.vcf"
   """
-  touch ${out}.gz
-  touch ${out}.gz.tbi
+  touch ${output_vcf}.gz
+  touch ${output_vcf}.gz.tbi
   """
 }

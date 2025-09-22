@@ -39,7 +39,6 @@ glnexus_config: "DeepVariant_unfiltered"
 # VEP annotation configuration
 vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
 vep_config_name: "ensembl_vep_115" # Name suffix for output files
-bin_size: 10000 # Number of variants per VCF chunk for parallel VEP processing
 
 # SLURM account and partition settings
 slurm_account: "your_account"

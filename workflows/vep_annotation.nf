@@ -1,13 +1,10 @@
 /*
- * VEP Annotation Workflow
- * Annotates family VCF files using Ensembl VEP with chunking for parallel processing
+ * Simple VEP Annotation Workflow
+ * Annotates family VCF files using Ensembl VEP
  */
 
-// Include modules
-include { generateSplits } from '../modules/generate_splits'
-include { splitVCF } from '../modules/split_vcf'
-include { runVEP } from '../modules/vep_annotation'
-include { mergeVCF } from '../modules/merge_vcf'
+// Include the VEP annotation module
+include { VEP_ANNOTATION } from '../modules/vep_annotation'
 
 workflow VEP_ANNOTATION {
 
@@ -16,52 +13,15 @@ workflow VEP_ANNOTATION {
 
     main:
 
-    // Prepare VEP input channel
+    // Prepare VEP input channel - add vep_config to each tuple
     vep_input = family_vcfs
         .map { fid, vcf, tbi ->
-            def meta = [:]
-            meta.index_type = "tbi"  // Assuming TBI index
-            meta.fid = fid  // Store family ID in metadata
-            [meta, vcf, tbi, params.vep_config]
+            [fid, vcf, tbi, params.vep_config]
         }
 
-    // Run VEP with chunking
-    // Generate split files that each contain bin_size number of variants
-    generateSplits(vep_input)
-
-    // Split VCF using split files
-    generateSplits.out
-        .transpose()
-        .set { split_input }
-
-    splitVCF(split_input)
-
-    // Run VEP for each split VCF file
-    vep_input_split = splitVCF.out
-        .map { meta, original, vcfs, indices, vep_config ->
-            // Create individual tuples for each split VCF
-            def result = []
-            vcfs.eachWithIndex { vcf, i ->
-                def split_meta = meta.clone()
-                split_meta.split_index = i
-                // Extract family ID from metadata
-                def fid = meta.fid
-                result << [split_meta, fid, vcf, indices[i], vep_config]
-            }
-            result
-        }
-        .flatten()
-        .collate(5)
-
-    runVEP(vep_input_split)
-
-    // Merge split VCF files back into single annotated VCF
-    runVEP.out.files
-        .groupTuple(by: [0, 1, 4])
-        .set { merge_input }
-
-    mergeVCF(merge_input)
+    // Run VEP annotation
+    VEP_ANNOTATION(vep_input)
 
     emit:
-    annotated_vcfs = mergeVCF.out
+    annotated_vcfs = VEP_ANNOTATION.out.annotated_vcfs
 }
