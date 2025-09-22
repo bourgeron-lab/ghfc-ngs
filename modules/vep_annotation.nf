@@ -15,10 +15,10 @@ process VEP_ANNOTATION {
     # Run VEP annotation
     vep \\
         --input_file ${vcf} \\
-        --output_file ${fid}.${params.vep_config_name}.vcf \\
+        --output_file ${fid}.${params.vep_config_name}.vcf.gz \\
         --config ${params.vep_config} \\
         --compress_output bgzip \\
-        --fork 4 \\
+        --fork ${task.cpus} \\
         --format vcf \\
         --vcf \\
         --force_overwrite
