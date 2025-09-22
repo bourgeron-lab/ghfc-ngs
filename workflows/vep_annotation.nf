@@ -21,7 +21,8 @@ workflow VEP_ANNOTATION {
         .map { fid, vcf, tbi ->
             def meta = [:]
             meta.index_type = "tbi"  // Assuming TBI index
-            [meta, fid, vcf, tbi, params.vep_config]
+            meta.fid = fid  // Store family ID in metadata
+            [meta, vcf, tbi, params.vep_config]
         }
 
     // Run VEP with chunking
@@ -43,7 +44,9 @@ workflow VEP_ANNOTATION {
             vcfs.eachWithIndex { vcf, i ->
                 def split_meta = meta.clone()
                 split_meta.split_index = i
-                result << [split_meta, original, vcf, indices[i], vep_config]
+                // Extract family ID from metadata
+                def fid = meta.fid
+                result << [split_meta, fid, vcf, indices[i], vep_config]
             }
             result
         }
