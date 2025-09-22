@@ -128,6 +128,7 @@ workflow {
     
     // Run family calling if needed and allowed
     family_vcfs_output = Channel.empty()
+    normalized_vcfs_output = Channel.empty()
     if (analysis_plan.family_calling.needed.size() > 0 && 'family_calling' in params.steps) {
         log.info "Running family calling for ${analysis_plan.family_calling.needed.size()} families..."
         
@@ -223,31 +224,36 @@ def createAnalysisPlan(families, individuals, family_members) {
         vep_annotation: [needed: [], existing: []]
     ]
     
-    // Check existing family VCF files
+    // Check existing family VCF files and normalized VCFs
     families.each { fid ->
         def family_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz"
         def family_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
+        def norm_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
+        def norm_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
         
-        if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) {
+        // Family calling is "existing" only if BOTH raw VCF AND normalized VCF exist
+        if ((new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) &&
+            (new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists())) {
             plan.family_calling.existing.add(fid)
         } else {
+            // Need family calling workflow if either raw VCF or normalized VCF is missing
             plan.family_calling.needed.add(fid)
         }
     }
-    
+
     // Check existing VEP annotated files
     families.each { fid ->
         def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz"
         def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz.tbi"
-        
+
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
         } else {
-            // Only need VEP if normalized VCF exists or will be created
+            // Need VEP if normalized VCFs exist (created by family_calling normalization step)
             def norm_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
             def norm_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
-            
-            if ((new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists()) || 
+
+            if ((new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists()) ||
                 (fid in plan.family_calling.existing || fid in plan.family_calling.needed)) {
                 plan.vep_annotation.needed.add(fid)
             }
