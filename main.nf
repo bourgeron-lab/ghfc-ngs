@@ -127,7 +127,7 @@ workflow {
     all_available_gvcfs = channels.existing_gvcfs.mix(deepvariant_gvcfs ?: Channel.empty())
     
     // Run family calling if needed and allowed
-    def family_vcfs_output = Channel.empty()
+    family_vcfs_output = Channel.empty()
     if (analysis_plan.family_calling.needed.size() > 0 && 'family_calling' in params.steps) {
         log.info "Running family calling for ${analysis_plan.family_calling.needed.size()} families..."
         
