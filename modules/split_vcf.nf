@@ -18,7 +18,6 @@ process splitVCF {
   Tuple of original VCF, split VCF files, split VCF index files, vep config file
   */
 
-  cpus params.cpus
   label 'bcftools'
 
   input:

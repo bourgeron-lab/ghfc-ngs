@@ -9,7 +9,7 @@ include { splitVCF } from '../modules/split_vcf'
 include { runVEP } from '../modules/vep_annotation'
 include { mergeVCF } from '../modules/merge_vcf'
 
-workflow VEP_ANNOTATION_WORKFLOW {
+workflow VEP_ANNOTATION {
 
     take:
     family_vcfs    // channel: [fid, vcf, tbi]

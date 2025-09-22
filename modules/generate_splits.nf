@@ -15,7 +15,6 @@ process generateSplits {
   Tuple of VCF, VCF index, split files, vep config file
   */
 
-  cpus params.cpus
   label 'bcftools'
 
   input:

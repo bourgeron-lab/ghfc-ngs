@@ -19,7 +19,6 @@ process runVEP {
     pattern: "${fid}.${params.vep_config_name}.*.vcf.gz*",
     mode:'copy'
 
-  cpus params.cpus
   label 'vep'
 
   input:

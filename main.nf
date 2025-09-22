@@ -15,7 +15,7 @@ include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT } from './workflows/deepvariant'
 include { FAMILY_CALLING } from './workflows/family_calling'
 include { BEDGRAPHS } from './workflows/bedgraphs'
-include { VEP_ANNOTATION_WORKFLOW } from './workflows/vep_annotation'
+include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
 /*
 ========================================================================================
@@ -164,7 +164,7 @@ workflow {
                 fid in analysis_plan.vep_annotation.needed 
             }
         
-        VEP_ANNOTATION_WORKFLOW(vep_vcfs)
+        VEP_ANNOTATION(vep_vcfs)
     }
     
     // Run bedgraphs generation if needed and allowed
