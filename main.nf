@@ -8,17 +8,7 @@
 ----------------------------------------------------------------------------------------
 */
 
-ne    // Create channel for existing CRAM files
-    channels.existing_crams = Channel
-        .fromPath("${params.data}/samples/*/sequences/*.${params.ref_name}.cram")
-        .map { cram ->
-            def barcode = cram.name.tokenize('.')[0]
-            def crai_path = "${cram}.crai"
-            [barcode, cram, file(crai_path)]
-        }
-        .filter { barcode, cram, crai -> 
-            barcode in analysis_plan.alignment.existing && new File("${cram}.crai").exists()
-        }le.dsl = 2
+nextflow.enable.dsl = 2
 
 // Include workflows
 include { ALIGNMENT } from './workflows/alignment'
