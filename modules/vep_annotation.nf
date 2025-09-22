@@ -6,7 +6,7 @@
 
 nextflow.enable.dsl=2
 
-process VEP_ANNOTATION {
+process runVEP {
   /*
   Run VEP annotation on family VCF files
 

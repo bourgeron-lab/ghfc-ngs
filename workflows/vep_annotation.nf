@@ -4,7 +4,7 @@
  */
 
 // Include the VEP annotation module
-include { VEP_ANNOTATION } from '../modules/vep_annotation'
+include { runVEP } from '../modules/vep_annotation'
 
 workflow VEP_ANNOTATION {
 
@@ -20,8 +20,8 @@ workflow VEP_ANNOTATION {
         }
 
     // Run VEP annotation
-    VEP_ANNOTATION(vep_input)
+    runVEP(vep_input)
 
     emit:
-    annotated_vcfs = VEP_ANNOTATION.out.annotated_vcfs
+    annotated_vcfs = runVEP.out.annotated_vcfs
 }
