@@ -21,7 +21,7 @@ process NORMALIZE_VCF {
         bcftools norm -m - -w 1000 -c s -f ${params.ref} --threads 4 -Oz -o ${fid}.norm.vcf.gz
 
     # Index the normalized VCF
-    tabix -p vcf ${fid}.norm.vcf.gz
+    bcftools index --tbi ${fid}.norm.vcf.gz
     """
 
     stub:
