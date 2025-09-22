@@ -49,7 +49,7 @@ process runVEP {
   # Run VEP annotation
   vep \\
       --input_file ${vcf} \\
-      --output_file ${output_vcf} \\
+      --output_file ${output_vcf}.gz \\
       --config ${vep_config} \\
       --compress_output bgzip \\
       --fork ${task.cpus} \\
