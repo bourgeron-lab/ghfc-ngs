@@ -1,35 +1,56 @@
-process VEP_ANNOTATION {
+#!/usr/bin/env nextflow
 
-    tag "$fid"
+/*
+ * Script to run VEP on split VCF files
+ */
 
-    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
+nextflow.enable.dsl=2
 
-    input:
-    tuple val(fid), path(vcf), path(tbi)
+process runVEP {
+  /*
+  Run VEP on VCF files
 
-    output:
-    tuple val(fid), path("${fid}.${params.vep_config_name}.vcf.gz"), path("${fid}.${params.vep_config_name}.vcf.gz.tbi"), emit: annotated_vcf
+  Returns
+  -------
+  Tuple of original VCF, split VCF file after running VEP, tabix index of that file, vep config file
+  */
 
-    script:
-    """
-    # Run VEP annotation
-    vep \\
-        --input_file ${vcf} \\
-        --output_file ${fid}.${params.vep_config_name}.vcf.gz \\
-        --config ${params.vep_config} \\
-        --compress_output bgzip \\
-        --fork ${task.cpus} \\
-        --format vcf \\
-        --vcf \\
-        --force_overwrite
+  publishDir "${params.data}/families/${fid}/vcfs",
+    pattern: "${fid}.${params.vep_config_name}.*.vcf.gz*",
+    mode:'copy'
 
-    # Index the annotated VCF
-    tabix -f -p vcf ${fid}.${params.vep_config_name}.vcf.gz
-    """
+  cpus params.cpus
+  label 'vep'
 
-    stub:
-    """
-    touch ${fid}.${params.vep_config_name}.vcf.gz
-    touch ${fid}.${params.vep_config_name}.vcf.gz.tbi
-    """
+  input:
+  tuple val(meta), val(fid), path(input), path(index), path(vep_config)
+
+  output:
+  tuple val(meta), val(fid), path("${out}{.gz,}"), path("${out}{.gz,}.{tbi,csi}"), val("${vep_config}"), emit: files
+
+  script:
+  index_type = meta.index_type
+  out = "${fid}.${params.vep_config_name}.${input.baseName}.vcf"
+
+  """
+  # Run VEP annotation
+  vep \\
+      --input_file ${input} \\
+      --output_file ${out} \\
+      --config ${vep_config} \\
+      --compress_output bgzip \\
+      --fork ${task.cpus} \\
+      --format vcf \\
+      --vcf \\
+      --force_overwrite
+
+  # Index the annotated VCF
+  tabix -f -p vcf ${out}.gz
+  """
+
+  stub:
+  """
+  touch ${out}.gz
+  touch ${out}.gz.tbi
+  """
 }
