@@ -189,6 +189,7 @@ vep_config_name: "ensembl_vep_115"         # Name suffix for output files
 The pipeline automatically detects existing files and skips unnecessary work:
 
 - **Family VCF files**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz`
+- **Normalized VCF files**: `${data}/families/${FID}/vcfs/${FID}.norm.vcf.gz`
 - **VEP annotated VCF files**: `${data}/families/${FID}/vcfs/${FID}.${vep_config_name}.vcf.gz`
 - **Individual gVCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz`
 - **CRAM files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram`
@@ -228,6 +229,8 @@ data/
         └── vcfs/
             ├── FID001.vcf.gz
             ├── FID001.vcf.gz.tbi
+            ├── FID001.norm.vcf.gz
+            ├── FID001.norm.vcf.gz.tbi
             ├── FID001.ensembl_vep_115.vcf.gz
             └── FID001.ensembl_vep_115.vcf.gz.tbi
 ```
@@ -271,6 +274,8 @@ The pipeline generates:
 
 - **Family VCF files**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz`
 - **Family VCF indices**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz.tbi`
+- **Normalized VCF files**: `${data}/families/${FID}/vcfs/${FID}.norm.vcf.gz`
+- **Normalized VCF indices**: `${data}/families/${FID}/vcfs/${FID}.norm.vcf.gz.tbi`
 
 ### VEP Annotation Outputs
 

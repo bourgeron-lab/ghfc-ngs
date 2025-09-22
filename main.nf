@@ -147,17 +147,18 @@ workflow {
         
         FAMILY_CALLING(family_gvcfs)
         family_vcfs_output = FAMILY_CALLING.out.family_vcfs
+        normalized_vcfs_output = FAMILY_CALLING.out.normalized_vcfs
     }
     
     // Run VEP annotation if needed and allowed
     if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
         log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
         
-        // Get all available family VCFs (existing + newly created)
-        all_available_family_vcfs = channels.existing_family_vcfs.mix(family_vcfs_output ?: Channel.empty())
+        // Get all available normalized family VCFs (existing + newly created)
+        all_available_normalized_vcfs = channels.existing_normalized_vcfs.mix(normalized_vcfs_output ?: Channel.empty())
         
         // Filter for families that need VEP annotation
-        vep_vcfs = all_available_family_vcfs
+        vep_vcfs = all_available_normalized_vcfs
             .filter { fid, vcf, tbi -> 
                 fid in analysis_plan.vep_annotation.needed 
             }
@@ -242,8 +243,12 @@ def createAnalysisPlan(families, individuals, family_members) {
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
         } else {
-            // Only need VEP if family VCF exists or will be created
-            if (fid in plan.family_calling.existing || fid in plan.family_calling.needed) {
+            // Only need VEP if normalized VCF exists or will be created
+            def norm_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
+            def norm_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
+            
+            if ((new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists()) || 
+                (fid in plan.family_calling.existing || fid in plan.family_calling.needed)) {
                 plan.vep_annotation.needed.add(fid)
             }
         }
@@ -473,7 +478,7 @@ def createChannels(analysis_plan) {
     // Create channel for existing family VCF files
     channels.existing_family_vcfs = Channel
         .fromPath("${params.data}/families/*/vcfs/*.vcf.gz")
-        .filter { vcf -> !vcf.name.contains(params.vep_config_name) }  // Exclude VEP annotated files
+        .filter { vcf -> !vcf.name.contains(params.vep_config_name) && !vcf.name.contains('.norm.') }  // Exclude VEP annotated and normalized files
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
             def tbi_path = "${vcf}.tbi"
@@ -481,6 +486,21 @@ def createChannels(analysis_plan) {
         }
         .filter { fid, vcf, tbi_path -> 
             fid in analysis_plan.family_calling.existing && new File(tbi_path).exists()
+        }
+        .map { fid, vcf, tbi_path ->
+            [fid, vcf, file(tbi_path)]
+        }
+    
+    // Create channel for existing normalized VCF files
+    channels.existing_normalized_vcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.norm.vcf.gz")
+        .map { vcf ->
+            def fid = vcf.parent.parent.name  // Get family ID from path
+            def tbi_path = "${vcf}.tbi"
+            [fid, vcf, tbi_path]
+        }
+        .filter { fid, vcf, tbi_path -> 
+            new File(tbi_path).exists()
         }
         .map { fid, vcf, tbi_path ->
             [fid, vcf, file(tbi_path)]
