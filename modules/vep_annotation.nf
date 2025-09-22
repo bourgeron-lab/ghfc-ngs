@@ -22,7 +22,7 @@ process runVEP {
   label 'vep'
 
   input:
-  tuple val(meta), val(fid), path(input), path(index), path(vep_config)
+  tuple val(meta), val(fid), path(input), path(index), val(vep_config)
 
   output:
   tuple val(meta), val(fid), path("${out}{.gz,}"), path("${out}{.gz,}.{tbi,csi}"), val("${vep_config}"), emit: files
