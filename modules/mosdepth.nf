@@ -2,7 +2,7 @@ process MOSDEPTH {
 
     tag "$barcode"
     
-    publishDir "${data_dir}/bedgraphs", mode: 'copy', pattern: "*.bedgraph.gz"
+    publishDir "${data_dir}/samples/${barcode}/sequences", mode: 'copy', pattern: "*.bedgraph.gz"
 
     input:
     tuple val(barcode), path(cram), path(crai)

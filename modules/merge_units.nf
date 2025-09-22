@@ -2,7 +2,7 @@ process MERGE_UNITS {
     
     tag "$barcode"
     
-    publishDir "${data_dir}/cram", mode: 'copy'
+    publishDir "${data_dir}/samples/${barcode}/sequences", mode: 'copy'
     
     input:
     tuple val(barcode), path(crams), path(crais)

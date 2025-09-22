@@ -2,7 +2,7 @@ process BAZAM_BWA_MEM2_REALIGN {
 
     tag "$barcode"
     
-    publishDir "${data_dir}/cram", mode: 'copy'
+    publishDir "${data_dir}/samples/${barcode}/sequences", mode: 'copy'
 
     input:
     tuple val(barcode), path(input_cram), path(input_crai), val(oldref)

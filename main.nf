@@ -8,13 +8,24 @@
 ----------------------------------------------------------------------------------------
 */
 
-nextflow.enable.dsl = 2
+ne    // Create channel for existing CRAM files
+    channels.existing_crams = Channel
+        .fromPath("${params.data}/samples/*/sequences/*.${params.ref_name}.cram")
+        .map { cram ->
+            def barcode = cram.name.tokenize('.')[0]
+            def crai_path = "${cram}.crai"
+            [barcode, cram, file(crai_path)]
+        }
+        .filter { barcode, cram, crai -> 
+            barcode in analysis_plan.alignment.existing && new File("${cram}.crai").exists()
+        }le.dsl = 2
 
 // Include workflows
 include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT } from './workflows/deepvariant'
 include { FAMILY_CALLING } from './workflows/family_calling'
 include { BEDGRAPHS } from './workflows/bedgraphs'
+include { VEP_ANNOTATION_WORKFLOW } from './workflows/vep_annotation'
 
 /*
 ========================================================================================
@@ -34,7 +45,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'bedgraphs']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'bedgraphs', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -146,6 +157,22 @@ workflow {
         FAMILY_CALLING(family_gvcfs)
     }
     
+    // Run VEP annotation if needed and allowed
+    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
+        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
+        
+        // Get all available family VCFs (existing + newly created)
+        all_available_family_vcfs = channels.existing_family_vcfs.mix(FAMILY_CALLING.out.family_vcfs ?: Channel.empty())
+        
+        // Filter for families that need VEP annotation
+        vep_vcfs = all_available_family_vcfs
+            .filter { fid, vcf, tbi -> 
+                fid in analysis_plan.vep_annotation.needed 
+            }
+        
+        VEP_ANNOTATION_WORKFLOW(vep_vcfs)
+    }
+    
     // Run bedgraphs generation if needed and allowed
     if (analysis_plan.bedgraphs.needed.size() > 0 && 'bedgraphs' in params.steps) {
         log.info "Running bedgraph generation for ${analysis_plan.bedgraphs.needed.size()} individuals..."
@@ -199,13 +226,14 @@ def createAnalysisPlan(families, individuals, family_members) {
         alignment: [needed: [], existing: []],
         deepvariant: [needed: [], existing: []],
         family_calling: [needed: [], existing: []],
-        bedgraphs: [needed: [], existing: []]
+        bedgraphs: [needed: [], existing: []],
+        vep_annotation: [needed: [], existing: []]
     ]
     
     // Check existing family VCF files
     families.each { fid ->
-        def family_vcf_path = "${params.data}/vcf/families/${fid}.vcf.gz"
-        def family_tbi_path = "${params.data}/vcf/families/${fid}.vcf.gz.tbi"
+        def family_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz"
+        def family_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
         
         if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) {
             plan.family_calling.existing.add(fid)
@@ -214,10 +242,25 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing VEP annotated files
+    families.each { fid ->
+        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz"
+        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz.tbi"
+        
+        if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
+            plan.vep_annotation.existing.add(fid)
+        } else {
+            // Only need VEP if family VCF exists or will be created
+            if (fid in plan.family_calling.existing || fid in plan.family_calling.needed) {
+                plan.vep_annotation.needed.add(fid)
+            }
+        }
+    }
+    
     // Check existing individual gVCF files
     individuals.each { barcode ->
-        def gvcf_path = "${params.data}/gvcf/${barcode}.g.vcf.gz"
-        def gvcf_tbi_path = "${params.data}/gvcf/${barcode}.g.vcf.gz.tbi"
+        def gvcf_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz"
+        def gvcf_tbi_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz.tbi"
         
         if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists()) {
             plan.deepvariant.existing.add(barcode)
@@ -232,8 +275,8 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing CRAM files
     individuals.each { barcode ->
-        def cram_path = "${params.data}/cram/${barcode}.${params.ref_name}.cram"
-        def crai_path = "${params.data}/cram/${barcode}.${params.ref_name}.cram.crai"
+        def cram_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram"
+        def crai_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram.crai"
         
         if (new File(cram_path).exists() && new File(crai_path).exists()) {
             plan.alignment.existing.add(barcode)
@@ -247,8 +290,8 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing bedgraph files
     individuals.each { barcode ->
-        def bedgraph_path = "${params.data}/bedgraphs/${barcode}.by${params.bin}.bedgraph.gz"
-        def bedgraph_tbi_path = "${params.data}/bedgraphs/${barcode}.by${params.bin}.bedgraph.gz.tbi"
+        def bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
+        def bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
         
         if (new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
             plan.bedgraphs.existing.add(barcode)
@@ -279,6 +322,10 @@ def displayAnalysisSummary(analysis_plan) {
     FAMILY_CALLING:
         - Existing family VCFs: ${analysis_plan.family_calling.existing.size()} families
         - Need family calling: ${analysis_plan.family_calling.needed.size()} families
+    
+    VEP_ANNOTATION:
+        - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
+        - Need VEP annotation: ${analysis_plan.vep_annotation.needed.size()} families
     
     BEDGRAPHS:
         - Existing bedgraph files: ${analysis_plan.bedgraphs.existing.size()} individuals
@@ -403,7 +450,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing CRAM files
     channels.existing_crams = Channel
-        .fromPath("${params.data}/cram/*.${params.ref_name}.cram")
+        .fromPath("${params.data}/samples/*/sequences/*.${params.ref_name}.cram")
         .map { cram ->
             def barcode = cram.name.tokenize('.')[0]
             def crai_path = "${cram}.crai"
@@ -418,7 +465,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing gVCF files
     channels.existing_gvcfs = Channel
-        .fromPath("${params.data}/gvcf/*.g.vcf.gz")
+        .fromPath("${params.data}/samples/*/deepvariant/*.g.vcf.gz")
         .map { gvcf ->
             def barcode = gvcf.name.tokenize('.')[0]
             def tbi_path = "${gvcf}.tbi"
@@ -429,6 +476,22 @@ def createChannels(analysis_plan) {
         }
         .map { barcode, gvcf, tbi_path ->
             [barcode, gvcf, file(tbi_path)]
+        }
+    
+    // Create channel for existing family VCF files
+    channels.existing_family_vcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.vcf.gz")
+        .filter { vcf -> !vcf.name.contains(params.vep_config_name) }  // Exclude VEP annotated files
+        .map { vcf ->
+            def fid = vcf.parent.parent.name  // Get family ID from path
+            def tbi_path = "${vcf}.tbi"
+            [fid, vcf, tbi_path]
+        }
+        .filter { fid, vcf, tbi_path -> 
+            fid in analysis_plan.family_calling.existing && new File(tbi_path).exists()
+        }
+        .map { fid, vcf, tbi_path ->
+            [fid, vcf, file(tbi_path)]
         }
     
     return channels

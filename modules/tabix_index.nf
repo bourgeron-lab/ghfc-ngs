@@ -2,7 +2,7 @@ process TABIX_INDEX {
 
     tag "$barcode"
     
-    publishDir "${data_dir}/bedgraphs", mode: 'copy', pattern: "*.tbi"
+    publishDir "${data_dir}/samples/${barcode}/sequences", mode: 'copy', pattern: "*.tbi"
 
     input:
     tuple val(barcode), path(bedgraph)

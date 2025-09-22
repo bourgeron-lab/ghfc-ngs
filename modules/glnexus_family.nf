@@ -2,7 +2,7 @@ process GLNEXUS_FAMILY {
     
     tag "$fid"
     
-    publishDir "${params.data}/vcf/families", mode: 'copy'
+    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
     
     input:
     tuple val(fid), val(barcodes), path(gvcfs), path(tbis)

@@ -155,7 +155,7 @@ Key parameters to configure:
 
 ```yaml
 # Pipeline steps - ALL REQUIRED STEPS MUST BE LISTED
-steps: ["alignment", "deepvariant", "family_calling"]
+steps: ["alignment", "deepvariant", "family_calling", "vep_annotation"]
 
 # Data directories
 data: "/path/to/your/data/"
@@ -178,15 +178,20 @@ bazam: "/path/to/bazam.jar"
 
 # GLnexus configuration
 glnexus_config: "DeepVariant_unfiltered"
+
+# VEP annotation configuration
+vep_config: "/path/to/vep/config.ini"      # Path to VEP config INI file
+vep_config_name: "ensembl_vep_115"         # Name suffix for output files
 ```
 
 ### Smart File Detection
 
 The pipeline automatically detects existing files and skips unnecessary work:
 
-- **Family VCF files**: `${data}/vcf/families/${FID}.vcf.gz`
-- **Individual gVCF files**: `${data}/gvcf/${barcode}.g.vcf.gz`
-- **CRAM files**: `${data}/cram/${barcode}.${ref_name}.cram`
+- **Family VCF files**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz`
+- **VEP annotated VCF files**: `${data}/families/${FID}/vcfs/${FID}.${vep_config_name}.vcf.gz`
+- **Individual gVCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz`
+- **CRAM files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram`
 
 If these files exist with their indices, the corresponding steps are skipped.
 
@@ -205,11 +210,26 @@ data/
 │   ├── SAMPLE1.cram
 │   ├── SAMPLE1.cram.crai
 │   └── ...
-├── cram/                          # Output CRAM files (created by pipeline)
-├── gvcf/                          # Output gVCF files (created by pipeline)
-└── vcf/
-    ├── individual/                # Individual VCF files (created by pipeline)
-    └── families/                  # Family VCF files (created by pipeline)
+└── samples/                       # Sample-specific output directories
+    ├── BC001/                     # Sample barcode directory
+    │   ├── sequences/             # CRAM and bedgraph files
+    │   │   ├── BC001.hg38.cram
+    │   │   ├── BC001.hg38.cram.crai
+    │   │   ├── BC001.hg38.bedgraph.gz
+    │   │   └── BC001.hg38.bedgraph.gz.tbi
+    │   └── deepvariant/           # DeepVariant outputs
+    │       ├── BC001.g.vcf.gz
+    │       ├── BC001.g.vcf.gz.tbi
+    │       ├── BC001.vcf.gz
+    │       └── BC001.vcf.gz.tbi
+    └── ...
+└── families/                      # Family-specific output directories
+    └── FID001/                    # Family directory
+        └── vcfs/
+            ├── FID001.vcf.gz
+            ├── FID001.vcf.gz.tbi
+            ├── FID001.ensembl_vep_115.vcf.gz
+            └── FID001.ensembl_vep_115.vcf.gz.tbi
 ```
 
 ### FASTQ File Naming Convention
@@ -236,19 +256,26 @@ The pipeline generates:
 
 ### Alignment Outputs
 
-- **Final CRAM files**: `${data}/cram/${barcode}.${ref_name}.cram`
-- **CRAM indices**: `${data}/cram/${barcode}.${ref_name}.cram.crai`
+- **Final CRAM files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram`
+- **CRAM indices**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram.crai`
+- **Bedgraph files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.bedgraph.gz`
+- **Bedgraph indices**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.bedgraph.gz.tbi`
 
 ### DeepVariant Outputs
 
-- **Individual VCF files**: `${data}/vcf/individual/${barcode}.vcf.gz`
-- **Individual gVCF files**: `${data}/gvcf/${barcode}.g.vcf.gz`
+- **Individual VCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.vcf.gz`
+- **Individual gVCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz`
 - **VCF indices**: `*.vcf.gz.tbi` and `*.g.vcf.gz.tbi`
 
 ### Family Calling Outputs
 
-- **Family VCF files**: `${data}/vcf/families/${FID}.vcf.gz`
-- **Family VCF indices**: `${data}/vcf/families/${FID}.vcf.gz.tbi`
+- **Family VCF files**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz`
+- **Family VCF indices**: `${data}/families/${FID}/vcfs/${FID}.vcf.gz.tbi`
+
+### VEP Annotation Outputs
+
+- **VEP annotated VCF files**: `${data}/families/${FID}/vcfs/${FID}.${vep_config_name}.vcf.gz`
+- **VEP annotated VCF indices**: `${data}/families/${FID}/vcfs/${FID}.${vep_config_name}.vcf.gz.tbi`
 
 ### Pipeline Reports
 

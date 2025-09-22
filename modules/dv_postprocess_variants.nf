@@ -2,8 +2,8 @@ process DV_POSTPROCESS_VARIANTS {
     
     tag "$barcode"
     
-    publishDir "${params.data}/vcf/individual", pattern: "${barcode}.vcf.gz*", mode: 'copy'
-    publishDir "${params.data}/gvcf", pattern: "${barcode}.g.vcf.gz*", mode: 'copy'
+    publishDir "${params.data}/samples/${barcode}/deepvariant", pattern: "${barcode}.vcf.gz*", mode: 'copy'
+    publishDir "${params.data}/samples/${barcode}/deepvariant", pattern: "${barcode}.g.vcf.gz*", mode: 'copy'
     
     input:
     tuple val(barcode), path(called_variants), path(gvcf_records), path(call_variant_outputs)
@@ -15,8 +15,7 @@ process DV_POSTPROCESS_VARIANTS {
     
     script:
     """
-    mkdir -p ${params.data}/vcf/individual
-    mkdir -p ${params.data}/gvcf
+    mkdir -p ${params.data}/samples/${barcode}/deepvariant
 
     ulimit -v unlimited
 

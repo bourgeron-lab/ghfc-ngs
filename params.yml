@@ -2,7 +2,13 @@
 # Copy this file and modify the paths according to your setup
 
 # Pipeline steps control - ALL REQUIRED STEPS MUST BE LISTED
-steps: ["alignment", "deepvariant", "family_calling", "bedgraphs"] # Available steps: alignment, deepvariant, family_calling, bedgraphs
+steps: [
+    "alignment",
+    "deepvariant",
+    "family_calling",
+    "bedgraphs",
+    "vep_annotation",
+  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, vep_annotation
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -29,6 +35,10 @@ bazam: "/pasteur/helix/projects/ghfc_wgs/tools/bazam-1.0.1/bazam.jar"
 
 # GLnexus configuration
 glnexus_config: "DeepVariant_unfiltered"
+
+# VEP annotation configuration
+vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
+vep_config_name: "ensembl_vep_115" # Name suffix for output files
 
 # SLURM account and partition settings
 slurm_account: "your_account"
