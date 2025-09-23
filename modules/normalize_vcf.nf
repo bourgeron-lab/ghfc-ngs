@@ -1,4 +1,4 @@
-process NORM {
+process NORMALIZE {
 
     tag "$fid"
 

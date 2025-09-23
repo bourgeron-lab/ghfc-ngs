@@ -4,7 +4,7 @@
  */
 
 // Include modules
-include { NORM } from '../modules/normalize_vcf'
+include { NORMALIZE } from '../modules/normalize_vcf'
 
 workflow NORM {
 
@@ -14,8 +14,8 @@ workflow NORM {
     main:
 
     // Run normalization for each family VCF
-    NORM(family_vcfs)
+    NORMALIZE(family_vcfs)
 
     emit:
-    normalized_vcfs = NORM.out.normalized_vcf
+    normalized_vcfs = NORMALIZE.out.normalized_vcf
 }
