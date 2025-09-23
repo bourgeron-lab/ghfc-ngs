@@ -28,7 +28,7 @@ process runVEP {
 
   tag "$fid"
 
-  publishDir "${params.output_dir}/families/${fid}/vcfs",
+  publishDir "${params.data}/families/${fid}/vcfs",
     mode: 'copy',
     pattern: "${fid}.${params.vep_config_name}.vcf.gz*"
 

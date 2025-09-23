@@ -5,7 +5,7 @@ process NORMALIZE {
     cpus 4
     memory '12.GB'
 
-    publishDir "${params.output_dir}/families/${fid}/vcfs", mode: 'copy'
+    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
 
     input:
     tuple val(fid), path(vcf), path(tbi)
