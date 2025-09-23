@@ -244,8 +244,8 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing family VCF files 
     families.each { fid ->
-        def family_vcf_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.vcf.gz"
-        def family_tbi_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
+        def family_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz"
+        def family_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
         
         if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) {
             plan.family_calling.existing.add(fid)
@@ -256,8 +256,8 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing normalized VCF files
     families.each { fid ->
-        def norm_vcf_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
-        def norm_tbi_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
+        def norm_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
+        def norm_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
         
         if (new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists()) {
             plan.norm.existing.add(fid)
@@ -271,8 +271,8 @@ def createAnalysisPlan(families, individuals, family_members) {
 
     // Check existing VEP annotated files
     families.each { fid ->
-        def vep_vcf_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz"
-        def vep_tbi_path = "${params.output_dir}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz.tbi"
+        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz"
+        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz.tbi"
 
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
