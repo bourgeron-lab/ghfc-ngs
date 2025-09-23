@@ -146,7 +146,7 @@ CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
 CMD="$CMD -profile $PROFILE"
 
 # Add optional parameters
-[[ -n $WORK_DIR ]] && CMD="$CMD -work-dir $WORK_DIR"
+[[ -n "$WORK_DIR" ]] && CMD="$CMD -work-dir $WORK_DIR"
 [[ -n "$CONFIG" ]] && CMD="$CMD $CONFIG"
 [[ -n "$PARAMS_FILE" ]] && CMD="$CMD $PARAMS_FILE"
 [[ -n "$DATA" ]] && CMD="$CMD $DATA"
