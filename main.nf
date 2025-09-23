@@ -511,7 +511,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing family VCF files
     channels.existing_family_vcfs = Channel
-        .fromPath("${params.output_dir}/families/*/vcfs/*.vcf.gz")
+        .fromPath("${params.data}/families/*/vcfs/*.vcf.gz")
         .filter { vcf -> !vcf.name.contains(params.vep_config_name) && !vcf.name.contains('.norm.') }  // Exclude VEP annotated and normalized files
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
@@ -527,7 +527,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing normalized VCF files
     channels.existing_normalized_vcfs = Channel
-        .fromPath("${params.output_dir}/families/*/vcfs/*.norm.vcf.gz")
+        .fromPath("${params.data}/families/*/vcfs/*.norm.vcf.gz")
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
             def tbi_path = "${vcf}.tbi"
