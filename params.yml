@@ -4,11 +4,12 @@
 # Pipeline steps control - ALL REQUIRED STEPS MUST BE LISTED
 steps: [
     "alignment",
+    "bedgraphs",
     "deepvariant",
     "family_calling",
-    "bedgraphs",
+    "norm",
     "vep_annotation",
-  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, vep_annotation
+  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, norm, vep_annotation
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"

@@ -1,11 +1,11 @@
-process NORMALIZE_VCF {
+process NORM {
 
     tag "$fid"
 
     cpus 4
     memory '12.GB'
 
-    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
+    publishDir "${params.output_dir}/families/${fid}/vcfs", mode: 'copy'
 
     input:
     tuple val(fid), path(vcf), path(tbi)
