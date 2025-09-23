@@ -56,7 +56,7 @@ EOF
 PROFILE="slurm,apptainer"
 CONFIG=""
 RESUME=""
-WORK_DIR="work"
+WORK_DIR=""
 PARAMS_FILE=""
 DATA=""
 SCRATCH=""
@@ -144,9 +144,9 @@ fi
 # Construct the command
 CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
 CMD="$CMD -profile $PROFILE"
-CMD="$CMD -work-dir $WORK_DIR"
 
 # Add optional parameters
+[[ -n $WORK_DIR ]] && CMD="$CMD -work-dir $WORK_DIR"
 [[ -n "$CONFIG" ]] && CMD="$CMD $CONFIG"
 [[ -n "$PARAMS_FILE" ]] && CMD="$CMD $PARAMS_FILE"
 [[ -n "$DATA" ]] && CMD="$CMD $DATA"
