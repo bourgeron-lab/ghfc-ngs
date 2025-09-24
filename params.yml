@@ -37,6 +37,9 @@ bazam: "/pasteur/helix/projects/ghfc_wgs/tools/bazam-1.0.1/bazam.jar"
 # GLnexus configuration
 glnexus_config: "DeepVariant_unfiltered"
 
+# gnomAD frequency annotation configuration
+gnomad_file: "/pasteur/helix/projects/ghfc_wgs/refs/gnomad_v4.1_allChroms.bcf" # Path to gnomAD annotation file
+
 # VEP annotation configuration
 vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
 vep_config_name: "ensembl_vep_115" # Name suffix for output files

@@ -15,6 +15,7 @@ include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT } from './workflows/deepvariant'
 include { FAMILY_CALLING } from './workflows/family_calling'
 include { NORM } from './workflows/norm'
+include { SNVS_FREQ_ANNOT } from './workflows/snvs_freq_annot'
 include { BEDGRAPHS } from './workflows/bedgraphs'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
@@ -32,11 +33,11 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, bedgraphs, vep_annotation"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, bedgraphs, vep_annotation"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'bedgraphs', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'bedgraphs', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -169,15 +170,33 @@ workflow {
         normalized_vcfs_output = NORM.out.normalized_vcfs
     }
     
-    // Run VEP annotation if needed and allowed
-    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
-        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
+    // Run gnomAD frequency annotation if needed and allowed
+    gnomad_vcfs_output = Channel.empty()
+    if (analysis_plan.snvs_freq_annot.needed.size() > 0 && 'snvs_freq_annot' in params.steps) {
+        log.info "Running gnomAD frequency annotation for ${analysis_plan.snvs_freq_annot.needed.size()} families..."
         
         // Get all available normalized family VCFs (existing + newly created)
         all_available_normalized_vcfs = channels.existing_normalized_vcfs.mix(normalized_vcfs_output ?: Channel.empty())
         
+        // Filter for families that need gnomAD annotation
+        gnomad_vcfs = all_available_normalized_vcfs
+            .filter { fid, vcf, tbi -> 
+                fid in analysis_plan.snvs_freq_annot.needed 
+            }
+        
+        SNVS_FREQ_ANNOT(gnomad_vcfs)
+        gnomad_vcfs_output = SNVS_FREQ_ANNOT.out.annotated_vcfs
+    }
+    
+    // Run VEP annotation if needed and allowed
+    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
+        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
+        
+        // Get all available gnomAD annotated family VCFs (existing + newly created)
+        all_available_gnomad_vcfs = channels.existing_gnomad_vcfs.mix(gnomad_vcfs_output ?: Channel.empty())
+        
         // Filter for families that need VEP annotation
-        vep_vcfs = all_available_normalized_vcfs
+        vep_vcfs = all_available_gnomad_vcfs
             .filter { fid, vcf, tbi -> 
                 fid in analysis_plan.vep_annotation.needed 
             }
@@ -239,6 +258,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant: [needed: [], existing: []],
         family_calling: [needed: [], existing: []],
         norm: [needed: [], existing: []],
+        snvs_freq_annot: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
         vep_annotation: [needed: [], existing: []]
     ]
@@ -269,6 +289,21 @@ def createAnalysisPlan(families, individuals, family_members) {
             }
         }
     }
+    
+    // Check existing gnomAD annotated files
+    families.each { fid ->
+        def gnomad_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.vcf.gz"
+        def gnomad_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.vcf.gz.tbi"
+        
+        if (new File(gnomad_vcf_path).exists() && new File(gnomad_tbi_path).exists()) {
+            plan.snvs_freq_annot.existing.add(fid)
+        } else {
+            // Need gnomAD annotation if normalized VCFs exist or will be created
+            if (fid in plan.norm.existing || fid in plan.norm.needed) {
+                plan.snvs_freq_annot.needed.add(fid)
+            }
+        }
+    }
 
     // Check existing VEP annotated files
     families.each { fid ->
@@ -278,8 +313,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
         } else {
-            // Need VEP if normalized VCFs exist or will be created
-            if (fid in plan.norm.existing || fid in plan.norm.needed) {
+            // Need VEP if gnomAD annotated VCFs exist or will be created
+            if (fid in plan.snvs_freq_annot.existing || fid in plan.snvs_freq_annot.needed) {
                 plan.vep_annotation.needed.add(fid)
             }
         }
@@ -354,6 +389,10 @@ def displayAnalysisSummary(analysis_plan) {
     NORM:
         - Existing normalized VCFs: ${analysis_plan.norm.existing.size()} families
         - Need VCF normalization: ${analysis_plan.norm.needed.size()} families
+    
+    SNVS_FREQ_ANNOT:
+        - Existing gnomAD annotated VCFs: ${analysis_plan.snvs_freq_annot.existing.size()} families
+        - Need gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.size()} families
     
     VEP_ANNOTATION:
         - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
@@ -536,6 +575,21 @@ def createChannels(analysis_plan) {
         }
         .filter { fid, vcf, tbi_path -> 
             fid in analysis_plan.norm.existing && new File(tbi_path).exists()
+        }
+        .map { fid, vcf, tbi_path ->
+            [fid, vcf, file(tbi_path)]
+        }
+    
+    // Create channel for existing gnomAD annotated VCF files
+    channels.existing_gnomad_vcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.gnomad.vcf.gz")
+        .map { vcf ->
+            def fid = vcf.parent.parent.name  // Get family ID from path
+            def tbi_path = "${vcf}.tbi"
+            [fid, vcf, tbi_path]
+        }
+        .filter { fid, vcf, tbi_path -> 
+            fid in analysis_plan.snvs_freq_annot.existing && new File(tbi_path).exists()
         }
         .map { fid, vcf, tbi_path ->
             [fid, vcf, file(tbi_path)]
