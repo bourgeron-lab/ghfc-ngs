@@ -413,6 +413,10 @@ def displayAnalysisSummary(analysis_plan) {
         - Existing CRAM files: ${analysis_plan.alignment.existing.size()} individuals
         - Need alignment: ${analysis_plan.alignment.needed.size()} individuals
     
+    BEDGRAPHS:
+        - Existing bedgraph files: ${analysis_plan.bedgraphs.existing.size()} individuals
+        - Need bedgraph generation: ${analysis_plan.bedgraphs.needed.size()} individuals
+
     DEEPVARIANT:
         - Existing gVCF files: ${analysis_plan.deepvariant.existing.size()} individuals  
         - Need variant calling: ${analysis_plan.deepvariant.needed.size()} individuals
@@ -429,13 +433,13 @@ def displayAnalysisSummary(analysis_plan) {
         - Existing gnomAD annotated VCFs: ${analysis_plan.snvs_freq_annot.existing.size()} families
         - Need gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.size()} families
     
+    SNVS_FREQ_FILTER:
+        - Existing gnomAD filtered VCFs: ${analysis_plan.snvs_freq_filter.existing.size()} families
+        - Need gnomAD frequency filtering: ${analysis_plan.snvs_freq_filter.needed.size()} families
+    
     VEP_ANNOTATION:
         - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
         - Need VEP annotation: ${analysis_plan.vep_annotation.needed.size()} families
-    
-    BEDGRAPHS:
-        - Existing bedgraph files: ${analysis_plan.bedgraphs.existing.size()} individuals
-        - Need bedgraph generation: ${analysis_plan.bedgraphs.needed.size()} individuals
     ========================================================================================
     """
     
