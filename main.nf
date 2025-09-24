@@ -66,6 +66,7 @@ workflow {
     Steps to run     : ${params.steps.join(', ')}
     Reference        : ${params.ref_name}
     Work directory   : ${workflow.workDir}
+    VEP Config Name  : ${params.vep_config_name} (${params.vep_config})
     ========================================================================================
     """
     
