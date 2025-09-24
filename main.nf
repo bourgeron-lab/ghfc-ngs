@@ -16,6 +16,7 @@ include { DEEPVARIANT } from './workflows/deepvariant'
 include { FAMILY_CALLING } from './workflows/family_calling'
 include { NORM } from './workflows/norm'
 include { SNVS_FREQ_ANNOT } from './workflows/snvs_freq_annot'
+include { SNVS_FREQ_FILTER } from './workflows/snvs_freq_filter'
 include { BEDGRAPHS } from './workflows/bedgraphs'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
@@ -33,11 +34,11 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, bedgraphs, vep_annotation"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'bedgraphs', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'bedgraphs', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -188,15 +189,33 @@ workflow {
         gnomad_vcfs_output = SNVS_FREQ_ANNOT.out.annotated_vcfs
     }
     
-    // Run VEP annotation if needed and allowed
-    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
-        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
+    // Run gnomAD frequency filtering if needed and allowed
+    filtered_vcfs_output = Channel.empty()
+    if (analysis_plan.snvs_freq_filter.needed.size() > 0 && 'snvs_freq_filter' in params.steps) {
+        log.info "Running gnomAD frequency filtering for ${analysis_plan.snvs_freq_filter.needed.size()} families..."
         
         // Get all available gnomAD annotated family VCFs (existing + newly created)
         all_available_gnomad_vcfs = channels.existing_gnomad_vcfs.mix(gnomad_vcfs_output ?: Channel.empty())
         
+        // Filter for families that need frequency filtering
+        filter_vcfs = all_available_gnomad_vcfs
+            .filter { fid, vcf, tbi -> 
+                fid in analysis_plan.snvs_freq_filter.needed 
+            }
+        
+        SNVS_FREQ_FILTER(filter_vcfs)
+        filtered_vcfs_output = SNVS_FREQ_FILTER.out.filtered_vcfs
+    }
+    
+    // Run VEP annotation if needed and allowed
+    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
+        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
+        
+        // Get all available filtered family VCFs (existing + newly created)
+        all_available_filtered_vcfs = channels.existing_filtered_vcfs.mix(filtered_vcfs_output ?: Channel.empty())
+        
         // Filter for families that need VEP annotation
-        vep_vcfs = all_available_gnomad_vcfs
+        vep_vcfs = all_available_filtered_vcfs
             .filter { fid, vcf, tbi -> 
                 fid in analysis_plan.vep_annotation.needed 
             }
@@ -259,6 +278,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         family_calling: [needed: [], existing: []],
         norm: [needed: [], existing: []],
         snvs_freq_annot: [needed: [], existing: []],
+        snvs_freq_filter: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
         vep_annotation: [needed: [], existing: []]
     ]
@@ -304,6 +324,21 @@ def createAnalysisPlan(families, individuals, family_members) {
             }
         }
     }
+    
+    // Check existing gnomAD filtered files
+    families.each { fid ->
+        def filtered_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad_filtered.vcf.gz"
+        def filtered_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad_filtered.vcf.gz.tbi"
+        
+        if (new File(filtered_vcf_path).exists() && new File(filtered_tbi_path).exists()) {
+            plan.snvs_freq_filter.existing.add(fid)
+        } else {
+            // Need filtering if gnomAD annotated VCFs exist or will be created
+            if (fid in plan.snvs_freq_annot.existing || fid in plan.snvs_freq_annot.needed) {
+                plan.snvs_freq_filter.needed.add(fid)
+            }
+        }
+    }
 
     // Check existing VEP annotated files
     families.each { fid ->
@@ -313,8 +348,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
         } else {
-            // Need VEP if gnomAD annotated VCFs exist or will be created
-            if (fid in plan.snvs_freq_annot.existing || fid in plan.snvs_freq_annot.needed) {
+            // Need VEP if filtered VCFs exist or will be created
+            if (fid in plan.snvs_freq_filter.existing || fid in plan.snvs_freq_filter.needed) {
                 plan.vep_annotation.needed.add(fid)
             }
         }
@@ -412,6 +447,18 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.family_calling.needed) {
         log.info "Families needing family calling: ${analysis_plan.family_calling.needed.join(', ')}"
+    }
+    if (analysis_plan.norm.needed) {
+        log.info "Families needing VCF normalization: ${analysis_plan.norm.needed.join(', ')}"
+    }
+    if (analysis_plan.snvs_freq_annot.needed) {
+        log.info "Families needing gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.join(', ')}"
+    }
+    if (analysis_plan.snvs_freq_filter.needed) {
+        log.info "Families needing gnomAD frequency filtering: ${analysis_plan.snvs_freq_filter.needed.join(', ')}"
+    }
+    if (analysis_plan.vep_annotation.needed) {
+        log.info "Families needing VEP annotation: ${analysis_plan.vep_annotation.needed.join(', ')}"
     }
     if (analysis_plan.bedgraphs.needed) {
         log.info "Individuals needing bedgraph generation: ${analysis_plan.bedgraphs.needed.join(', ')}"
@@ -590,6 +637,21 @@ def createChannels(analysis_plan) {
         }
         .filter { fid, vcf, tbi_path -> 
             fid in analysis_plan.snvs_freq_annot.existing && new File(tbi_path).exists()
+        }
+        .map { fid, vcf, tbi_path ->
+            [fid, vcf, file(tbi_path)]
+        }
+
+    // Create channel for existing gnomAD filtered VCF files
+    channels.existing_filtered_vcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.gnomad_filtered.vcf.gz")
+        .map { vcf ->
+            def fid = vcf.parent.parent.name  // Get family ID from path
+            def tbi_path = "${vcf}.tbi"
+            [fid, vcf, tbi_path]
+        }
+        .filter { fid, vcf, tbi_path -> 
+            fid in analysis_plan.snvs_freq_filter.existing && new File(tbi_path).exists()
         }
         .map { fid, vcf, tbi_path ->
             [fid, vcf, file(tbi_path)]

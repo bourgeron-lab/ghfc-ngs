@@ -8,8 +8,10 @@ steps: [
     "deepvariant",
     "family_calling",
     "norm",
+    "snvs_freq_annot",
+    "snvs_freq_filter",
     "vep_annotation",
-  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, norm, vep_annotation
+  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, norm, snvs_freq_annot, snvs_freq_filter, vep_annotation
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -39,6 +41,8 @@ glnexus_config: "DeepVariant_unfiltered"
 
 # gnomAD frequency annotation configuration
 gnomad_file: "/pasteur/helix/projects/ghfc_wgs/refs/gnomad_v4.1_allChroms.bcf" # Path to gnomAD annotation file
+gnomad_filter_field: "AF" # gnomAD field to filter on (e.g., AF, AF_popmax)
+gnomad_filter_threshold: "0.01" # Frequency threshold for filtering (e.g., 0.01 for 1%)
 
 # VEP annotation configuration
 vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
