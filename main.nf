@@ -214,8 +214,11 @@ workflow {
     if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
         log.info "Running common variants filtering for ${analysis_plan.snvs_common_filters.needed.size()} families..."
         
-        // Get all available common VCFs from frequency filtering
-        common_filter_vcfs = common_vcfs_output
+        // Get all available common VCFs (existing + newly created)
+        all_available_common_vcfs = channels.existing_common_vcfs.mix(common_vcfs_output ?: Channel.empty())
+        
+        // Filter for families that need common filtering
+        common_filter_vcfs = all_available_common_vcfs
             .filter { fid, vcf, tbi -> 
                 fid in analysis_plan.snvs_common_filters.needed 
             }
@@ -691,6 +694,21 @@ def createChannels(analysis_plan) {
     // Create channel for existing rare VCF files (output from gnomAD filtering)
     channels.existing_filtered_vcfs = Channel
         .fromPath("${params.data}/families/*/vcfs/*.rare.vcf.gz")
+        .map { vcf ->
+            def fid = vcf.parent.parent.name  // Get family ID from path
+            def tbi_path = "${vcf}.tbi"
+            [fid, vcf, tbi_path]
+        }
+        .filter { fid, vcf, tbi_path -> 
+            fid in analysis_plan.snvs_freq_filter.existing && new File(tbi_path).exists()
+        }
+        .map { fid, vcf, tbi_path ->
+            [fid, vcf, file(tbi_path)]
+        }
+
+    // Create channel for existing common VCF files (output from gnomAD filtering)
+    channels.existing_common_vcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.common.vcf.gz")
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
             def tbi_path = "${vcf}.tbi"
