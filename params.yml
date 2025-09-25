@@ -11,12 +11,16 @@ steps: [
     "snvs_freq_annot",
     "snvs_freq_filter",
     "snvs_common_filters",
+    "snvs_common_cohort",
     "vep_annotation",
-  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, norm, snvs_freq_annot, snvs_freq_filter, snvs_common_filters, vep_annotation
+  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, norm, snvs_freq_annot, snvs_freq_filter, snvs_common_filters, snvs_common_cohort, vep_annotation
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
 scratch: "/pasteur/appa/scratch/fcliquet"
+
+# Cohort name for merged files
+cohort_name: "test_cohort"
 
 # Pedigree file (optional - defaults to {data}/pedigree.tsv)
 pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/pedigree.tsv"

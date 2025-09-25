@@ -18,6 +18,7 @@ include { NORM } from './workflows/norm'
 include { SNVS_FREQ_ANNOT } from './workflows/snvs_freq_annot'
 include { SNVS_FREQ_FILTER } from './workflows/snvs_freq_filter'
 include { SNVS_COMMON_FILTERS } from './workflows/snvs_common_filters'
+include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
 include { BEDGRAPHS } from './workflows/bedgraphs'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
@@ -39,7 +40,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'bedgraphs', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -226,6 +227,21 @@ workflow {
         SNVS_COMMON_FILTERS(common_filter_vcfs)
     }
     
+    // Run cohort common variants merge if needed and allowed
+    if (analysis_plan.snvs_common_cohort.needed.size() > 0 && 'snvs_common_cohort' in params.steps) {
+        log.info "Running cohort common variants merge..."
+        
+        // Get all available common filtered BCFs (existing + newly created)
+        def newly_created_bcfs = Channel.empty()
+        if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
+            newly_created_bcfs = SNVS_COMMON_FILTERS.out.filtered_common_bcfs
+        }
+        
+        all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(newly_created_bcfs)
+        
+        SNVS_COMMON_COHORT(all_available_common_bcfs)
+    }
+    
     // Run VEP annotation if needed and allowed
     if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
         log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
@@ -299,6 +315,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         snvs_freq_annot: [needed: [], existing: []],
         snvs_freq_filter: [needed: [], existing: []],
         snvs_common_filters: [needed: [], existing: []],
+        snvs_common_cohort: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
         vep_annotation: [needed: [], existing: []]
     ]
@@ -375,6 +392,20 @@ def createAnalysisPlan(families, individuals, family_members) {
             if (fid in plan.snvs_freq_filter.existing || fid in plan.snvs_freq_filter.needed) {
                 plan.snvs_common_filters.needed.add(fid)
             }
+        }
+    }
+
+    // Check existing cohort common BCF file
+    def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
+    def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
+    
+    if (new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()) {
+        plan.snvs_common_cohort.existing.add('cohort')  // Single cohort entry
+    } else {
+        // Need cohort merge if any families have common filtered BCFs or will create them
+        def families_with_common_bcfs = plan.snvs_common_filters.existing + plan.snvs_common_filters.needed
+        if (families_with_common_bcfs.size() > 0) {
+            plan.snvs_common_cohort.needed.add('cohort')  // Single cohort entry
         }
     }
 
@@ -479,6 +510,10 @@ def displayAnalysisSummary(analysis_plan) {
         - Existing filtered common BCFs: ${analysis_plan.snvs_common_filters.existing.size()} families
         - Need common variant filtering: ${analysis_plan.snvs_common_filters.needed.size()} families
     
+    SNVS_COMMON_COHORT:
+        - Existing cohort common BCF: ${analysis_plan.snvs_common_cohort.existing.size() > 0 ? 'Yes' : 'No'}
+        - Need cohort common merge: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
+    
     VEP_ANNOTATION:
         - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
         - Need VEP annotation: ${analysis_plan.vep_annotation.needed.size()} families
@@ -505,6 +540,9 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.snvs_common_filters.needed) {
         log.info "Families needing common variant filtering: ${analysis_plan.snvs_common_filters.needed.join(', ')}"
+    }
+    if (analysis_plan.snvs_common_cohort.needed) {
+        log.info "Cohort needing common variant merge: Yes"
     }
     if (analysis_plan.vep_annotation.needed) {
         log.info "Families needing VEP annotation: ${analysis_plan.vep_annotation.needed.join(', ')}"
@@ -719,6 +757,21 @@ def createChannels(analysis_plan) {
         }
         .map { fid, vcf, tbi_path ->
             [fid, vcf, file(tbi_path)]
+        }
+
+    // Create channel for existing common filtered BCF files (output from common filtering)
+    channels.existing_common_filtered_bcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.common_gt.bcf")
+        .map { bcf ->
+            def fid = bcf.parent.parent.name  // Get family ID from path
+            def csi_path = "${bcf}.csi"
+            [fid, bcf, csi_path]
+        }
+        .filter { fid, bcf, csi_path -> 
+            fid in analysis_plan.snvs_common_filters.existing && new File(csi_path).exists()
+        }
+        .map { fid, bcf, csi_path ->
+            [fid, bcf, file(csi_path)]
         }
     
     return channels
