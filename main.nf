@@ -479,45 +479,19 @@ def displayAnalysisSummary(analysis_plan) {
     ========================================================================================
                                     ANALYSIS SUMMARY
     ========================================================================================
-    ALIGNMENT:
-        - Existing CRAM files: ${analysis_plan.alignment.existing.size()} individuals
-        - Need alignment: ${analysis_plan.alignment.needed.size()} individuals
-    
-    BEDGRAPHS:
-        - Existing bedgraph files: ${analysis_plan.bedgraphs.existing.size()} individuals
-        - Need bedgraph generation: ${analysis_plan.bedgraphs.needed.size()} individuals
-
-    DEEPVARIANT:
-        - Existing gVCF files: ${analysis_plan.deepvariant.existing.size()} individuals  
-        - Need variant calling: ${analysis_plan.deepvariant.needed.size()} individuals
-    
-    FAMILY_CALLING:
-        - Existing family VCFs: ${analysis_plan.family_calling.existing.size()} families
-        - Need family calling: ${analysis_plan.family_calling.needed.size()} families
-    
-    NORM:
-        - Existing normalized VCFs: ${analysis_plan.norm.existing.size()} families
-        - Need VCF normalization: ${analysis_plan.norm.needed.size()} families
-    
-    SNVS_FREQ_ANNOT:
-        - Existing gnomAD annotated VCFs: ${analysis_plan.snvs_freq_annot.existing.size()} families
-        - Need gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.size()} families
-    
-    SNVS_FREQ_FILTER:
-        - Existing rare/common VCF pairs: ${analysis_plan.snvs_freq_filter.existing.size()} families
-        - Need rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.size()} families
-    
-    SNVS_COMMON_FILTERS:
-        - Existing filtered common BCFs: ${analysis_plan.snvs_common_filters.existing.size()} families
-        - Need common variant filtering: ${analysis_plan.snvs_common_filters.needed.size()} families
-    
-    SNVS_COMMON_COHORT:
-        - Existing cohort common BCF: ${analysis_plan.snvs_common_cohort.existing.size() > 0 ? 'Yes' : 'No'}
-        - Need cohort common merge: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
-    
-    VEP_ANNOTATION:
-        - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
-        - Need VEP annotation: ${analysis_plan.vep_annotation.needed.size()} families
+    ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done and ${analysis_plan.alignment.needed.size()} to do
+    BEDGRAPHS: ${analysis_plan.bedgraphs.existing.size()} individuals done and ${analysis_plan.bedgraphs.needed.size()} to do
+    == SNVs/INDELs Calling ==
+    DEEPVARIANT: ${analysis_plan.deepvariant.existing.size()} individuals done and ${analysis_plan.deepvariant.needed.size()} to do
+    FAMILY_CALLING: ${analysis_plan.family_calling.existing.size()} families done and ${analysis_plan.family_calling.needed.size()} to do
+    NORM: ${analysis_plan.norm.existing.size()} families done and ${analysis_plan.norm.needed.size()} to do
+    SNVS_FREQ_ANNOT: ${analysis_plan.snvs_freq_annot.existing.size()} families done and ${analysis_plan.snvs_freq_annot.needed.size()} to do
+    SNVS_FREQ_FILTER: ${analysis_plan.snvs_freq_filter.existing.size()} families done and ${analysis_plan.snvs_freq_filter.needed.size()} to do
+    == Rare Variants ==
+    VEP_ANNOTATION: ${analysis_plan.vep_annotation.existing.size()} families done and ${analysis_plan.vep_annotation.needed.size()} to do
+    == Common Variants ==
+    SNVS_COMMON_FILTERS: ${analysis_plan.snvs_common_filters.existing.size()} families done and ${analysis_plan.snvs_common_filters.needed.size()} to do    
+    SNVS_COMMON_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     ========================================================================================
     """
     
