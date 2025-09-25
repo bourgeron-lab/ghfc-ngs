@@ -47,7 +47,7 @@ process snvs_common_filters {
 
   """
   # Filter common variants: exclude variants with non-empty genomes_filters and keep only GT format field
-  bcftools view \\
+  bcftools annotate \\
       --threads ${task.cpus} \\
       -i 'INFO/genomes_filters="." | INFO/genomes_filters=""' \\
       -x '^FORMAT/GT' \\
