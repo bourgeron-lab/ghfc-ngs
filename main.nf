@@ -232,12 +232,13 @@ workflow {
         log.info "Running cohort common variants merge..."
         
         // Get all available common filtered BCFs (existing + newly created)
-        def newly_created_bcfs = Channel.empty()
         if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
-            newly_created_bcfs = SNVS_COMMON_FILTERS.out.filtered_common_bcfs
+            // Mix existing BCFs with newly created ones
+            all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(SNVS_COMMON_FILTERS.out.filtered_common_bcfs)
+        } else {
+            // Use only existing BCFs if no new ones were created
+            all_available_common_bcfs = channels.existing_common_filtered_bcfs
         }
-        
-        all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(newly_created_bcfs)
         
         SNVS_COMMON_COHORT(all_available_common_bcfs)
     }
