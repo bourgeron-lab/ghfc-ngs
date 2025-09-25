@@ -17,6 +17,7 @@ include { FAMILY_CALLING } from './workflows/family_calling'
 include { NORM } from './workflows/norm'
 include { SNVS_FREQ_ANNOT } from './workflows/snvs_freq_annot'
 include { SNVS_FREQ_FILTER } from './workflows/snvs_freq_filter'
+include { SNVS_COMMON_FILTERS } from './workflows/snvs_common_filters'
 include { BEDGRAPHS } from './workflows/bedgraphs'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
@@ -38,7 +39,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'bedgraphs', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'bedgraphs', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -209,6 +210,19 @@ workflow {
         common_vcfs_output = SNVS_FREQ_FILTER.out.common_vcfs
     }
     
+    // Run common variants filtering if needed and allowed
+    if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
+        log.info "Running common variants filtering for ${analysis_plan.snvs_common_filters.needed.size()} families..."
+        
+        // Get all available common VCFs from frequency filtering
+        common_filter_vcfs = common_vcfs_output
+            .filter { fid, vcf, tbi -> 
+                fid in analysis_plan.snvs_common_filters.needed 
+            }
+        
+        SNVS_COMMON_FILTERS(common_filter_vcfs)
+    }
+    
     // Run VEP annotation if needed and allowed
     if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
         log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
@@ -281,6 +295,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         norm: [needed: [], existing: []],
         snvs_freq_annot: [needed: [], existing: []],
         snvs_freq_filter: [needed: [], existing: []],
+        snvs_common_filters: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
         vep_annotation: [needed: [], existing: []]
     ]
@@ -341,6 +356,21 @@ def createAnalysisPlan(families, individuals, family_members) {
             // Need filtering if gnomAD annotated VCFs exist or will be created
             if (fid in plan.snvs_freq_annot.existing || fid in plan.snvs_freq_annot.needed) {
                 plan.snvs_freq_filter.needed.add(fid)
+            }
+        }
+    }
+
+    // Check existing common filtered files
+    families.each { fid ->
+        def common_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf"
+        def common_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi"
+        
+        if (new File(common_bcf_path).exists() && new File(common_csi_path).exists()) {
+            plan.snvs_common_filters.existing.add(fid)
+        } else {
+            // Need common filtering if freq_filter VCFs exist or will be created (common variants available)
+            if (fid in plan.snvs_freq_filter.existing || fid in plan.snvs_freq_filter.needed) {
+                plan.snvs_common_filters.needed.add(fid)
             }
         }
     }
@@ -442,6 +472,10 @@ def displayAnalysisSummary(analysis_plan) {
         - Existing rare/common VCF pairs: ${analysis_plan.snvs_freq_filter.existing.size()} families
         - Need rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.size()} families
     
+    SNVS_COMMON_FILTERS:
+        - Existing filtered common BCFs: ${analysis_plan.snvs_common_filters.existing.size()} families
+        - Need common variant filtering: ${analysis_plan.snvs_common_filters.needed.size()} families
+    
     VEP_ANNOTATION:
         - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
         - Need VEP annotation: ${analysis_plan.vep_annotation.needed.size()} families
@@ -465,6 +499,9 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.snvs_freq_filter.needed) {
         log.info "Families needing rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.join(', ')}"
+    }
+    if (analysis_plan.snvs_common_filters.needed) {
+        log.info "Families needing common variant filtering: ${analysis_plan.snvs_common_filters.needed.join(', ')}"
     }
     if (analysis_plan.vep_annotation.needed) {
         log.info "Families needing VEP annotation: ${analysis_plan.vep_annotation.needed.join(', ')}"
