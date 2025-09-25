@@ -1,6 +1,6 @@
 /*
  * SNVs Frequency Filtering Workflow
- * Filters gnomAD-annotated VCF files based on frequency thresholds
+ * Separates gnomAD-annotated VCF files into rare and common variants based on frequency thresholds
  */
 
 // Include modules
@@ -23,5 +23,6 @@ workflow SNVS_FREQ_FILTER {
     snvs_gnomad_freq_filter(filter_input)
 
     emit:
-    filtered_vcfs = snvs_gnomad_freq_filter.out.filtered_vcfs
+    rare_vcfs = snvs_gnomad_freq_filter.out.rare_vcfs
+    common_vcfs = snvs_gnomad_freq_filter.out.common_vcfs
 }

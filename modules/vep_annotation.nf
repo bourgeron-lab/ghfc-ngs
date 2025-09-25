@@ -8,14 +8,14 @@ nextflow.enable.dsl=2
 
 process runVEP {
   /*
-  Run VEP annotation on family VCF files
+  Run VEP annotation on VCF files, preserving original filename structure
 
   Parameters
   ----------
   fid : str
     Family ID
   vcf : path
-    Input VCF file
+    Input VCF file (e.g., FID.rare.vcf.gz)
   vcf_index : path
     VCF index file (.tbi or .csi)
   vep_config : val
@@ -23,14 +23,14 @@ process runVEP {
 
   Returns
   -------
-  Tuple of family ID, annotated VCF file, and its index
+  Tuple of family ID, annotated VCF file with preserved name structure (e.g., FID.rare.vep_config_name.vcf.gz), and its index
   */
 
   tag "$fid"
 
   publishDir "${params.data}/families/${fid}/vcfs",
     mode: 'copy',
-    pattern: "${fid}.${params.vep_config_name}.vcf.gz*"
+    pattern: "*.${params.vep_config_name}.vcf.gz*"
 
   container 'ensemblorg/ensembl-vep:release_110.1'
   
@@ -40,10 +40,12 @@ process runVEP {
   tuple val(fid), path(vcf), path(vcf_index), val(vep_config)
 
   output:
-  tuple val(fid), path("${output_vcf}.gz"), path("${output_vcf}.gz.tbi"), emit: annotated_vcfs
+  tuple val(fid), path("*.${params.vep_config_name}.vcf.gz"), path("*.${params.vep_config_name}.vcf.gz.tbi"), emit: annotated_vcfs
 
   script:
-  output_vcf = "${fid}.${params.vep_config_name}.vcf"
+  // Extract base filename without .vcf.gz extension and add VEP config name
+  base_name = vcf.baseName.replaceAll(/\.vcf$/, '')
+  output_vcf = "${base_name}.${params.vep_config_name}.vcf"
 
   """
   # Run VEP annotation
@@ -62,7 +64,9 @@ process runVEP {
   """
 
   stub:
-  output_vcf = "${fid}.${params.vep_config_name}.vcf"
+  // Extract base filename without .vcf.gz extension and add VEP config name
+  base_name = vcf.baseName.replaceAll(/\.vcf$/, '')
+  output_vcf = "${base_name}.${params.vep_config_name}.vcf"
   """
   touch ${output_vcf}.gz
   touch ${output_vcf}.gz.tbi

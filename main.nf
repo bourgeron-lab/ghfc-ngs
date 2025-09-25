@@ -190,9 +190,10 @@ workflow {
     }
     
     // Run gnomAD frequency filtering if needed and allowed
-    filtered_vcfs_output = Channel.empty()
+    rare_vcfs_output = Channel.empty()
+    common_vcfs_output = Channel.empty()
     if (analysis_plan.snvs_freq_filter.needed.size() > 0 && 'snvs_freq_filter' in params.steps) {
-        log.info "Running gnomAD frequency filtering for ${analysis_plan.snvs_freq_filter.needed.size()} families..."
+        log.info "Running rare/common variant separation for ${analysis_plan.snvs_freq_filter.needed.size()} families..."
         
         // Get all available gnomAD annotated family VCFs (existing + newly created)
         all_available_gnomad_vcfs = channels.existing_gnomad_vcfs.mix(gnomad_vcfs_output ?: Channel.empty())
@@ -204,15 +205,16 @@ workflow {
             }
         
         SNVS_FREQ_FILTER(filter_vcfs)
-        filtered_vcfs_output = SNVS_FREQ_FILTER.out.filtered_vcfs
+        rare_vcfs_output = SNVS_FREQ_FILTER.out.rare_vcfs
+        common_vcfs_output = SNVS_FREQ_FILTER.out.common_vcfs
     }
     
     // Run VEP annotation if needed and allowed
     if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
         log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
         
-        // Get all available filtered family VCFs (existing + newly created)
-        all_available_filtered_vcfs = channels.existing_filtered_vcfs.mix(filtered_vcfs_output ?: Channel.empty())
+        // Get all available rare family VCFs (existing + newly created)
+        all_available_filtered_vcfs = channels.existing_filtered_vcfs.mix(rare_vcfs_output ?: Channel.empty())
         
         // Filter for families that need VEP annotation
         vep_vcfs = all_available_filtered_vcfs
@@ -325,12 +327,15 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing gnomAD filtered files
+    // Check existing gnomAD filtered files (rare variants)
     families.each { fid ->
-        def filtered_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad_filtered.vcf.gz"
-        def filtered_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad_filtered.vcf.gz.tbi"
+        def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
+        def rare_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz.tbi"
+        def common_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common.vcf.gz"
+        def common_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.common.vcf.gz.tbi"
         
-        if (new File(filtered_vcf_path).exists() && new File(filtered_tbi_path).exists()) {
+        if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() && 
+            new File(common_vcf_path).exists() && new File(common_tbi_path).exists()) {
             plan.snvs_freq_filter.existing.add(fid)
         } else {
             // Need filtering if gnomAD annotated VCFs exist or will be created
@@ -340,10 +345,10 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
 
-    // Check existing VEP annotated files
+    // Check existing VEP annotated files (rare variants)
     families.each { fid ->
-        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz"
-        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.${params.vep_config_name}.vcf.gz.tbi"
+        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz"
+        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
 
         if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
             plan.vep_annotation.existing.add(fid)
@@ -434,8 +439,8 @@ def displayAnalysisSummary(analysis_plan) {
         - Need gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.size()} families
     
     SNVS_FREQ_FILTER:
-        - Existing gnomAD filtered VCFs: ${analysis_plan.snvs_freq_filter.existing.size()} families
-        - Need gnomAD frequency filtering: ${analysis_plan.snvs_freq_filter.needed.size()} families
+        - Existing rare/common VCF pairs: ${analysis_plan.snvs_freq_filter.existing.size()} families
+        - Need rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.size()} families
     
     VEP_ANNOTATION:
         - Existing VEP annotated files: ${analysis_plan.vep_annotation.existing.size()} families
@@ -459,7 +464,7 @@ def displayAnalysisSummary(analysis_plan) {
         log.info "Families needing gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.join(', ')}"
     }
     if (analysis_plan.snvs_freq_filter.needed) {
-        log.info "Families needing gnomAD frequency filtering: ${analysis_plan.snvs_freq_filter.needed.join(', ')}"
+        log.info "Families needing rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.join(', ')}"
     }
     if (analysis_plan.vep_annotation.needed) {
         log.info "Families needing VEP annotation: ${analysis_plan.vep_annotation.needed.join(', ')}"
@@ -646,9 +651,9 @@ def createChannels(analysis_plan) {
             [fid, vcf, file(tbi_path)]
         }
 
-    // Create channel for existing gnomAD filtered VCF files
+    // Create channel for existing rare VCF files (output from gnomAD filtering)
     channels.existing_filtered_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.gnomad_filtered.vcf.gz")
+        .fromPath("${params.data}/families/*/vcfs/*.rare.vcf.gz")
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
             def tbi_path = "${vcf}.tbi"
