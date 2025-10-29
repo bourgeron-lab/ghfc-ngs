@@ -14,6 +14,7 @@ process DV_POSTPROCESS_VARIANTS {
     tuple val(barcode), path("${barcode}.g.vcf.gz"), path("${barcode}.g.vcf.gz.tbi"), emit: gvcf
     
     script:
+    num_threads = params.deepvariant_threads
     """
     mkdir -p ${params.data}/samples/${barcode}/deepvariant
 
@@ -27,10 +28,10 @@ process DV_POSTPROCESS_VARIANTS {
         --ref ${ref} \\
         --infile call_variants_output@1.tfrecord.gz \\
         --outfile ${barcode}.vcf.gz \\
-        --cpus "96" \\
-        --small_model_cvo_records make_examples_call_variant_outputs.tfrecord@96.gz \\
+        --cpus "${num_threads}" \\
+        --small_model_cvo_records make_examples_call_variant_outputs.tfrecord@${num_threads}.gz \\
         --gvcf_outfile ${barcode}.g.vcf.gz \\
-        --nonvariant_site_tfrecord_path gvcf.tfrecord@96.gz
+        --nonvariant_site_tfrecord_path gvcf.tfrecord@${num_threads}.gz
     
     # Index the output files only if index doesn't exist
     if [[ ! -f ${barcode}.vcf.gz.tbi ]]; then

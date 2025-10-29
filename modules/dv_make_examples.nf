@@ -7,25 +7,28 @@ process DV_MAKE_EXAMPLES {
     val ref
     
     output:
-    tuple val(barcode), path("make_examples.tfrecord-*-of-00096.gz"), emit: examples
-    tuple val(barcode), path("make_examples.tfrecord-*-of-00096.gz.example_info.json"), emit: examples_info
-    tuple val(barcode), path("gvcf.tfrecord-*-of-00096.gz"), emit: gvcf_records
-    tuple val(barcode), path("make_examples_call_variant_outputs.tfrecord-*-of-00096.gz"), emit: call_variant_outputs
+    tuple val(barcode), path("make_examples.tfrecord-*-of-*.gz"), emit: examples
+    tuple val(barcode), path("make_examples.tfrecord-*-of-*.gz.example_info.json"), emit: examples_info
+    tuple val(barcode), path("gvcf.tfrecord-*-of-*.gz"), emit: gvcf_records
+    tuple val(barcode), path("make_examples_call_variant_outputs.tfrecord-*-of-*.gz"), emit: call_variant_outputs
     
     script:
+    num_threads = params.deepvariant_threads
+    num_threads_str = String.format("%05d", num_threads)
+    max_task_id = num_threads - 1
     """
-    # Run all 96 tasks in parallel using background processes
-    for i in {0..95}; do
+    # Run all ${num_threads} tasks in parallel using background processes
+    for i in {0..${max_task_id}}; do
         task_id=\$(printf "%05d" \$i)
         (
             /opt/deepvariant/bin/make_examples \\
                 --mode calling \\
                 --ref ${ref} \\
                 --reads ${cram_file} \\
-                --examples make_examples.tfrecord@96.gz \\
+                --examples make_examples.tfrecord@${num_threads}.gz \\
                 --checkpoint "/opt/models/wgs" \\
                 --call_small_model_examples \\
-                --gvcf gvcf.tfrecord@96.gz \\
+                --gvcf gvcf.tfrecord@${num_threads}.gz \\
                 --small_model_indel_gq_threshold "28" \\
                 --small_model_snp_gq_threshold "20" \\
                 --small_model_vaf_context_window_size "51" \\
@@ -40,9 +43,9 @@ process DV_MAKE_EXAMPLES {
     wait
     
     # Verify all files were created
-    for i in {0..95}; do
+    for i in {0..${max_task_id}}; do
         task_id=\$(printf "%05d" \$i)
-        if [[ ! -f make_examples.tfrecord-\${task_id}-of-00096.gz ]]; then
+        if [[ ! -f make_examples.tfrecord-\${task_id}-of-${num_threads_str}.gz ]]; then
             echo "ERROR: Task \$i failed to create output file"
             exit 1
         fi
@@ -50,11 +53,14 @@ process DV_MAKE_EXAMPLES {
     """
     
     stub:
+    num_threads = params.deepvariant_threads
+    num_threads_str = String.format("%05d", num_threads)
+    max_task_id = num_threads - 1
     """
-    for i in {0..95}; do
+    for i in {0..${max_task_id}}; do
         task_id=\$(printf "%05d" \$i)
-        touch make_examples.tfrecord-\${task_id}-of-00096.gz
-        touch gvcf.tfrecord-\${task_id}-of-00096.gz
+        touch make_examples.tfrecord-\${task_id}-of-${num_threads_str}.gz
+        touch gvcf.tfrecord-\${task_id}-of-${num_threads_str}.gz
     done
     """
 }

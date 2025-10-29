@@ -44,6 +44,10 @@ bazam: "/pasteur/helix/projects/ghfc_wgs/tools/bazam-1.0.1/bazam.jar"
 # GLnexus configuration
 glnexus_config: "DeepVariant_unfiltered"
 
+# DeepVariant configuration
+# WARNING: Update DeepVariant process settings accordingly to the number of threads
+deepvariant_threads: 96 # Number of parallel tasks for DeepVariant make_examples
+
 # gnomAD frequency annotation configuration
 gnomad_file: "/pasteur/helix/projects/ghfc_wgs/refs/gnomad_v4.1_allChroms.bcf" # Path to gnomAD annotation file
 gnomad_filter_field: "AF" # gnomAD field to filter on (e.g., AF, AF_popmax)
