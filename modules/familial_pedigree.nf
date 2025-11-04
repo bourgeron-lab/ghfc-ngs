@@ -1,0 +1,53 @@
+#!/usr/bin/env nextflow
+
+/*
+ * Familial pedigree extraction module
+ * Extracts family-specific pedigree information from cohort pedigree file
+ */
+
+nextflow.enable.dsl=2
+
+process familial_pedigree {
+  /*
+  Extract family-specific pedigree subset from cohort pedigree file
+
+  Parameters
+  ----------
+  fid : str
+    Family ID
+  pedigree_file : path
+    Cohort pedigree TSV file
+  project : val
+    Project/cohort name
+
+  Returns
+  -------
+  Tuple of family ID and family-specific pedigree TSV file
+  */
+
+  tag "$fid"
+
+  publishDir "${params.data}/families/${fid}",
+    mode: 'copy',
+    pattern: "${fid}.pedigree.tsv"
+
+  label 'pedigree_extraction'
+
+  input:
+  tuple val(fid), path(pedigree_file), val(project)
+
+  output:
+  tuple val(fid), path("${fid}.pedigree.tsv"), emit: family_pedigree
+
+  script:
+  """
+  # Extract header and family-specific rows from cohort pedigree
+  head -n 1 ${pedigree_file} > ${fid}.pedigree.tsv
+  awk -F'\\t' '\$1 == "${fid}"' ${pedigree_file} >> ${fid}.pedigree.tsv
+  """
+
+  stub:
+  """
+  touch ${fid}.pedigree.tsv
+  """
+}

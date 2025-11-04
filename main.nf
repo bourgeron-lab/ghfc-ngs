@@ -22,6 +22,7 @@ include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
 include { BEDGRAPHS } from './workflows/bedgraphs'
 include { BEDGRAPH_VAF } from './workflows/bedgraph_vaf'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
+include { FAMILIAL_PEDIGREE } from './workflows/familial_pedigree'
 
 /*
 ========================================================================================
@@ -37,11 +38,11 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation, familial_pedigree"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'bedgraph_vaf', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'bedgraph_vaf', 'vep_annotation', 'familial_pedigree']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -288,6 +289,20 @@ workflow {
         
         BEDGRAPH_VAF(vaf_vcfs)
     }
+    
+    // Run familial pedigree extraction if needed and allowed
+    if (analysis_plan.familial_pedigree.needed.size() > 0 && 'familial_pedigree' in params.steps) {
+        log.info "Running familial pedigree extraction for ${analysis_plan.familial_pedigree.needed.size()} families..."
+        
+        // Create channel for families needing pedigree extraction
+        family_pedigree_input = Channel
+            .from(analysis_plan.familial_pedigree.needed)
+            .map { fid ->
+                [fid, file(pedigree_file), params.cohort_name]
+            }
+        
+        FAMILIAL_PEDIGREE(family_pedigree_input)
+    }
 }
 
 /*
@@ -336,7 +351,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         snvs_common_cohort: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
         bedgraph_vaf: [needed: [], existing: []],
-        vep_annotation: [needed: [], existing: []]
+        vep_annotation: [needed: [], existing: []],
+        familial_pedigree: [needed: [], existing: []]
     ]
     
     // Check existing family VCF files 
@@ -504,6 +520,20 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing familial pedigree files
+    families.each { fid ->
+        def family_pedigree_path = "${params.data}/families/${fid}/${fid}.pedigree.tsv"
+        
+        if (new File(family_pedigree_path).exists()) {
+            plan.familial_pedigree.existing.add(fid)
+        } else {
+            // Need familial pedigree if the step is requested
+            if ('familial_pedigree' in params.steps) {
+                plan.familial_pedigree.needed.add(fid)
+            }
+        }
+    }
+    
     return plan
 }
 
@@ -526,6 +556,8 @@ def displayAnalysisSummary(analysis_plan) {
     == Common Variants ==
     SNVS_COMMON_FILTERS: ${analysis_plan.snvs_common_filters.existing.size()} families done and ${analysis_plan.snvs_common_filters.needed.size()} to do    
     SNVS_COMMON_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
+    == Familial Pedigree ==
+    FAMILIAL_PEDIGREE: ${analysis_plan.familial_pedigree.existing.size()} families done and ${analysis_plan.familial_pedigree.needed.size()} to do
     ========================================================================================
     """
     
@@ -561,6 +593,9 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.bedgraph_vaf.needed) {
         log.info "Individuals needing VAF bedgraph generation: ${analysis_plan.bedgraph_vaf.needed.join(', ')}"
+    }
+    if (analysis_plan.familial_pedigree.needed) {
+        log.info "Families needing pedigree extraction: ${analysis_plan.familial_pedigree.needed.join(', ')}"
     }
 }
 
