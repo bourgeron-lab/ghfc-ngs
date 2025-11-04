@@ -48,12 +48,6 @@ process VCF2BEDGRAPH_VAF {
   vcf2bedgraph \\
       ${vcf} \\
       --output ${output_file} 
-
-  # Compress the bedgraph file
-  bgzip ${output_file}
-
-  # Index the compressed bedgraph file
-  tabix -p bed ${output_file}.gz
   """
 
   stub:
