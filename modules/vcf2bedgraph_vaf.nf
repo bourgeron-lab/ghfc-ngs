@@ -46,9 +46,8 @@ process VCF2BEDGRAPH_VAF {
   """
   # Convert VCF to VAF bedgraph
   vcf2bedgraph \\
-      --input ${vcf} \\
-      --output ${output_file} \\
-      --mode vaf
+      ${vcf} \\
+      --output ${output_file} 
 
   # Compress the bedgraph file
   bgzip ${output_file}
