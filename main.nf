@@ -20,6 +20,7 @@ include { SNVS_FREQ_FILTER } from './workflows/snvs_freq_filter'
 include { SNVS_COMMON_FILTERS } from './workflows/snvs_common_filters'
 include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
 include { BEDGRAPHS } from './workflows/bedgraphs'
+include { BEDGRAPH_VAF } from './workflows/bedgraph_vaf'
 include { VEP_ANNOTATION } from './workflows/vep_annotation'
 
 /*
@@ -40,7 +41,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'vep_annotation']
+def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'bedgraph_vaf', 'vep_annotation']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -271,6 +272,22 @@ workflow {
         
         BEDGRAPHS(bedgraphs_crams)
     }
+    
+    // Run VAF bedgraph generation if needed and allowed
+    if (analysis_plan.bedgraph_vaf.needed.size() > 0 && 'bedgraph_vaf' in params.steps) {
+        log.info "Running VAF bedgraph generation for ${analysis_plan.bedgraph_vaf.needed.size()} individuals..."
+        
+        // Get all available VCF files (existing + newly created)
+        all_available_vcfs = channels.existing_vcfs.mix(DEEPVARIANT.out.vcf ?: Channel.empty())
+        
+        // Filter VCF files for individuals that need VAF bedgraphs
+        vaf_vcfs = all_available_vcfs
+            .filter { barcode, vcf, tbi -> 
+                barcode in analysis_plan.bedgraph_vaf.needed 
+            }
+        
+        BEDGRAPH_VAF(vaf_vcfs)
+    }
 }
 
 /*
@@ -318,6 +335,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         snvs_common_filters: [needed: [], existing: []],
         snvs_common_cohort: [needed: [], existing: []],
         bedgraphs: [needed: [], existing: []],
+        bedgraph_vaf: [needed: [], existing: []],
         vep_annotation: [needed: [], existing: []]
     ]
     
@@ -471,6 +489,21 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing VAF bedgraph files
+    individuals.each { barcode ->
+        def vaf_bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz"
+        def vaf_bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi"
+        
+        if (new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists()) {
+            plan.bedgraph_vaf.existing.add(barcode)
+        } else {
+            // Only need VAF bedgraphs if the step is requested and VCF files exist or will be created
+            if ('bedgraph_vaf' in params.steps && (barcode in plan.deepvariant.existing || barcode in plan.deepvariant.needed)) {
+                plan.bedgraph_vaf.needed.add(barcode)
+            }
+        }
+    }
+    
     return plan
 }
 
@@ -481,6 +514,7 @@ def displayAnalysisSummary(analysis_plan) {
     ========================================================================================
     ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done and ${analysis_plan.alignment.needed.size()} to do
     BEDGRAPHS: ${analysis_plan.bedgraphs.existing.size()} individuals done and ${analysis_plan.bedgraphs.needed.size()} to do
+    BEDGRAPH_VAF: ${analysis_plan.bedgraph_vaf.existing.size()} individuals done and ${analysis_plan.bedgraph_vaf.needed.size()} to do
     == SNVs/INDELs Calling ==
     DEEPVARIANT: ${analysis_plan.deepvariant.existing.size()} individuals done and ${analysis_plan.deepvariant.needed.size()} to do
     FAMILY_CALLING: ${analysis_plan.family_calling.existing.size()} families done and ${analysis_plan.family_calling.needed.size()} to do
@@ -524,6 +558,9 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.bedgraphs.needed) {
         log.info "Individuals needing bedgraph generation: ${analysis_plan.bedgraphs.needed.join(', ')}"
+    }
+    if (analysis_plan.bedgraph_vaf.needed) {
+        log.info "Individuals needing VAF bedgraph generation: ${analysis_plan.bedgraph_vaf.needed.join(', ')}"
     }
 }
 
@@ -656,6 +693,22 @@ def createChannels(analysis_plan) {
         }
         .map { barcode, gvcf, tbi_path ->
             [barcode, gvcf, file(tbi_path)]
+        }
+
+    // Create channel for existing individual VCF files (not gVCF)
+    channels.existing_vcfs = Channel
+        .fromPath("${params.data}/samples/*/deepvariant/*.vcf.gz")
+        .filter { vcf -> !vcf.name.contains('.g.vcf.gz') }  // Exclude gVCF files
+        .map { vcf ->
+            def barcode = vcf.name.tokenize('.')[0]
+            def tbi_path = "${vcf}.tbi"
+            [barcode, vcf, tbi_path]
+        }
+        .filter { barcode, vcf, tbi_path -> 
+            barcode in analysis_plan.deepvariant.existing && new File(tbi_path).exists()
+        }
+        .map { barcode, vcf, tbi_path ->
+            [barcode, vcf, file(tbi_path)]
         }
     
     // Create channel for existing family VCF files
