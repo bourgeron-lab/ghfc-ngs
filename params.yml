@@ -4,18 +4,11 @@
 # Pipeline steps control - ALL REQUIRED STEPS MUST BE LISTED
 steps: [
     "alignment",
-    "bedgraphs",
-    "bedgraph_vaf",
-    "deepvariant",
-    "family_calling",
-    "familial_pedigree",
-    "norm",
-    "snvs_freq_annot",
-    "snvs_freq_filter",
-    "snvs_common_filters",
+    "deepvariant_sample",
+    "deepvariant_family",
+    "wombat",
     "snvs_common_cohort",
-    "vep_annotation",
-  ] # Available steps: alignment, deepvariant, family_calling, bedgraphs, bedgraph_vaf, norm, snvs_freq_annot, snvs_freq_filter, snvs_common_filters, snvs_common_cohort, vep_annotation, familial_pedigree
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, wombat, snvs_common_cohort
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"

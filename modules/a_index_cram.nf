@@ -1,4 +1,4 @@
-process INDEX_CRAM {
+process A_INDEX_CRAM {
     
     tag "$barcode:$unit"
     

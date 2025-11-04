@@ -1,4 +1,12 @@
-process GLNEXUS_FAMILY {
+#!/usr/bin/env nextflow
+
+/*
+ * GLnexus family calling module for DeepVariant family workflow
+ */
+
+nextflow.enable.dsl=2
+
+process GL_GLNEXUS_FAMILY {
     
     tag "$fid"
     

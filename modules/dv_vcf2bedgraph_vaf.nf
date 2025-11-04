@@ -1,14 +1,14 @@
 #!/usr/bin/env nextflow
 
 /*
- * VCF to VAF Bedgraph conversion module
+ * DeepVariant VCF to VAF Bedgraph conversion module
  */
 
 nextflow.enable.dsl=2
 
-process VCF2BEDGRAPH_VAF {
+process DV_VCF2BEDGRAPH_VAF {
   /*
-  Convert VCF file to VAF (Variant Allele Frequency) bedgraph format
+  Convert DeepVariant VCF file to VAF (Variant Allele Frequency) bedgraph format
 
   Parameters
   ----------
@@ -30,7 +30,7 @@ process VCF2BEDGRAPH_VAF {
     mode: 'copy',
     pattern: "${barcode}.vaf.bedgraph.gz*"
 
-  container 'docker://ghcr.io/nvnieuwk/vcf2bedgraph:latest'
+  container 'docker://fcliquet/vcf2bedgraph:latest'
   
   label 'vcf2bedgraph'
 

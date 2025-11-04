@@ -12,17 +12,10 @@ nextflow.enable.dsl = 2
 
 // Include workflows
 include { ALIGNMENT } from './workflows/alignment'
-include { DEEPVARIANT } from './workflows/deepvariant'
-include { FAMILY_CALLING } from './workflows/family_calling'
-include { NORM } from './workflows/norm'
-include { SNVS_FREQ_ANNOT } from './workflows/snvs_freq_annot'
-include { SNVS_FREQ_FILTER } from './workflows/snvs_freq_filter'
-include { SNVS_COMMON_FILTERS } from './workflows/snvs_common_filters'
+include { DEEPVARIANT_SAMPLE } from './workflows/deepvariant_sample'
+include { DEEPVARIANT_FAMILY } from './workflows/deepvariant_family'
+include { WOMBAT } from './workflows/wombat'
 include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
-include { BEDGRAPHS } from './workflows/bedgraphs'
-include { BEDGRAPH_VAF } from './workflows/bedgraph_vaf'
-include { VEP_ANNOTATION } from './workflows/vep_annotation'
-include { FAMILIAL_PEDIGREE } from './workflows/familial_pedigree'
 
 /*
 ========================================================================================
@@ -38,11 +31,11 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant, family_calling, norm, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation, familial_pedigree"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant', 'family_calling', 'norm', 'snvs_freq_annot', 'snvs_freq_filter', 'snvs_common_filters', 'snvs_common_cohort', 'bedgraphs', 'bedgraph_vaf', 'vep_annotation', 'familial_pedigree']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'wombat', 'snvs_common_cohort']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -114,19 +107,19 @@ workflow {
     // Collect all available CRAM files (existing + newly aligned)
     all_available_crams = channels.existing_crams.mix(aligned_crams ?: Channel.empty())
     
-    // Run DeepVariant if needed and allowed
-    if (analysis_plan.deepvariant.needed.size() > 0 && 'deepvariant' in params.steps) {
-        log.info "Running DeepVariant for ${analysis_plan.deepvariant.needed.size()} individuals..."
+    // Run DeepVariant sample workflow if needed and allowed
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && 'deepvariant_sample' in params.steps) {
+        log.info "Running DeepVariant sample workflow for ${analysis_plan.deepvariant_sample.needed.size()} individuals..."
         
         // Filter CRAM files for individuals that need DeepVariant
         deepvariant_crams = all_available_crams
             .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.deepvariant.needed 
+                barcode in analysis_plan.deepvariant_sample.needed 
             }
         
-        DEEPVARIANT(deepvariant_crams)
+        DEEPVARIANT_SAMPLE(deepvariant_crams)
         
-        deepvariant_gvcfs = DEEPVARIANT.out.gvcf
+        deepvariant_gvcfs = DEEPVARIANT_SAMPLE.out.gvcf
     } else {
         deepvariant_gvcfs = Channel.empty()
     }
@@ -134,10 +127,12 @@ workflow {
     // Collect all available gVCF files (existing + newly created)
     all_available_gvcfs = channels.existing_gvcfs.mix(deepvariant_gvcfs ?: Channel.empty())
     
-    // Run family calling if needed and allowed
+    // Run family calling, normalization, and pedigree extraction if needed and allowed
     family_vcfs_output = Channel.empty()
-    if (analysis_plan.family_calling.needed.size() > 0 && 'family_calling' in params.steps) {
-        log.info "Running family calling for ${analysis_plan.family_calling.needed.size()} families..."
+    normalized_bcfs_output = Channel.empty()
+    family_pedigrees_output = Channel.empty()
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in params.steps) {
+        log.info "Running family calling, normalization, and pedigree extraction for ${analysis_plan.deepvariant_family.needed.size()} families..."
         
         // Group gVCF files by family
         family_gvcfs = all_available_gvcfs
@@ -146,87 +141,35 @@ workflow {
                 [fid, barcode, gvcf, tbi]
             }
             .filter { fid, barcode, gvcf, tbi -> 
-                fid in analysis_plan.family_calling.needed 
+                fid in analysis_plan.deepvariant_family.needed 
             }
             .groupTuple(by: 0)
             .map { fid, barcodes, gvcfs, tbis ->
                 [fid, barcodes, gvcfs, tbis]
             }
         
-        FAMILY_CALLING(family_gvcfs)
-        family_vcfs_output = FAMILY_CALLING.out.family_vcfs
+        DEEPVARIANT_FAMILY(family_gvcfs, pedigree_file)
+        family_vcfs_output = DEEPVARIANT_FAMILY.out.family_vcfs
+        normalized_bcfs_output = DEEPVARIANT_FAMILY.out.normalized_bcfs
+        family_pedigrees_output = DEEPVARIANT_FAMILY.out.family_pedigrees
     }
     
-    // Run VCF normalization if needed and allowed
-    normalized_vcfs_output = Channel.empty()
-    if (analysis_plan.norm.needed.size() > 0 && 'norm' in params.steps) {
-        log.info "Running VCF normalization for ${analysis_plan.norm.needed.size()} families..."
+    // Run wombat (gnomAD annotation, filtering, VEP) if needed and allowed
+    wombat_common_bcfs_output = Channel.empty()
+    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
+        log.info "Running wombat for ${analysis_plan.wombat.needed.size()} families..."
         
-        // Get all available family VCFs (existing + newly created)
-        all_available_family_vcfs = channels.existing_family_vcfs.mix(family_vcfs_output ?: Channel.empty())
+        // Get all available normalized family BCFs (existing + newly created)
+        all_available_normalized_bcfs = channels.existing_normalized_bcfs.mix(normalized_bcfs_output ?: Channel.empty())
         
-        // Filter for families that need normalization
-        norm_vcfs = all_available_family_vcfs
-            .filter { fid, vcf, tbi -> 
-                fid in analysis_plan.norm.needed 
+        // Filter for families that need wombat
+        wombat_bcfs = all_available_normalized_bcfs
+            .filter { fid, bcf, csi -> 
+                fid in analysis_plan.wombat.needed 
             }
         
-        NORM(norm_vcfs)
-        normalized_vcfs_output = NORM.out.normalized_vcfs
-    }
-    
-    // Run gnomAD frequency annotation if needed and allowed
-    gnomad_vcfs_output = Channel.empty()
-    if (analysis_plan.snvs_freq_annot.needed.size() > 0 && 'snvs_freq_annot' in params.steps) {
-        log.info "Running gnomAD frequency annotation for ${analysis_plan.snvs_freq_annot.needed.size()} families..."
-        
-        // Get all available normalized family VCFs (existing + newly created)
-        all_available_normalized_vcfs = channels.existing_normalized_vcfs.mix(normalized_vcfs_output ?: Channel.empty())
-        
-        // Filter for families that need gnomAD annotation
-        gnomad_vcfs = all_available_normalized_vcfs
-            .filter { fid, vcf, tbi -> 
-                fid in analysis_plan.snvs_freq_annot.needed 
-            }
-        
-        SNVS_FREQ_ANNOT(gnomad_vcfs)
-        gnomad_vcfs_output = SNVS_FREQ_ANNOT.out.annotated_vcfs
-    }
-    
-    // Run gnomAD frequency filtering if needed and allowed
-    rare_vcfs_output = Channel.empty()
-    common_vcfs_output = Channel.empty()
-    if (analysis_plan.snvs_freq_filter.needed.size() > 0 && 'snvs_freq_filter' in params.steps) {
-        log.info "Running rare/common variant separation for ${analysis_plan.snvs_freq_filter.needed.size()} families..."
-        
-        // Get all available gnomAD annotated family VCFs (existing + newly created)
-        all_available_gnomad_vcfs = channels.existing_gnomad_vcfs.mix(gnomad_vcfs_output ?: Channel.empty())
-        
-        // Filter for families that need frequency filtering
-        filter_vcfs = all_available_gnomad_vcfs
-            .filter { fid, vcf, tbi -> 
-                fid in analysis_plan.snvs_freq_filter.needed 
-            }
-        
-        SNVS_FREQ_FILTER(filter_vcfs)
-        rare_vcfs_output = SNVS_FREQ_FILTER.out.rare_vcfs
-        common_vcfs_output = SNVS_FREQ_FILTER.out.common_vcfs
-    }
-    
-    // Run common variants filtering if needed and allowed
-    if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
-        log.info "Running common variants filtering for ${analysis_plan.snvs_common_filters.needed.size()} families..."
-        
-        // Get all available common VCFs (existing + newly created)
-        all_available_common_vcfs = channels.existing_common_vcfs.mix(common_vcfs_output ?: Channel.empty())
-        
-        // Filter for families that need common filtering
-        common_filter_vcfs = all_available_common_vcfs
-            .filter { fid, vcf, tbi -> 
-                fid in analysis_plan.snvs_common_filters.needed 
-            }
-        
-        SNVS_COMMON_FILTERS(common_filter_vcfs)
+        WOMBAT(wombat_bcfs)
+        wombat_common_bcfs_output = WOMBAT.out.filtered_common_bcfs
     }
     
     // Run cohort common variants merge if needed and allowed
@@ -234,74 +177,15 @@ workflow {
         log.info "Running cohort common variants merge..."
         
         // Get all available common filtered BCFs (existing + newly created)
-        if (analysis_plan.snvs_common_filters.needed.size() > 0 && 'snvs_common_filters' in params.steps) {
+        if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
             // Mix existing BCFs with newly created ones
-            all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(SNVS_COMMON_FILTERS.out.filtered_common_bcfs)
+            all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(wombat_common_bcfs_output)
         } else {
             // Use only existing BCFs if no new ones were created
             all_available_common_bcfs = channels.existing_common_filtered_bcfs
         }
         
         SNVS_COMMON_COHORT(all_available_common_bcfs)
-    }
-    
-    // Run VEP annotation if needed and allowed
-    if (analysis_plan.vep_annotation.needed.size() > 0 && 'vep_annotation' in params.steps) {
-        log.info "Running VEP annotation for ${analysis_plan.vep_annotation.needed.size()} families..."
-        
-        // Get all available rare family VCFs (existing + newly created)
-        all_available_filtered_vcfs = channels.existing_filtered_vcfs.mix(rare_vcfs_output ?: Channel.empty())
-        
-        // Filter for families that need VEP annotation
-        vep_vcfs = all_available_filtered_vcfs
-            .filter { fid, vcf, tbi -> 
-                fid in analysis_plan.vep_annotation.needed 
-            }
-        
-        VEP_ANNOTATION(vep_vcfs)
-    }
-    
-    // Run bedgraphs generation if needed and allowed
-    if (analysis_plan.bedgraphs.needed.size() > 0 && 'bedgraphs' in params.steps) {
-        log.info "Running bedgraph generation for ${analysis_plan.bedgraphs.needed.size()} individuals..."
-        
-        // Filter CRAM files for individuals that need bedgraphs
-        bedgraphs_crams = all_available_crams
-            .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.bedgraphs.needed 
-            }
-        
-        BEDGRAPHS(bedgraphs_crams)
-    }
-    
-    // Run VAF bedgraph generation if needed and allowed
-    if (analysis_plan.bedgraph_vaf.needed.size() > 0 && 'bedgraph_vaf' in params.steps) {
-        log.info "Running VAF bedgraph generation for ${analysis_plan.bedgraph_vaf.needed.size()} individuals..."
-        
-        // Get all available VCF files (existing + newly created)
-        all_available_vcfs = channels.existing_vcfs.mix(DEEPVARIANT.out.vcf ?: Channel.empty())
-        
-        // Filter VCF files for individuals that need VAF bedgraphs
-        vaf_vcfs = all_available_vcfs
-            .filter { barcode, vcf, tbi -> 
-                barcode in analysis_plan.bedgraph_vaf.needed 
-            }
-        
-        BEDGRAPH_VAF(vaf_vcfs)
-    }
-    
-    // Run familial pedigree extraction if needed and allowed
-    if (analysis_plan.familial_pedigree.needed.size() > 0 && 'familial_pedigree' in params.steps) {
-        log.info "Running familial pedigree extraction for ${analysis_plan.familial_pedigree.needed.size()} families..."
-        
-        // Create channel for families needing pedigree extraction
-        family_pedigree_input = Channel
-            .from(analysis_plan.familial_pedigree.needed)
-            .map { fid ->
-                [fid, file(pedigree_file), params.cohort_name]
-            }
-        
-        FAMILIAL_PEDIGREE(family_pedigree_input)
     }
 }
 
@@ -342,90 +226,52 @@ def parsePedigreeFile(pedigree_file) {
 def createAnalysisPlan(families, individuals, family_members) {
     def plan = [
         alignment: [needed: [], existing: []],
-        deepvariant: [needed: [], existing: []],
-        family_calling: [needed: [], existing: []],
-        norm: [needed: [], existing: []],
-        snvs_freq_annot: [needed: [], existing: []],
-        snvs_freq_filter: [needed: [], existing: []],
-        snvs_common_filters: [needed: [], existing: []],
-        snvs_common_cohort: [needed: [], existing: []],
-        bedgraphs: [needed: [], existing: []],
-        bedgraph_vaf: [needed: [], existing: []],
-        vep_annotation: [needed: [], existing: []],
-        familial_pedigree: [needed: [], existing: []]
+        deepvariant_sample: [needed: [], existing: []],
+        deepvariant_family: [needed: [], existing: []],
+        wombat: [needed: [], existing: []],
+        snvs_common_cohort: [needed: [], existing: []]
     ]
     
-    // Check existing family VCF files 
+    // Check existing family outputs (VCF, normalized BCF, and pedigree - all part of deepvariant_family)
     families.each { fid ->
         def family_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz"
         def family_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
+        def norm_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf"
+        def norm_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf.csi"
+        def pedigree_path = "${params.data}/families/${fid}/${fid}.pedigree.tsv"
         
-        if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists()) {
-            plan.family_calling.existing.add(fid)
+        if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists() &&
+            new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() &&
+            new File(pedigree_path).exists()) {
+            plan.deepvariant_family.existing.add(fid)
         } else {
-            plan.family_calling.needed.add(fid)
+            plan.deepvariant_family.needed.add(fid)
         }
     }
     
-    // Check existing normalized VCF files
+    // Check existing wombat outputs (gnomAD BCF, rare/common BCFs, common_gt BCF, VEP BCF - all part of wombat)
     families.each { fid ->
-        def norm_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz"
-        def norm_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.vcf.gz.tbi"
+        def gnomad_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.bcf"
+        def gnomad_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.bcf.csi"
+        def rare_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.bcf"
+        def rare_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.bcf.csi"
+        def common_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf"
+        def common_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf.csi"
+        def common_gt_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf"
+        def common_gt_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi"
+        def vep_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.bcf"
+        def vep_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.bcf.csi"
         
-        if (new File(norm_vcf_path).exists() && new File(norm_tbi_path).exists()) {
-            plan.norm.existing.add(fid)
+        if (new File(gnomad_bcf_path).exists() && new File(gnomad_csi_path).exists() &&
+            new File(rare_bcf_path).exists() && new File(rare_csi_path).exists() &&
+            new File(common_bcf_path).exists() && new File(common_csi_path).exists() &&
+            new File(common_gt_bcf_path).exists() && new File(common_gt_csi_path).exists() &&
+            new File(vep_bcf_path).exists() && new File(vep_csi_path).exists()) {
+            plan.wombat.existing.add(fid)
         } else {
-            // Need normalization if family VCF exists or will be created
-            if (fid in plan.family_calling.existing || fid in plan.family_calling.needed) {
-                plan.norm.needed.add(fid)
-            }
-        }
-    }
-    
-    // Check existing gnomAD annotated files
-    families.each { fid ->
-        def gnomad_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.vcf.gz"
-        def gnomad_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.vcf.gz.tbi"
-        
-        if (new File(gnomad_vcf_path).exists() && new File(gnomad_tbi_path).exists()) {
-            plan.snvs_freq_annot.existing.add(fid)
-        } else {
-            // Need gnomAD annotation if normalized VCFs exist or will be created
-            if (fid in plan.norm.existing || fid in plan.norm.needed) {
-                plan.snvs_freq_annot.needed.add(fid)
-            }
-        }
-    }
-    
-    // Check existing gnomAD filtered files (rare variants)
-    families.each { fid ->
-        def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
-        def rare_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz.tbi"
-        def common_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common.vcf.gz"
-        def common_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.common.vcf.gz.tbi"
-        
-        if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() && 
-            new File(common_vcf_path).exists() && new File(common_tbi_path).exists()) {
-            plan.snvs_freq_filter.existing.add(fid)
-        } else {
-            // Need filtering if gnomAD annotated VCFs exist or will be created
-            if (fid in plan.snvs_freq_annot.existing || fid in plan.snvs_freq_annot.needed) {
-                plan.snvs_freq_filter.needed.add(fid)
-            }
-        }
-    }
-
-    // Check existing common filtered files
-    families.each { fid ->
-        def common_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf"
-        def common_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi"
-        
-        if (new File(common_bcf_path).exists() && new File(common_csi_path).exists()) {
-            plan.snvs_common_filters.existing.add(fid)
-        } else {
-            // Need common filtering if freq_filter VCFs exist or will be created (common variants available)
-            if (fid in plan.snvs_freq_filter.existing || fid in plan.snvs_freq_filter.needed) {
-                plan.snvs_common_filters.needed.add(fid)
+            // Need wombat if normalized BCFs exist or will be created
+            if (fid in plan.deepvariant_family.existing || fid in plan.deepvariant_family.needed) {
+                plan.wombat.needed.add(fid)
             }
         }
     }
@@ -438,98 +284,45 @@ def createAnalysisPlan(families, individuals, family_members) {
         plan.snvs_common_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
-        def families_with_common_bcfs = plan.snvs_common_filters.existing + plan.snvs_common_filters.needed
+        def families_with_common_bcfs = plan.wombat.existing + plan.wombat.needed
         if (families_with_common_bcfs.size() > 0) {
             plan.snvs_common_cohort.needed.add('cohort')  // Single cohort entry
         }
     }
-
-    // Check existing VEP annotated files (rare variants)
-    families.each { fid ->
-        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz"
-        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
-
-        if (new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists()) {
-            plan.vep_annotation.existing.add(fid)
-        } else {
-            // Need VEP if filtered VCFs exist or will be created
-            if (fid in plan.snvs_freq_filter.existing || fid in plan.snvs_freq_filter.needed) {
-                plan.vep_annotation.needed.add(fid)
-            }
-        }
-    }
     
-    // Check existing individual gVCF files
+    // Check existing individual gVCF files and VAF bedgraphs (both outputs of deepvariant_sample)
     individuals.each { barcode ->
         def gvcf_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz"
         def gvcf_tbi_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz.tbi"
-        
-        if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists()) {
-            plan.deepvariant.existing.add(barcode)
-        } else {
-            // Only need DeepVariant if the individual's family needs family calling
-            def fid = family_members[barcode]
-            if (fid in plan.family_calling.needed) {
-                plan.deepvariant.needed.add(barcode)
-            }
-        }
-    }
-    
-    // Check existing CRAM files
-    individuals.each { barcode ->
-        def cram_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram"
-        def crai_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram.crai"
-        
-        if (new File(cram_path).exists() && new File(crai_path).exists()) {
-            plan.alignment.existing.add(barcode)
-        } else {
-            // Only need alignment if the individual needs DeepVariant
-            if (barcode in plan.deepvariant.needed) {
-                plan.alignment.needed.add(barcode)
-            }
-        }
-    }
-    
-    // Check existing bedgraph files
-    individuals.each { barcode ->
-        def bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
-        def bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
-        
-        if (new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
-            plan.bedgraphs.existing.add(barcode)
-        } else {
-            // Only need bedgraphs if the step is requested and CRAM files exist or will be created
-            if ('bedgraphs' in params.steps && (barcode in plan.alignment.existing || barcode in plan.alignment.needed)) {
-                plan.bedgraphs.needed.add(barcode)
-            }
-        }
-    }
-    
-    // Check existing VAF bedgraph files
-    individuals.each { barcode ->
         def vaf_bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz"
         def vaf_bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi"
         
-        if (new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists()) {
-            plan.bedgraph_vaf.existing.add(barcode)
+        if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists() && 
+            new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists()) {
+            plan.deepvariant_sample.existing.add(barcode)
         } else {
-            // Only need VAF bedgraphs if the step is requested and VCF files exist or will be created
-            if ('bedgraph_vaf' in params.steps && (barcode in plan.deepvariant.existing || barcode in plan.deepvariant.needed)) {
-                plan.bedgraph_vaf.needed.add(barcode)
+            // Only need DeepVariant if the individual's family needs deepvariant_family
+            def fid = family_members[barcode]
+            if (fid in plan.deepvariant_family.needed) {
+                plan.deepvariant_sample.needed.add(barcode)
             }
         }
     }
     
-    // Check existing familial pedigree files
-    families.each { fid ->
-        def family_pedigree_path = "${params.data}/families/${fid}/${fid}.pedigree.tsv"
+    // Check existing CRAM and bedgraph files (both produced by alignment workflow)
+    individuals.each { barcode ->
+        def cram_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram"
+        def crai_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram.crai"
+        def bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
+        def bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
         
-        if (new File(family_pedigree_path).exists()) {
-            plan.familial_pedigree.existing.add(fid)
+        if (new File(cram_path).exists() && new File(crai_path).exists() &&
+            new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
+            plan.alignment.existing.add(barcode)
         } else {
-            // Need familial pedigree if the step is requested
-            if ('familial_pedigree' in params.steps) {
-                plan.familial_pedigree.needed.add(fid)
+            // Only need alignment if the individual needs DeepVariant
+            if (barcode in plan.deepvariant_sample.needed) {
+                plan.alignment.needed.add(barcode)
             }
         }
     }
@@ -543,59 +336,29 @@ def displayAnalysisSummary(analysis_plan) {
                                     ANALYSIS SUMMARY
     ========================================================================================
     ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done and ${analysis_plan.alignment.needed.size()} to do
-    BEDGRAPHS: ${analysis_plan.bedgraphs.existing.size()} individuals done and ${analysis_plan.bedgraphs.needed.size()} to do
-    BEDGRAPH_VAF: ${analysis_plan.bedgraph_vaf.existing.size()} individuals done and ${analysis_plan.bedgraph_vaf.needed.size()} to do
     == SNVs/INDELs Calling ==
-    DEEPVARIANT: ${analysis_plan.deepvariant.existing.size()} individuals done and ${analysis_plan.deepvariant.needed.size()} to do
-    FAMILY_CALLING: ${analysis_plan.family_calling.existing.size()} families done and ${analysis_plan.family_calling.needed.size()} to do
-    NORM: ${analysis_plan.norm.existing.size()} families done and ${analysis_plan.norm.needed.size()} to do
-    SNVS_FREQ_ANNOT: ${analysis_plan.snvs_freq_annot.existing.size()} families done and ${analysis_plan.snvs_freq_annot.needed.size()} to do
-    SNVS_FREQ_FILTER: ${analysis_plan.snvs_freq_filter.existing.size()} families done and ${analysis_plan.snvs_freq_filter.needed.size()} to do
-    == Rare Variants ==
-    VEP_ANNOTATION: ${analysis_plan.vep_annotation.existing.size()} families done and ${analysis_plan.vep_annotation.needed.size()} to do
+    DEEPVARIANT_SAMPLE: ${analysis_plan.deepvariant_sample.existing.size()} individuals done and ${analysis_plan.deepvariant_sample.needed.size()} to do
+    DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
+    WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
     == Common Variants ==
-    SNVS_COMMON_FILTERS: ${analysis_plan.snvs_common_filters.existing.size()} families done and ${analysis_plan.snvs_common_filters.needed.size()} to do    
     SNVS_COMMON_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
-    == Familial Pedigree ==
-    FAMILIAL_PEDIGREE: ${analysis_plan.familial_pedigree.existing.size()} families done and ${analysis_plan.familial_pedigree.needed.size()} to do
     ========================================================================================
     """
     
     if (analysis_plan.alignment.needed) {
         log.info "Individuals needing alignment: ${analysis_plan.alignment.needed.join(', ')}"
     }
-    if (analysis_plan.deepvariant.needed) {
-        log.info "Individuals needing variant calling: ${analysis_plan.deepvariant.needed.join(', ')}"
+    if (analysis_plan.deepvariant_sample.needed) {
+        log.info "Individuals needing variant calling: ${analysis_plan.deepvariant_sample.needed.join(', ')}"
     }
-    if (analysis_plan.family_calling.needed) {
-        log.info "Families needing family calling: ${analysis_plan.family_calling.needed.join(', ')}"
+    if (analysis_plan.deepvariant_family.needed) {
+        log.info "Families needing family calling, normalization, and pedigree: ${analysis_plan.deepvariant_family.needed.join(', ')}"
     }
-    if (analysis_plan.norm.needed) {
-        log.info "Families needing VCF normalization: ${analysis_plan.norm.needed.join(', ')}"
-    }
-    if (analysis_plan.snvs_freq_annot.needed) {
-        log.info "Families needing gnomAD frequency annotation: ${analysis_plan.snvs_freq_annot.needed.join(', ')}"
-    }
-    if (analysis_plan.snvs_freq_filter.needed) {
-        log.info "Families needing rare/common variant separation: ${analysis_plan.snvs_freq_filter.needed.join(', ')}"
-    }
-    if (analysis_plan.snvs_common_filters.needed) {
-        log.info "Families needing common variant filtering: ${analysis_plan.snvs_common_filters.needed.join(', ')}"
+    if (analysis_plan.wombat.needed) {
+        log.info "Families needing wombat (gnomAD annotation, filtering, and VEP): ${analysis_plan.wombat.needed.join(', ')}"
     }
     if (analysis_plan.snvs_common_cohort.needed) {
         log.info "Cohort needing common variant merge: Yes"
-    }
-    if (analysis_plan.vep_annotation.needed) {
-        log.info "Families needing VEP annotation: ${analysis_plan.vep_annotation.needed.join(', ')}"
-    }
-    if (analysis_plan.bedgraphs.needed) {
-        log.info "Individuals needing bedgraph generation: ${analysis_plan.bedgraphs.needed.join(', ')}"
-    }
-    if (analysis_plan.bedgraph_vaf.needed) {
-        log.info "Individuals needing VAF bedgraph generation: ${analysis_plan.bedgraph_vaf.needed.join(', ')}"
-    }
-    if (analysis_plan.familial_pedigree.needed) {
-        log.info "Families needing pedigree extraction: ${analysis_plan.familial_pedigree.needed.join(', ')}"
     }
 }
 
@@ -607,19 +370,19 @@ def validateStepsAvailability(analysis_plan) {
         errors.add("Alignment step is required for ${analysis_plan.alignment.needed.size()} individuals but not included in steps parameter")
     }
     
-    // Check if deepvariant is needed but not available  
-    if (analysis_plan.deepvariant.needed.size() > 0 && !('deepvariant' in params.steps)) {
-        errors.add("DeepVariant step is required for ${analysis_plan.deepvariant.needed.size()} individuals but not included in steps parameter")
+    // Check if deepvariant_sample is needed but not available  
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in params.steps)) {
+        errors.add("DeepVariant sample step is required for ${analysis_plan.deepvariant_sample.needed.size()} individuals but not included in steps parameter")
     }
     
-    // Check if family_calling is needed but not available
-    if (analysis_plan.family_calling.needed.size() > 0 && !('family_calling' in params.steps)) {
-        errors.add("Family calling step is required for ${analysis_plan.family_calling.needed.size()} families but not included in steps parameter")
+    // Check if deepvariant_family is needed but not available
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in params.steps)) {
+        errors.add("DeepVariant family step is required for ${analysis_plan.deepvariant_family.needed.size()} families but not included in steps parameter")
     }
     
-    // Check if bedgraphs is needed but not available
-    if (analysis_plan.bedgraphs.needed.size() > 0 && !('bedgraphs' in params.steps)) {
-        errors.add("Bedgraphs step is required for ${analysis_plan.bedgraphs.needed.size()} individuals but not included in steps parameter")
+    // Check if wombat is needed but not available
+    if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in params.steps)) {
+        errors.add("Wombat step is required for ${analysis_plan.wombat.needed.size()} families but not included in steps parameter")
     }
     
     if (errors) {
@@ -630,7 +393,7 @@ def validateStepsAvailability(analysis_plan) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant, family_calling, bedgraphs
+        Available steps: alignment, deepvariant_sample, deepvariant_family, wombat, snvs_common_cohort
         ========================================================================================
         """
         exit 1, "Pipeline stopped due to missing required steps"
@@ -756,73 +519,28 @@ def createChannels(analysis_plan) {
             [fid, vcf, tbi_path]
         }
         .filter { fid, vcf, tbi_path -> 
-            fid in analysis_plan.family_calling.existing && new File(tbi_path).exists()
+            fid in analysis_plan.deepvariant_family.existing && new File(tbi_path).exists()
         }
         .map { fid, vcf, tbi_path ->
             [fid, vcf, file(tbi_path)]
         }
     
-    // Create channel for existing normalized VCF files
-    channels.existing_normalized_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.norm.vcf.gz")
-        .map { vcf ->
-            def fid = vcf.parent.parent.name  // Get family ID from path
-            def tbi_path = "${vcf}.tbi"
-            [fid, vcf, tbi_path]
+    // Create channel for existing normalized BCF files
+    channels.existing_normalized_bcfs = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.norm.bcf")
+        .map { bcf ->
+            def fid = bcf.parent.parent.name  // Get family ID from path
+            def csi_path = "${bcf}.csi"
+            [fid, bcf, csi_path]
         }
-        .filter { fid, vcf, tbi_path -> 
-            fid in analysis_plan.norm.existing && new File(tbi_path).exists()
+        .filter { fid, bcf, csi_path -> 
+            fid in analysis_plan.deepvariant_family.existing && new File(csi_path).exists()
         }
-        .map { fid, vcf, tbi_path ->
-            [fid, vcf, file(tbi_path)]
+        .map { fid, bcf, csi_path ->
+            [fid, bcf, file(csi_path)]
         }
     
-    // Create channel for existing gnomAD annotated VCF files
-    channels.existing_gnomad_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.gnomad.vcf.gz")
-        .map { vcf ->
-            def fid = vcf.parent.parent.name  // Get family ID from path
-            def tbi_path = "${vcf}.tbi"
-            [fid, vcf, tbi_path]
-        }
-        .filter { fid, vcf, tbi_path -> 
-            fid in analysis_plan.snvs_freq_annot.existing && new File(tbi_path).exists()
-        }
-        .map { fid, vcf, tbi_path ->
-            [fid, vcf, file(tbi_path)]
-        }
-
-    // Create channel for existing rare VCF files (output from gnomAD filtering)
-    channels.existing_filtered_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.rare.vcf.gz")
-        .map { vcf ->
-            def fid = vcf.parent.parent.name  // Get family ID from path
-            def tbi_path = "${vcf}.tbi"
-            [fid, vcf, tbi_path]
-        }
-        .filter { fid, vcf, tbi_path -> 
-            fid in analysis_plan.snvs_freq_filter.existing && new File(tbi_path).exists()
-        }
-        .map { fid, vcf, tbi_path ->
-            [fid, vcf, file(tbi_path)]
-        }
-
-    // Create channel for existing common VCF files (output from gnomAD filtering)
-    channels.existing_common_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.common.vcf.gz")
-        .map { vcf ->
-            def fid = vcf.parent.parent.name  // Get family ID from path
-            def tbi_path = "${vcf}.tbi"
-            [fid, vcf, tbi_path]
-        }
-        .filter { fid, vcf, tbi_path -> 
-            fid in analysis_plan.snvs_freq_filter.existing && new File(tbi_path).exists()
-        }
-        .map { fid, vcf, tbi_path ->
-            [fid, vcf, file(tbi_path)]
-        }
-
-    // Create channel for existing common filtered BCF files (output from common filtering)
+    // Create channel for existing common filtered BCF files (output from wombat, used by snvs_common_cohort)
     channels.existing_common_filtered_bcfs = Channel
         .fromPath("${params.data}/families/*/vcfs/*.common_gt.bcf")
         .map { bcf ->
@@ -831,7 +549,7 @@ def createChannels(analysis_plan) {
             [fid, bcf, csi_path]
         }
         .filter { fid, bcf, csi_path -> 
-            fid in analysis_plan.snvs_common_filters.existing && new File(csi_path).exists()
+            fid in analysis_plan.wombat.existing && new File(csi_path).exists()
         }
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]

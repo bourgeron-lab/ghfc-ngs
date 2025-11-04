@@ -1,13 +1,13 @@
 #!/usr/bin/env nextflow
 
 /*
- * Familial pedigree extraction module
+ * Familial pedigree extraction module for DeepVariant family workflow
  * Extracts family-specific pedigree information from cohort pedigree file
  */
 
 nextflow.enable.dsl=2
 
-process familial_pedigree {
+process GL_FAMILIAL_PEDIGREE {
   /*
   Extract family-specific pedigree subset from cohort pedigree file
 

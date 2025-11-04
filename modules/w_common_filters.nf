@@ -1,13 +1,13 @@
 #!/usr/bin/env nextflow
 
 /*
- * SNVs common variants filtering module
+ * Wombat: SNVs common variants filtering module
  * Filters common variants and keeps only GT format field
  */
 
 nextflow.enable.dsl=2
 
-process snvs_common_filters {
+process W_COMMON_FILTERS {
   /*
   Filter common variants by removing variants with non-empty INFO/genomes_filters
   and keeping only GT field in FORMAT
@@ -16,10 +16,10 @@ process snvs_common_filters {
   ----------
   fid : str
     Family ID
-  vcf : path
-    Common variants VCF file (FID.common.vcf.gz)
-  vcf_index : path
-    VCF index file (.tbi or .csi)
+  bcf : path
+    Common variants BCF file (FID.common.bcf)
+  bcf_index : path
+    BCF index file (.csi)
 
   Returns
   -------
@@ -37,7 +37,7 @@ process snvs_common_filters {
   label 'common_filtering'
 
   input:
-  tuple val(fid), path(vcf), path(vcf_index)
+  tuple val(fid), path(bcf), path(bcf_index)
 
   output:
   tuple val(fid), path("${output_bcf}"), path("${output_bcf}.csi"), emit: filtered_common_bcfs
@@ -53,7 +53,7 @@ process snvs_common_filters {
       -x '^FORMAT/GT' \\
       -O b \\
       -o ${output_bcf} \\
-      ${vcf}
+      ${bcf}
 
   # Index the filtered BCF
   bcftools index ${output_bcf}

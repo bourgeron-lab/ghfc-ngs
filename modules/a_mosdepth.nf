@@ -1,4 +1,4 @@
-process MOSDEPTH {
+process A_MOSDEPTH {
 
     tag "$barcode"
     
