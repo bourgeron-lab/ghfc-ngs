@@ -108,30 +108,48 @@ workflow MIGRATE_LEGACY_FORMATS {
     log.info ""
     
     // Convert norm.vcf.gz files to BCF
+    norm_converted = Channel.empty()
     if (!norm_files_to_convert.isEmpty()) {
         norm_channel = Channel.fromList(norm_files_to_convert)
             .map { fid, vcf, tbi -> [fid, file(vcf), file(tbi)] }
         
         CONVERT_NORM_VCF_TO_BCF(norm_channel)
+        norm_converted = CONVERT_NORM_VCF_TO_BCF.out.converted_bcf
     }
     
     // Convert common.vcf.gz files to BCF
+    common_converted = Channel.empty()
     if (!common_files_to_convert.isEmpty()) {
         common_channel = Channel.fromList(common_files_to_convert)
             .map { fid, vcf, tbi -> [fid, file(vcf), file(tbi)] }
         
         CONVERT_COMMON_VCF_TO_BCF(common_channel)
+        common_converted = CONVERT_COMMON_VCF_TO_BCF.out.converted_bcf
     }
     
-    // Clean up legacy files for all families
-    cleanup_channel = Channel.fromList(families)
-        .map { fid -> [fid, params.data, []] }
+    // Combine all converted files and collect them to ensure all conversions complete
+    all_conversions = norm_converted.mix(common_converted)
+    
+    // Wait for all conversions to complete, then prepare cleanup channel
+    // Using collect() to ensure all conversions are done before cleanup starts
+    all_conversions
+        .collect()
+        .map { all_results ->
+            // Extract all family IDs from conversion results
+            def converted_fids = all_results.collect { it[0] }.unique()
+            return converted_fids
+        }
+        .flatMap { converted_fids ->
+            // Now create cleanup tasks for all families
+            families.collect { fid -> [fid, params.data, []] }
+        }
+        .set { cleanup_channel }
     
     CLEANUP_LEGACY_FILES(cleanup_channel)
     
     emit:
-    norm_converted = norm_files_to_convert.isEmpty() ? Channel.empty() : CONVERT_NORM_VCF_TO_BCF.out.converted_bcf
-    common_converted = common_files_to_convert.isEmpty() ? Channel.empty() : CONVERT_COMMON_VCF_TO_BCF.out.converted_bcf
+    norm_converted = norm_converted
+    common_converted = common_converted
     cleanup_status = CLEANUP_LEGACY_FILES.out.status
 }
 
