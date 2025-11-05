@@ -45,7 +45,17 @@ cd /path/to/your/workspace
 # Pipeline files should be in the current directory
 ```
 
-### 2. Prepare Your Pedigree File
+### 2. Migrating from Legacy Formats (Optional)
+
+If you have existing data from an older version of the pipeline with VCF.gz files, you'll need to run the migration workflow once before running the main pipeline:
+
+```bash
+nextflow run migrate.nf -params-file params.yml
+```
+
+See [MIGRATION.md](MIGRATION.md) for detailed migration instructions.
+
+### 3. Prepare Your Pedigree File
 
 Create a TSV file with 6 columns (FID, barcode, father, mother, sex, phenotype):
 

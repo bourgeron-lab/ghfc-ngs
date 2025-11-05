@@ -28,9 +28,7 @@ process GNOMAD_FREQ_ANNOT {
 
   tag "$fid"
 
-  publishDir "${params.data}/families/${fid}/vcfs",
-    mode: 'copy',
-    pattern: "${fid}.gnomad.bcf*"
+  // No publishDir - this is an intermediate file kept only in work directory
 
   container 'docker://staphb/bcftools:latest'
   

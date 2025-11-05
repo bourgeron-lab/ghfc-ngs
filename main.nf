@@ -232,16 +232,14 @@ def createAnalysisPlan(families, individuals, family_members) {
         snvs_common_cohort: [needed: [], existing: []]
     ]
     
-    // Check existing family outputs (VCF, normalized BCF, and pedigree - all part of deepvariant_family)
+    // Check existing family outputs (normalized BCF and pedigree - all part of deepvariant_family)
+    // Note: {FID}.vcf.gz is intermediate (GLnexus output) and not published
     families.each { fid ->
-        def family_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz"
-        def family_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.vcf.gz.tbi"
         def norm_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf"
         def norm_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf.csi"
         def pedigree_path = "${params.data}/families/${fid}/${fid}.pedigree.tsv"
         
-        if (new File(family_vcf_path).exists() && new File(family_tbi_path).exists() &&
-            new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() &&
+        if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() &&
             new File(pedigree_path).exists()) {
             plan.deepvariant_family.existing.add(fid)
         } else {
@@ -249,24 +247,25 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing wombat outputs (gnomAD BCF, rare/common BCFs, common_gt BCF, VEP BCF - all part of wombat)
+    // Check existing wombat outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF - all part of wombat)
+    // Note: {FID}.gnomad.bcf is intermediate and not published
     families.each { fid ->
-        def gnomad_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.bcf"
-        def gnomad_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.gnomad.bcf.csi"
-        def rare_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.bcf"
-        def rare_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.bcf.csi"
+        def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
+        def rare_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz.tbi"
         def common_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf"
         def common_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf.csi"
         def common_gt_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf"
         def common_gt_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi"
-        def vep_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.bcf"
-        def vep_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.bcf.csi"
+        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz"
+        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
+        def annotated_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf"
+        def annotated_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi"
         
-        if (new File(gnomad_bcf_path).exists() && new File(gnomad_csi_path).exists() &&
-            new File(rare_bcf_path).exists() && new File(rare_csi_path).exists() &&
+        if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() &&
             new File(common_bcf_path).exists() && new File(common_csi_path).exists() &&
             new File(common_gt_bcf_path).exists() && new File(common_gt_csi_path).exists() &&
-            new File(vep_bcf_path).exists() && new File(vep_csi_path).exists()) {
+            new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists() &&
+            new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists()) {
             plan.wombat.existing.add(fid)
         } else {
             // Need wombat if normalized BCFs exist or will be created

@@ -34,6 +34,7 @@ OPTIONS:
     --ref FILE                  Reference genome file
     --ref-name NAME             Reference genome name
     --steps "step1,step2"       Pipeline steps to run (alignment,deepvariant,family_calling)
+    --migrate                   Run migration workflow instead of main pipeline
     --resume                    Resume previous run
     --dry-run                   Show what would be executed
     --stub-run                  Run in stub mode (for testing)
@@ -42,6 +43,9 @@ OPTIONS:
 EXAMPLES:
     # Run full pipeline
     $0 --params-file params.yml
+
+    # Run migration workflow (one-time, for legacy files)
+    $0 --migrate --params-file params.yml
 
     # Run with specific steps
     $0 --params-file params.yml --steps "deepvariant,family_calling"
@@ -64,6 +68,7 @@ PEDIGREE=""
 REF=""
 REF_NAME=""
 STEPS=""
+MIGRATE=""
 DRY_RUN=""
 STUB_RUN=""
 EXTRA_ARGS=""
@@ -111,6 +116,10 @@ while [[ $# -gt 0 ]]; do
             STEPS="--steps $2"
             shift 2
             ;;
+        --migrate)
+            MIGRATE="migrate.nf"
+            shift
+            ;;
         --resume)
             RESUME="-resume"
             shift
@@ -142,7 +151,11 @@ fi
 
 
 # Construct the command
-CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
+if [[ -n "$MIGRATE" ]]; then
+    CMD="nextflow run -latest bourgeron-lab/ghfc-ngs/$MIGRATE"
+else
+    CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
+fi
 CMD="$CMD -profile $PROFILE"
 
 # Add optional parameters

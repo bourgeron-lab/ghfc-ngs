@@ -10,7 +10,7 @@ process GLNEXUS_FAMILY {
     
     tag "$fid"
     
-    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
+    // No publishDir - this is an intermediate file kept only in work directory
     
     input:
     tuple val(fid), val(barcodes), path(gvcfs), path(tbis)
