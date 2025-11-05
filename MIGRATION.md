@@ -42,16 +42,34 @@ Run this migration workflow **once, before running the main pipeline** if:
 
 ### Basic Usage
 
+The migration workflow automatically uses SLURM for job execution and Apptainer for containers (profiles: `slurm,apptainer`).
+
 ```bash
-# Using your existing params.yml file
+# Using your existing params.yml file (default: uses SLURM + Apptainer)
 nextflow run migrate.nf -params-file params.yml
 
 # Or specify data directory directly
 nextflow run migrate.nf --data /path/to/your/data
 
+# Override default profiles (e.g., for local execution)
+nextflow run migrate.nf -params-file params.yml -profile local
+
+# Using the run_pipeline.sh script
+./run_pipeline.sh --migrate --params-file params.yml
+
 # With custom Nextflow configuration
 nextflow run migrate.nf -params-file params.yml -c your_config.config
 ```
+
+### Resource Requirements
+
+The migration processes use the following resources on SLURM:
+
+- **VCF to BCF Conversion**: 2 CPUs, 8 GB memory, 4 hours
+- **Cleanup**: 1 CPU, 2 GB memory, 1 hour
+- **Container**: `staphb/bcftools:latest` (via Apptainer)
+
+These settings are defined in `nextflow.config` and can be overridden if needed.
 
 ### What Happens During Migration
 

@@ -26,8 +26,6 @@ process CLEANUP_LEGACY_FILES {
     
     tag "$fid"
     
-    container 'docker://staphb/bcftools:latest'
-    
     input:
     tuple val(fid), val(data_dir), val(files_to_remove)
     

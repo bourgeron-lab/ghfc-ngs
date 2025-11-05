@@ -30,8 +30,6 @@ process CONVERT_COMMON_VCF_TO_BCF {
         mode: 'copy',
         pattern: "${fid}.common.bcf*"
     
-    container 'docker://staphb/bcftools:latest'
-    
     input:
     tuple val(fid), path(vcf), path(tbi)
     

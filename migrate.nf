@@ -12,6 +12,10 @@
         
     Or with specific data directory:
         nextflow run migrate.nf --data /path/to/data
+    
+    The migration workflow automatically uses the slurm,apptainer profiles.
+    To override:
+        nextflow run migrate.nf -params-file params.yml -profile local
 ========================================================================================
 */
 
