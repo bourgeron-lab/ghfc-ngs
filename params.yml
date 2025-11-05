@@ -52,6 +52,10 @@ gnomad_filter_threshold: "0.01" # Frequency threshold for filtering (e.g., 0.01 
 vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
 vep_config_name: "ensembl_vep_115" # Name suffix for output files
 
+# Wombat additional annotation configuration
+wombat_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
+wombat_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files for additional annotation
+
 # SLURM account and partition settings
 slurm_account: "your_account"
 slurm_partition: "ghfc"

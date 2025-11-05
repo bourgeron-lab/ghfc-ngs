@@ -1,4 +1,4 @@
-process A_BAZAM_BWA_MEM2_REALIGN {
+process BAZAM_BWA_MEM2_REALIGN {
 
     tag "$barcode"
     

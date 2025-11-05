@@ -7,7 +7,7 @@
 
 nextflow.enable.dsl=2
 
-process W_COMMON_FILTERS {
+process COMMON_FILTERS {
   /*
   Filter common variants by removing variants with non-empty INFO/genomes_filters
   and keeping only GT field in FORMAT

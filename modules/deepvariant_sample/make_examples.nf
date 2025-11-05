@@ -1,4 +1,4 @@
-process DV_MAKE_EXAMPLES {
+process MAKE_EXAMPLES {
     
     tag "$barcode"
     

@@ -7,7 +7,7 @@
 
 nextflow.enable.dsl=2
 
-process GL_FAMILIAL_PEDIGREE {
+process FAMILIAL_PEDIGREE {
   /*
   Extract family-specific pedigree subset from cohort pedigree file
 

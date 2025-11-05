@@ -6,7 +6,7 @@
 
 nextflow.enable.dsl=2
 
-process W_GNOMAD_FREQ_ANNOT {
+process GNOMAD_FREQ_ANNOT {
   /*
   Annotate normalized BCF files with gnomAD frequency data, output as BCF
 

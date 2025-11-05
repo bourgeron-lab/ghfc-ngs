@@ -7,7 +7,7 @@
 
 nextflow.enable.dsl=2
 
-process GL_NORMALIZE {
+process NORMALIZE {
 
     tag "$fid"
 

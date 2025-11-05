@@ -6,9 +6,9 @@
  */
 
 // Include modules
-include { GL_GLNEXUS_FAMILY } from '../modules/gl_glnexus_family'
-include { GL_NORMALIZE } from '../modules/gl_normalize_vcf'
-include { GL_FAMILIAL_PEDIGREE } from '../modules/gl_familial_pedigree'
+include { GLNEXUS_FAMILY } from '../modules/deepvariant_family/glnexus_family'
+include { NORMALIZE } from '../modules/deepvariant_family/normalize_vcf'
+include { FAMILIAL_PEDIGREE } from '../modules/deepvariant_family/familial_pedigree'
 
 workflow DEEPVARIANT_FAMILY {
 
@@ -19,21 +19,21 @@ workflow DEEPVARIANT_FAMILY {
     main:
 
     // Run GLnexus for each family
-    GL_GLNEXUS_FAMILY(family_gvcfs)
+    GLNEXUS_FAMILY(family_gvcfs)
 
     // Normalize family VCF files
-    GL_NORMALIZE(GL_GLNEXUS_FAMILY.out.family_vcf)
+    NORMALIZE(GLNEXUS_FAMILY.out.family_vcf)
 
     // Extract family-specific pedigree files
-    family_pedigree_input = GL_GLNEXUS_FAMILY.out.family_vcf
+    family_pedigree_input = GLNEXUS_FAMILY.out.family_vcf
         .map { fid, vcf, tbi ->
             [fid, pedigree_file, params.cohort_name]
         }
     
-    GL_FAMILIAL_PEDIGREE(family_pedigree_input)
+    FAMILIAL_PEDIGREE(family_pedigree_input)
 
     emit:
-    family_vcfs = GL_GLNEXUS_FAMILY.out.family_vcf
-    normalized_bcfs = GL_NORMALIZE.out.normalized_bcf
-    family_pedigrees = GL_FAMILIAL_PEDIGREE.out.family_pedigree
+    family_vcfs = GLNEXUS_FAMILY.out.family_vcf
+    normalized_bcfs = NORMALIZE.out.normalized_bcf
+    family_pedigrees = FAMILIAL_PEDIGREE.out.family_pedigree
 }

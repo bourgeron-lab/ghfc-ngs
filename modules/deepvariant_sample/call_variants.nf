@@ -1,4 +1,4 @@
-process DV_CALL_VARIANTS {
+process CALL_VARIANTS {
     
     tag "$barcode"
     

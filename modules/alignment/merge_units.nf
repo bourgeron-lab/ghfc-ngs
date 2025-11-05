@@ -1,4 +1,4 @@
-process A_MERGE_UNITS {
+process MERGE_UNITS {
     
     tag "$barcode"
     

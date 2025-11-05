@@ -8,10 +8,11 @@
  */
 
 // Include modules
-include { W_GNOMAD_FREQ_ANNOT } from '../modules/w_gnomad_freq_annot'
-include { W_GNOMAD_FREQ_FILTER } from '../modules/w_gnomad_freq_filter'
-include { W_COMMON_FILTERS } from '../modules/w_common_filters'
-include { W_VEP_ANNOTATION } from '../modules/w_vep_annotation'
+include { GNOMAD_FREQ_ANNOT } from '../modules/wombat/gnomad_freq_annot'
+include { GNOMAD_FREQ_FILTER } from '../modules/wombat/gnomad_freq_filter'
+include { COMMON_FILTERS } from '../modules/wombat/common_filters'
+include { VEP_ANNOTATION } from '../modules/wombat/vep_annotation'
+include { BCFTOOLS_ANNOTATE } from '../modules/wombat/bcftools_annotate'
 
 workflow WOMBAT {
 
@@ -26,31 +27,40 @@ workflow WOMBAT {
             [fid, bcf, csi, params.gnomad_file]
         }
 
-    W_GNOMAD_FREQ_ANNOT(gnomad_input)
+    GNOMAD_FREQ_ANNOT(gnomad_input)
 
     // Step 2: Filter into rare and common variants
-    filter_input = W_GNOMAD_FREQ_ANNOT.out.annotated_bcfs
+    filter_input = GNOMAD_FREQ_ANNOT.out.annotated_bcfs
         .map { fid, bcf, csi ->
             [fid, bcf, csi, params.gnomad_filter_field, params.gnomad_filter_threshold]
         }
 
-    W_GNOMAD_FREQ_FILTER(filter_input)
+    GNOMAD_FREQ_FILTER(filter_input)
 
     // Step 3: Filter common variants (keep only GT field)
-    W_COMMON_FILTERS(W_GNOMAD_FREQ_FILTER.out.common_bcfs)
+    COMMON_FILTERS(GNOMAD_FREQ_FILTER.out.common_bcfs)
 
     // Step 4: Annotate rare variants with VEP
-    vep_input = W_GNOMAD_FREQ_FILTER.out.rare_bcfs
-        .map { fid, bcf, csi ->
-            [fid, bcf, csi, params.vep_config]
+    vep_input = GNOMAD_FREQ_FILTER.out.rare_vcfs
+        .map { fid, vcf, tbi ->
+            [fid, vcf, tbi, params.vep_config]
         }
 
-    W_VEP_ANNOTATION(vep_input)
+    VEP_ANNOTATION(vep_input)
+
+    // Step 5: Add additional annotations from BCF files
+    bcftools_annotate_input = VEP_ANNOTATION.out.annotated_vcfs
+        .map { fid, vcf, tbi ->
+            [fid, vcf, tbi, params.wombat_annotation_path, params.wombat_annotation_list]
+        }
+
+    BCFTOOLS_ANNOTATE(bcftools_annotate_input)
 
     emit:
-    gnomad_bcfs = W_GNOMAD_FREQ_ANNOT.out.annotated_bcfs
-    rare_bcfs = W_GNOMAD_FREQ_FILTER.out.rare_bcfs
-    common_bcfs = W_GNOMAD_FREQ_FILTER.out.common_bcfs
-    filtered_common_bcfs = W_COMMON_FILTERS.out.filtered_common_bcfs
-    vep_annotated_bcfs = W_VEP_ANNOTATION.out.annotated_bcfs
+    gnomad_bcfs = GNOMAD_FREQ_ANNOT.out.annotated_bcfs
+    rare_vcfs = GNOMAD_FREQ_FILTER.out.rare_vcfs
+    common_bcfs = GNOMAD_FREQ_FILTER.out.common_bcfs
+    filtered_common_bcfs = COMMON_FILTERS.out.filtered_common_bcfs
+    vep_annotated_vcfs = VEP_ANNOTATION.out.annotated_vcfs
+    fully_annotated_bcfs = BCFTOOLS_ANNOTATE.out.annotated_bcfs
 }

@@ -1,4 +1,4 @@
-process A_TABIX_INDEX {
+process TABIX_INDEX {
 
     tag "$barcode"
     

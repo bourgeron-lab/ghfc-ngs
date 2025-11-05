@@ -6,7 +6,7 @@
 
 nextflow.enable.dsl=2
 
-process W_GNOMAD_FREQ_FILTER {
+process GNOMAD_FREQ_FILTER {
   /*
   Separate gnomAD-annotated BCF files into rare and common variants based on frequency thresholds
 
@@ -32,7 +32,7 @@ process W_GNOMAD_FREQ_FILTER {
 
   publishDir "${params.data}/families/${fid}/vcfs",
     mode: 'copy',
-    pattern: "${fid}.{rare,common}.bcf*"
+    pattern: "${fid}.{rare.vcf.gz*,common.bcf*}"
 
   container 'docker://staphb/bcftools:latest'
   
@@ -42,22 +42,22 @@ process W_GNOMAD_FREQ_FILTER {
   tuple val(fid), path(bcf), path(bcf_index), val(gnomad_filter_field), val(gnomad_filter_threshold)
 
   output:
-  tuple val(fid), path("${rare_bcf}"), path("${rare_bcf}.csi"), emit: rare_bcfs
+  tuple val(fid), path("${rare_vcf}"), path("${rare_vcf}.tbi"), emit: rare_vcfs
   tuple val(fid), path("${common_bcf}"), path("${common_bcf}.csi"), emit: common_bcfs
 
   script:
-  rare_bcf = "${fid}.rare.bcf"
+  rare_vcf = "${fid}.rare.vcf.gz"
   common_bcf = "${fid}.common.bcf"
 
   """
   echo "Filtering BCF for rare variants with ${gnomad_filter_field} < ${gnomad_filter_threshold} or missing"
 
-  # Filter BCF for rare variants (frequency < threshold or missing)
+  # Filter BCF for rare variants (frequency < threshold or missing) and output as VCF.gz
   bcftools view \\
       --threads ${task.cpus} \\
       -i 'INFO/${gnomad_filter_field}<${gnomad_filter_threshold} | INFO/${gnomad_filter_field}="."' \\
-      -O b \\
-      -o ${rare_bcf} \\
+      -O z \\
+      -o ${rare_vcf} \\
       ${bcf}
 
   echo "Filtering BCF for common variants with ${gnomad_filter_field} >= ${gnomad_filter_threshold}"
@@ -70,19 +70,21 @@ process W_GNOMAD_FREQ_FILTER {
       -o ${common_bcf} \\
       ${bcf}
 
-  echo "Indexing rare and common BCFs"
+  echo "Indexing rare VCF.gz and common BCF"
 
-  # Index both BCFs
-  bcftools index ${rare_bcf}
+  # Index rare VCF.gz with tabix
+  tabix -p vcf ${rare_vcf}
+  
+  # Index common BCF
   bcftools index ${common_bcf}
   """
 
   stub:
-  rare_bcf = "${fid}.rare.bcf"
+  rare_vcf = "${fid}.rare.vcf.gz"
   common_bcf = "${fid}.common.bcf"
   """
-  touch ${rare_bcf}
-  touch ${rare_bcf}.csi
+  touch ${rare_vcf}
+  touch ${rare_vcf}.tbi
   touch ${common_bcf}
   touch ${common_bcf}.csi
   """

@@ -4,10 +4,10 @@
  */
 
 // Include modules
-include { DV_MAKE_EXAMPLES } from '../modules/dv_make_examples'
-include { DV_CALL_VARIANTS } from '../modules/dv_call_variants'
-include { DV_POSTPROCESS_VARIANTS } from '../modules/dv_postprocess_variants'
-include { DV_VCF2BEDGRAPH_VAF } from '../modules/dv_vcf2bedgraph_vaf'
+include { MAKE_EXAMPLES } from '../modules/deepvariant_sample/make_examples'
+include { CALL_VARIANTS } from '../modules/deepvariant_sample/call_variants'
+include { POSTPROCESS_VARIANTS } from '../modules/deepvariant_sample/postprocess_variants'
+include { VCF2BEDGRAPH_VAF } from '../modules/deepvariant_sample/vcf2bedgraph_vaf'
 
 workflow DEEPVARIANT_SAMPLE {
     
@@ -17,32 +17,32 @@ workflow DEEPVARIANT_SAMPLE {
     main:
     
     // Make examples from CRAM files
-    DV_MAKE_EXAMPLES(
+    MAKE_EXAMPLES(
         cram_files,
         params.ref
     )
     
     // Call variants using the examples
-    DV_CALL_VARIANTS(
-        DV_MAKE_EXAMPLES.out.examples,
-        DV_MAKE_EXAMPLES.out.examples_info
+    CALL_VARIANTS(
+        MAKE_EXAMPLES.out.examples,
+        MAKE_EXAMPLES.out.examples_info
     )
     
     // Postprocess variants to create final VCF and gVCF files
-    DV_POSTPROCESS_VARIANTS(
-        DV_CALL_VARIANTS.out.called_variants
-            .join(DV_MAKE_EXAMPLES.out.gvcf_records)
-            .join(DV_MAKE_EXAMPLES.out.call_variant_outputs),
+    POSTPROCESS_VARIANTS(
+        CALL_VARIANTS.out.called_variants
+            .join(MAKE_EXAMPLES.out.gvcf_records)
+            .join(MAKE_EXAMPLES.out.call_variant_outputs),
         params.ref
     )
     
     // Generate VAF bedgraphs from VCF files
-    DV_VCF2BEDGRAPH_VAF(
-        DV_POSTPROCESS_VARIANTS.out.vcf
+    VCF2BEDGRAPH_VAF(
+        POSTPROCESS_VARIANTS.out.vcf
     )
     
     emit:
-    vcf = DV_POSTPROCESS_VARIANTS.out.vcf
-    gvcf = DV_POSTPROCESS_VARIANTS.out.gvcf
-    vaf_bedgraph = DV_VCF2BEDGRAPH_VAF.out.vaf_bedgraph
+    vcf = POSTPROCESS_VARIANTS.out.vcf
+    gvcf = POSTPROCESS_VARIANTS.out.gvcf
+    vaf_bedgraph = VCF2BEDGRAPH_VAF.out.vaf_bedgraph
 }

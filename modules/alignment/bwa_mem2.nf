@@ -1,4 +1,4 @@
-process A_BWA_MEM2_ALIGN {
+process BWA_MEM2_ALIGN {
     
     tag "$barcode:$unit"
     

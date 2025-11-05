@@ -1,4 +1,4 @@
-process DV_POSTPROCESS_VARIANTS {
+process POSTPROCESS_VARIANTS {
     
     tag "$barcode"
     

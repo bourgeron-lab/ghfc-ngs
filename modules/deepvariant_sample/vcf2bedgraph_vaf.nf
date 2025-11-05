@@ -6,7 +6,7 @@
 
 nextflow.enable.dsl=2
 
-process DV_VCF2BEDGRAPH_VAF {
+process VCF2BEDGRAPH_VAF {
   /*
   Convert DeepVariant VCF file to VAF (Variant Allele Frequency) bedgraph format
 

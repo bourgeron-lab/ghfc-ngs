@@ -6,7 +6,7 @@
 
 nextflow.enable.dsl=2
 
-process GL_GLNEXUS_FAMILY {
+process GLNEXUS_FAMILY {
     
     tag "$fid"
     
