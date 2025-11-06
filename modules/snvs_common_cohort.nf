@@ -52,6 +52,7 @@ process snvs_common_cohort {
   bcftools merge \\
       --threads ${task.cpus} \\
       --merge none \\
+      --force-single \\
       --missing-to-ref \\
       --file-list bcf_file_list.txt \\
       --output-type b \\
