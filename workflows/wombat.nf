@@ -66,7 +66,11 @@ workflow WOMBAT {
              params.wombat_dnm_min_callrate, 
              params.wombat_dnm_min_DP, 
              params.wombat_dnm_min_GQ, 
-             params.wombat_dnm_min_VAF]
+             params.wombat_dnm_min_VAF,
+             params.ref_par1_start,
+             params.ref_par1_end,
+             params.ref_par2_start,
+             params.ref_par2_end]
         }
 
     DNM_EXTRACTION(dnm_input)

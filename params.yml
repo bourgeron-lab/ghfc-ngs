@@ -62,6 +62,12 @@ wombat_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (defa
 wombat_dnm_min_GQ: "20" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
 wombat_dnm_min_VAF: "0.2" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
 
+# Pseudo-autosomal regions (PAR) coordinates for GRCh38
+ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
+ref_par1_end: "2781479" # PAR1 end position on chrX (GRCh38)
+ref_par2_start: "155701383" # PAR2 start position on chrX (GRCh38)
+ref_par2_end: "156030895" # PAR2 end position on chrX (GRCh38)
+
 # SLURM account and partition settings
 slurm_account: "your_account"
 slurm_partition: "ghfc"

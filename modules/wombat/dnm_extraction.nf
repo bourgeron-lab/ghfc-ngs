@@ -10,6 +10,7 @@ process DNM_EXTRACTION {
   /*
   Extract de novo mutations from family VCF files using slivar
   Filters variants based on call rate, depth, genotype quality, and variant allele frequency
+  Handles sex chromosomes and pseudo-autosomal regions (PAR) appropriately
 
   Parameters
   ----------
@@ -29,6 +30,14 @@ process DNM_EXTRACTION {
     Minimum genotype quality (GQ) threshold (default: 20)
   min_vaf : val
     Minimum variant allele frequency (VAF) threshold (default: 0.2)
+  par1_start : val
+    Start position of PAR1 on chrX (default: 10001 for GRCh38)
+  par1_end : val
+    End position of PAR1 on chrX (default: 2781479 for GRCh38)
+  par2_start : val
+    Start position of PAR2 on chrX (default: 155701383 for GRCh38)
+  par2_end : val
+    End position of PAR2 on chrX (default: 156030895 for GRCh38)
 
   Returns
   -------
@@ -47,7 +56,7 @@ process DNM_EXTRACTION {
   label 'dnm_extraction'
 
   input:
-  tuple val(fid), path(bcf), path(bcf_index), path(pedigree), val(min_callrate), val(min_dp), val(min_gq), val(min_vaf)
+  tuple val(fid), path(bcf), path(bcf_index), path(pedigree), val(min_callrate), val(min_dp), val(min_gq), val(min_vaf), val(par1_start), val(par1_end), val(par2_start), val(par2_end)
 
   output:
   tuple val(fid), path("${output_bcf}"), path("${output_bcf}.csi"), path("${output_tsv}"), emit: dnm_results
@@ -81,8 +90,12 @@ process DNM_EXTRACTION {
   # De novo patterns:
   # 1. Autosomal het: kid.het && mom.hom_ref && dad.hom_ref (classic de novo)
   # 2. Autosomal hom_alt (hemizygous): kid.hom_alt && mom.hom_ref && dad.hom_ref (e.g., deletion)
-  # 3. X chromosome in males: kid.hom_alt && mom.hom_ref (kid.sex == 1)
-  # 4. Y chromosome in males: kid.hom_alt && dad.hom_ref (kid.sex == 1)
+  # 3. X chromosome in males (non-PAR): kid.hom_alt && mom.hom_ref (kid.sex == 1)
+  # 4. X chromosome in females het: kid.het && mom.hom_ref && dad.hom_ref (kid.sex == 2)
+  # 5. X chromosome in females hom: kid.hom_alt && mom.hom_ref && dad.hom_ref (kid.sex == 2)
+  # 6. X chromosome PAR het: kid.het && mom.hom_ref && dad.hom_ref (both sexes, PAR regions)
+  # 7. X chromosome PAR hom: kid.hom_alt && mom.hom_ref && dad.hom_ref (both sexes, PAR regions)
+  # 8. Y chromosome in males: kid.hom_alt && dad.hom_ref (kid.sex == 1)
   # Note: For hom_ref parents, we also enforce AB <= 0.02 to ensure true homozygous reference
   
   slivar expr \\
@@ -91,9 +104,13 @@ process DNM_EXTRACTION {
     --pass-only \\
     --info "variant.call_rate >= ${min_callrate}" \\
     --out-vcf temp_output.bcf \\
-    --trio "denovo_auto_het:(kid.het && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
-    --trio "denovo_auto_hom:(kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
-    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq})" \\
+    --trio "denovo_auto_het:(variant.CHROM != 'chrX' && variant.CHROM != 'chrY' && kid.het && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_auto_hom:(variant.CHROM != 'chrX' && variant.CHROM != 'chrY' && kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && (variant.POS < ${par1_start} || (variant.POS > ${par1_end} && variant.POS < ${par2_start}) || variant.POS > ${par2_end}) && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq})" \\
+    --trio "denovo_x_female_het:(variant.CHROM == 'chrX' && kid.sex == 2 && (variant.POS < ${par1_start} || (variant.POS > ${par1_end} && variant.POS < ${par2_start}) || variant.POS > ${par2_end}) && kid.het && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_x_female_hom:(variant.CHROM == 'chrX' && kid.sex == 2 && (variant.POS < ${par1_start} || (variant.POS > ${par1_end} && variant.POS < ${par2_start}) || variant.POS > ${par2_end}) && kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_x_par_het:(variant.CHROM == 'chrX' && ((variant.POS >= ${par1_start} && variant.POS <= ${par1_end}) || (variant.POS >= ${par2_start} && variant.POS <= ${par2_end})) && kid.het && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_x_par_hom:(variant.CHROM == 'chrX' && ((variant.POS >= ${par1_start} && variant.POS <= ${par1_end}) || (variant.POS >= ${par2_start} && variant.POS <= ${par2_end})) && kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
     --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})"
 
   # Convert output to BCF format
@@ -108,10 +125,18 @@ process DNM_EXTRACTION {
     --sample-field denovo_auto_het \\
     --sample-field denovo_auto_hom \\
     --sample-field denovo_x_male \\
+    --sample-field denovo_x_female_het \\
+    --sample-field denovo_x_female_hom \\
+    --sample-field denovo_x_par_het \\
+    --sample-field denovo_x_par_hom \\
     --sample-field denovo_y_male \\
     --info-field denovo_auto_het \\
     --info-field denovo_auto_hom \\
     --info-field denovo_x_male \\
+    --info-field denovo_x_female_het \\
+    --info-field denovo_x_female_hom \\
+    --info-field denovo_x_par_het \\
+    --info-field denovo_x_par_hom \\
     --info-field denovo_y_male \\
     --csq-field CSQ \\
     ${output_bcf} > ${output_tsv}
