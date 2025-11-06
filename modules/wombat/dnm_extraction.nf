@@ -59,6 +59,17 @@ process DNM_EXTRACTION {
   output_tsv = "${base_name}.dnm.tsv"
 
   """
+  # Check if pedigree file has a header (first column contains "FID")
+  # If it does, remove the header and create a temp file for slivar
+  if head -n 1 ${pedigree} | cut -f1 | grep -q "^FID\$"; then
+    echo "Pedigree file has header, removing it for slivar"
+    tail -n +2 ${pedigree} > temp_pedigree.tsv
+    PED_FILE="temp_pedigree.tsv"
+  else
+    echo "Pedigree file has no header, using as is"
+    PED_FILE="${pedigree}"
+  fi
+
   # Extract de novo variants using slivar
   # The slivar expr command applies filters for de novo variants
   # Filters:
@@ -75,7 +86,7 @@ process DNM_EXTRACTION {
   
   slivar expr \\
     --vcf ${bcf} \\
-    --ped ${pedigree} \\
+    --ped \$PED_FILE \\
     --pass-only \\
     --info "variant.call_rate >= ${min_callrate}" \\
     --out-vcf temp_output.bcf \\
@@ -92,7 +103,7 @@ process DNM_EXTRACTION {
 
   # Generate TSV output from the BCF file
   slivar tsv \\
-    --ped ${pedigree} \\
+    --ped \$PED_FILE \\
     --sample-field denovo_auto_het \\
     --sample-field denovo_auto_hom \\
     --sample-field denovo_x_male \\
