@@ -495,7 +495,7 @@ def createChannels(analysis_plan) {
             [barcode, gvcf, tbi_path]
         }
         .filter { barcode, gvcf, tbi_path -> 
-            barcode in analysis_plan.deepvariant.existing && new File(tbi_path).exists()
+            barcode in analysis_plan.deepvariant_sample.existing && new File(tbi_path).exists()
         }
         .map { barcode, gvcf, tbi_path ->
             [barcode, gvcf, file(tbi_path)]
@@ -511,7 +511,7 @@ def createChannels(analysis_plan) {
             [barcode, vcf, tbi_path]
         }
         .filter { barcode, vcf, tbi_path -> 
-            barcode in analysis_plan.deepvariant.existing && new File(tbi_path).exists()
+            barcode in analysis_plan.deepvariant_sample.existing && new File(tbi_path).exists()
         }
         .map { barcode, vcf, tbi_path ->
             [barcode, vcf, file(tbi_path)]
