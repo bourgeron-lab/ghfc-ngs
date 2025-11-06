@@ -38,6 +38,8 @@ process DNM_EXTRACTION {
     Start position of PAR2 on chrX (default: 155701383 for GRCh38)
   par2_end : val
     End position of PAR2 on chrX (default: 156030895 for GRCh38)
+  annotation_path : val
+    Path to directory containing annotation files (e.g., LCR.bed.gz)
 
   Returns
   -------
@@ -56,7 +58,7 @@ process DNM_EXTRACTION {
   label 'dnm_extraction'
 
   input:
-  tuple val(fid), path(bcf), path(bcf_index), path(pedigree), val(min_callrate), val(min_dp), val(min_gq), val(min_vaf), val(par1_start), val(par1_end), val(par2_start), val(par2_end)
+  tuple val(fid), path(bcf), path(bcf_index), path(pedigree), val(min_callrate), val(min_dp), val(min_gq), val(min_vaf), val(par1_start), val(par1_end), val(par2_start), val(par2_end), val(annotation_path)
 
   output:
   tuple val(fid), path("${output_bcf}"), path("${output_bcf}.csi"), path("${output_tsv}"), emit: dnm_results
@@ -113,8 +115,24 @@ process DNM_EXTRACTION {
     --trio "denovo_x_par_hom:(variant.CHROM == 'chrX' && ((variant.POS >= ${par1_start} && variant.POS <= ${par1_end}) || (variant.POS >= ${par2_start} && variant.POS <= ${par2_end})) && kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
     --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})"
 
-  # Convert output to BCF format
-  bcftools view -O b -o ${output_bcf} temp_output.bcf
+  # Add LCR annotation if the file exists
+  if [ -f "${annotation_path}/LCR.bed.gz" ]; then
+    echo "Adding LCR annotation"
+    echo '##INFO=<ID=LCR,Number=0,Type=Flag,Description="Variant falls in low complexity region">' > lcr_header.txt
+    
+    bcftools annotate \
+      -a ${annotation_path}/LCR.bed.gz \
+      -h lcr_header.txt \
+      -c CHROM,FROM,TO,INFO/LCR \
+      --mark-sites +LCR \
+      -O b \
+      -o ${output_bcf} \
+      temp_output.bcf
+  else
+    echo "LCR annotation file not found, skipping LCR annotation"
+    # Convert output to BCF format without LCR annotation
+    bcftools view -O b -o ${output_bcf} temp_output.bcf
+  fi
 
   # Index the output BCF
   bcftools index ${output_bcf}
@@ -138,6 +156,7 @@ process DNM_EXTRACTION {
     --info-field denovo_x_par_het \\
     --info-field denovo_x_par_hom \\
     --info-field denovo_y_male \\
+    --info-field LCR \\
     --csq-field CSQ \\
     ${output_bcf} > ${output_tsv}
   """

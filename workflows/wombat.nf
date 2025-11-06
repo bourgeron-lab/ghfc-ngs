@@ -70,7 +70,8 @@ workflow WOMBAT {
              params.ref_par1_start,
              params.ref_par1_end,
              params.ref_par2_start,
-             params.ref_par2_end]
+             params.ref_par2_end,
+             params.wombat_annotation_path]
         }
 
     DNM_EXTRACTION(dnm_input)
