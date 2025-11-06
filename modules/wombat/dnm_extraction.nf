@@ -92,7 +92,7 @@ process DNM_EXTRACTION {
     --info "variant.call_rate >= ${min_callrate}" \\
     --out-vcf temp_output.bcf \\
     --trio "denovo_auto_het:(kid.het && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf})" \\
-    --trio "denovo_auto_hom:(kid.hom_alt && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
+    --trio "denovo_auto_hom:(kid.hom_alt && kid.AB >= 0.98 && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
     --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && mom.hom_ref && mom.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
     --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})"
 
