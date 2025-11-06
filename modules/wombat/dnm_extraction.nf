@@ -74,8 +74,8 @@ process DNM_EXTRACTION {
   # The slivar expr command applies filters for de novo variants
   # Filters:
   # - Call rate >= ${min_callrate}
-  # - DP >= ${min_dp} in child
-  # - GQ >= ${min_gq} in child
+  # - DP >= ${min_dp} in child and parents
+  # - GQ >= ${min_gq} in child and parents
   # - VAF (AB - allele balance) >= ${min_vaf} in child
   #
   # De novo patterns:
@@ -91,10 +91,10 @@ process DNM_EXTRACTION {
     --pass-only \\
     --info "variant.call_rate >= ${min_callrate}" \\
     --out-vcf temp_output.bcf \\
-    --trio "denovo_auto_het:(kid.het && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf})" \\
-    --trio "denovo_auto_hom:(kid.hom_alt && kid.AB >= 0.98 && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
-    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && mom.hom_ref && mom.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
-    --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})"
+    --trio "denovo_auto_het:(kid.het && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_auto_hom:(kid.hom_alt && kid.AB >= 0.98 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})" \\
+    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && mom.hom_ref && mom.AB <= 0.02 && mom.DP >= ${min_dp} && mom.GQ >= ${min_gq})" \\
+    --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && dad.hom_ref && dad.AB <= 0.02 && dad.DP >= ${min_dp} && dad.GQ >= ${min_gq})"
 
   # Convert output to BCF format
   bcftools view -O b -o ${output_bcf} temp_output.bcf
