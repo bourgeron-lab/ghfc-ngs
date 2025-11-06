@@ -149,14 +149,6 @@ process DNM_EXTRACTION {
     --sample-field denovo_x_par_het \\
     --sample-field denovo_x_par_hom \\
     --sample-field denovo_y_male \\
-    --info-field denovo_auto_het \\
-    --info-field denovo_auto_hom \\
-    --info-field denovo_x_male \\
-    --info-field denovo_x_female_het \\
-    --info-field denovo_x_female_hom \\
-    --info-field denovo_x_par_het \\
-    --info-field denovo_x_par_hom \\
-    --info-field denovo_y_male \\
     --info-field LCR \\
     --csq-field CSQ \\
     ${output_bcf} > ${output_tsv}
