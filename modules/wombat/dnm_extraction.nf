@@ -138,8 +138,8 @@ process DNM_EXTRACTION {
   # Index the output BCF
   bcftools index ${output_bcf}
 
-  # Extract all INFO field IDs from the BCF header (excluding those starting with "denovo_")
-  INFO_FIELDS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=" | sed 's/##INFO=<ID=//' | cut -d',' -f1 | grep -v "^denovo_" | tr '\n' ' ')
+  # Extract all INFO field IDs from the BCF header (excluding denovo_*, highest_impact_order, and genic)
+  INFO_FIELDS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=" | sed 's/##INFO=<ID=//' | cut -d',' -f1 | grep -v "^denovo_" | grep -v "^highest_impact_order\$" | grep -v "^genic\$" | tr '\n' ' ')
   
   echo "INFO fields to include in TSV: \$INFO_FIELDS"
 
