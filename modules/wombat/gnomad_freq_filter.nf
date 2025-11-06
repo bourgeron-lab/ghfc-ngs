@@ -72,8 +72,8 @@ process GNOMAD_FREQ_FILTER {
 
   echo "Indexing rare VCF.gz and common BCF"
 
-  # Index rare VCF.gz with tabix
-  tabix -p vcf ${rare_vcf}
+  # Index rare VCF.gz with bcftools (produces .tbi file)
+  bcftools index -t ${rare_vcf}
   
   # Index common BCF
   bcftools index ${common_bcf}
