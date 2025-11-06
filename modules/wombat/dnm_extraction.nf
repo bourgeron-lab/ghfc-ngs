@@ -120,10 +120,11 @@ process DNM_EXTRACTION {
     echo "Adding LCR annotation"
     echo '##INFO=<ID=LCR,Number=0,Type=Flag,Description="Variant falls in low complexity region">' > lcr_header.txt
     
+    # Use --mark-sites to add a flag when variants overlap with LCR regions
     bcftools annotate \
       -a ${annotation_path}/LCR.bed.gz \
       -h lcr_header.txt \
-      -c CHROM,FROM,TO,INFO/LCR \
+      -c CHROM,FROM,TO \
       --mark-sites +LCR \
       -O b \
       -o ${output_bcf} \
