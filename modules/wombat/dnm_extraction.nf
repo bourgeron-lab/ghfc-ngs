@@ -83,6 +83,7 @@ process DNM_EXTRACTION {
   # 2. Autosomal hom_alt (hemizygous): kid.hom_alt && mom.hom_ref && dad.hom_ref (e.g., deletion)
   # 3. X chromosome in males: kid.hom_alt && mom.hom_ref (kid.sex == 1)
   # 4. Y chromosome in males: kid.hom_alt && dad.hom_ref (kid.sex == 1)
+  # Note: For hom_ref parents, we also enforce AB <= 0.02 to ensure true homozygous reference
   
   slivar expr \\
     --vcf ${bcf} \\
@@ -90,10 +91,10 @@ process DNM_EXTRACTION {
     --pass-only \\
     --info "variant.call_rate >= ${min_callrate}" \\
     --out-vcf temp_output.bcf \\
-    --trio "denovo_auto_het:(kid.het && mom.hom_ref && dad.hom_ref && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf})" \\
-    --trio "denovo_auto_hom:(kid.hom_alt && mom.hom_ref && dad.hom_ref && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
-    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && mom.hom_ref && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
-    --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && dad.hom_ref && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})"
+    --trio "denovo_auto_het:(kid.het && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq} && kid.AB >= ${min_vaf})" \\
+    --trio "denovo_auto_hom:(kid.hom_alt && mom.hom_ref && mom.AB <= 0.02 && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
+    --trio "denovo_x_male:(variant.CHROM == 'chrX' && kid.sex == 1 && kid.hom_alt && mom.hom_ref && mom.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})" \\
+    --trio "denovo_y_male:(variant.CHROM == 'chrY' && kid.sex == 1 && kid.hom_alt && dad.hom_ref && dad.AB <= 0.02 && kid.DP >= ${min_dp} && kid.GQ >= ${min_gq})"
 
   # Convert output to BCF format
   bcftools view -O b -o ${output_bcf} temp_output.bcf
