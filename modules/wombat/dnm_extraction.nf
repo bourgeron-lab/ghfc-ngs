@@ -138,6 +138,17 @@ process DNM_EXTRACTION {
   # Index the output BCF
   bcftools index ${output_bcf}
 
+  # Extract all INFO field IDs from the BCF header (excluding those starting with "denovo_")
+  INFO_FIELDS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=" | sed 's/##INFO=<ID=//' | cut -d',' -f1 | grep -v "^denovo_" | tr '\n' ' ')
+  
+  echo "INFO fields to include in TSV: \$INFO_FIELDS"
+
+  # Build the --info-field arguments dynamically
+  INFO_ARGS=""
+  for field in \$INFO_FIELDS; do
+    INFO_ARGS="\$INFO_ARGS --info-field \$field"
+  done
+
   # Generate TSV output from the BCF file
   slivar tsv \\
     --ped \$PED_FILE \\
@@ -149,7 +160,7 @@ process DNM_EXTRACTION {
     --sample-field denovo_x_par_het \\
     --sample-field denovo_x_par_hom \\
     --sample-field denovo_y_male \\
-    --info-field LCR \\
+    \$INFO_ARGS \\
     --csq-field CSQ \\
     ${output_bcf} > ${output_tsv}
   """
