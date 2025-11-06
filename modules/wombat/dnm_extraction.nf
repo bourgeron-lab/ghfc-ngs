@@ -138,9 +138,9 @@ process DNM_EXTRACTION {
   # Index the output BCF
   bcftools index ${output_bcf}
 
-  # Extract all INFO field IDs from the BCF header (excluding denovo_*, highest_impact_order, and genic)
-  INFO_FIELDS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=" | sed 's/##INFO=<ID=//' | cut -d',' -f1 | grep -v "^denovo_" | grep -v "^highest_impact_order\$" | grep -v "^genic\$" | tr '\n' ' ')
-  
+  # Extract all INFO field IDs from the BCF header (excluding denovo_*, highest_impact_order, CSQ, and genic)
+  INFO_FIELDS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=" | sed 's/##INFO=<ID=//' | cut -d',' -f1 | grep -v "^denovo_" | grep -v "^highest_impact_order\$" | grep -v "^CSQ\$" | grep -v "^genic\$" | tr '\n' ' ')
+
   echo "INFO fields to include in TSV: \$INFO_FIELDS"
 
   # Build the --info-field arguments dynamically
@@ -148,6 +148,22 @@ process DNM_EXTRACTION {
   for field in \$INFO_FIELDS; do
     INFO_ARGS="\$INFO_ARGS --info-field \$field"
   done
+
+  # Extract CSQ column names from the BCF header (Format: field in Description)
+  CSQ_COLUMNS=\$(bcftools view -h ${output_bcf} | grep "^##INFO=<ID=CSQ" | sed -n 's/.*Format: \\([^"]*\\).*/\\1/p' | tr '|' ' ')
+  
+  if [ -n "\$CSQ_COLUMNS" ]; then
+    echo "CSQ columns found: \$CSQ_COLUMNS"
+    # Build --csq-column arguments (one per column)
+    CSQ_ARGS=""
+    for column in \$CSQ_COLUMNS; do
+      CSQ_ARGS="\$CSQ_ARGS --csq-column \$column"
+    done
+    CSQ_ARGS="\$CSQ_ARGS --csq-field CSQ"
+  else
+    echo "No CSQ field found in header, skipping CSQ columns"
+    CSQ_ARGS=""
+  fi
 
   # Generate TSV output from the BCF file
   slivar tsv \\
@@ -161,7 +177,7 @@ process DNM_EXTRACTION {
     --sample-field denovo_x_par_hom \\
     --sample-field denovo_y_male \\
     \$INFO_ARGS \\
-    --csq-field CSQ \\
+    \$CSQ_ARGS \\
     ${output_bcf} > ${output_tsv}
   """
 
