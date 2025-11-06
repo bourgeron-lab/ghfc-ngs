@@ -56,6 +56,12 @@ vep_config_name: "ensembl_vep_115" # Name suffix for output files
 wombat_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
 wombat_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files for additional annotation
 
+# Wombat de novo mutation extraction configuration
+wombat_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
+wombat_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
+wombat_dnm_min_GQ: "20" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
+wombat_dnm_min_VAF: "0.2" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
+
 # SLURM account and partition settings
 slurm_account: "your_account"
 slurm_partition: "ghfc"

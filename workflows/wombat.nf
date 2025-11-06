@@ -13,11 +13,13 @@ include { GNOMAD_FREQ_FILTER } from '../modules/wombat/gnomad_freq_filter'
 include { COMMON_FILTERS } from '../modules/wombat/common_filters'
 include { VEP_ANNOTATION } from '../modules/wombat/vep_annotation'
 include { BCFTOOLS_ANNOTATE } from '../modules/wombat/bcftools_annotate'
+include { DNM_EXTRACTION } from '../modules/wombat/dnm_extraction'
 
 workflow WOMBAT {
 
     take:
     normalized_bcfs    // channel: [fid, bcf, csi]
+    family_pedigrees   // channel: [fid, pedigree_file]
 
     main:
 
@@ -56,6 +58,19 @@ workflow WOMBAT {
 
     BCFTOOLS_ANNOTATE(bcftools_annotate_input)
 
+    // Step 6: Extract de novo mutations
+    dnm_input = BCFTOOLS_ANNOTATE.out.annotated_bcfs
+        .join(family_pedigrees)
+        .map { fid, bcf, csi, pedigree ->
+            [fid, bcf, csi, pedigree, 
+             params.wombat_dnm_min_callrate, 
+             params.wombat_dnm_min_DP, 
+             params.wombat_dnm_min_GQ, 
+             params.wombat_dnm_min_VAF]
+        }
+
+    DNM_EXTRACTION(dnm_input)
+
     emit:
     gnomad_bcfs = GNOMAD_FREQ_ANNOT.out.annotated_bcfs
     rare_vcfs = GNOMAD_FREQ_FILTER.out.rare_vcfs
@@ -63,4 +78,5 @@ workflow WOMBAT {
     filtered_common_bcfs = COMMON_FILTERS.out.filtered_common_bcfs
     vep_annotated_vcfs = VEP_ANNOTATION.out.annotated_vcfs
     fully_annotated_bcfs = BCFTOOLS_ANNOTATE.out.annotated_bcfs
+    dnm_bcfs = DNM_EXTRACTION.out.dnm_results
 }

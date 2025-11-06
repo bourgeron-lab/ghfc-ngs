@@ -168,7 +168,16 @@ workflow {
                 fid in analysis_plan.wombat.needed 
             }
         
-        WOMBAT(wombat_bcfs)
+        // Get all available family pedigrees (existing + newly created)
+        all_available_family_pedigrees = channels.existing_family_pedigrees.mix(family_pedigrees_output ?: Channel.empty())
+        
+        // Filter for families that need wombat
+        wombat_pedigrees = all_available_family_pedigrees
+            .filter { fid, pedigree -> 
+                fid in analysis_plan.wombat.needed 
+            }
+        
+        WOMBAT(wombat_bcfs, wombat_pedigrees)
         wombat_common_bcfs_output = WOMBAT.out.filtered_common_bcfs
     }
     
@@ -537,6 +546,17 @@ def createChannels(analysis_plan) {
         }
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]
+        }
+    
+    // Create channel for existing family pedigree files
+    channels.existing_family_pedigrees = Channel
+        .fromPath("${params.data}/families/*/*.pedigree.tsv")
+        .map { pedigree ->
+            def fid = pedigree.parent.name  // Get family ID from path
+            [fid, pedigree]
+        }
+        .filter { fid, pedigree -> 
+            fid in analysis_plan.deepvariant_family.existing
         }
     
     // Create channel for existing common filtered BCF files (output from wombat, used by snvs_common_cohort)
