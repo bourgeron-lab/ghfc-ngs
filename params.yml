@@ -6,9 +6,9 @@ steps: [
     "alignment",
     "deepvariant_sample",
     "deepvariant_family",
-    "wombat",
+    "annotation",
     "snvs_common_cohort",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, wombat, snvs_common_cohort
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_common_cohort
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -52,15 +52,15 @@ gnomad_filter_threshold: "0.01" # Frequency threshold for filtering (e.g., 0.01 
 vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
 vep_config_name: "ensembl_vep_115" # Name suffix for output files
 
-# Wombat additional annotation configuration
-wombat_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
-wombat_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files for additional annotation
+# Annotation additional annotation configuration
+annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
+annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files for additional annotation
 
-# Wombat de novo mutation extraction configuration
-wombat_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
-wombat_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
-wombat_dnm_min_GQ: "20" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
-wombat_dnm_min_VAF: "0.2" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
+# Annotation de novo mutation extraction configuration
+annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
+annotation_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
+annotation_dnm_min_GQ: "20" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
+annotation_dnm_min_VAF: "0.2" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
 
 # Pseudo-autosomal regions (PAR) coordinates for GRCh38
 ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)

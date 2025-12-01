@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: BCFtools annotate module for adding additional annotations from BCF files
+ * Annotation: BCFtools annotate module for adding additional annotations from BCF files
  */
 
 nextflow.enable.dsl=2

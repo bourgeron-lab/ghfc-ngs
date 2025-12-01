@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: SNVs common variants filtering module
+ * Annotation: SNVs common variants filtering module
  * Filters common variants and keeps only GT format field
  */
 

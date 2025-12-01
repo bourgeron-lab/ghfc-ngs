@@ -1,5 +1,5 @@
 /*
- * Wombat Workflow
+ * Annotation Workflow
  * Integrated workflow for variant annotation and filtering:
  * 1. Annotate with gnomAD frequencies
  * 2. Filter into rare and common variants
@@ -8,14 +8,14 @@
  */
 
 // Include modules
-include { GNOMAD_FREQ_ANNOT } from '../modules/wombat/gnomad_freq_annot'
-include { GNOMAD_FREQ_FILTER } from '../modules/wombat/gnomad_freq_filter'
-include { COMMON_FILTERS } from '../modules/wombat/common_filters'
-include { VEP_ANNOTATION } from '../modules/wombat/vep_annotation'
-include { BCFTOOLS_ANNOTATE } from '../modules/wombat/bcftools_annotate'
-include { DNM_EXTRACTION } from '../modules/wombat/dnm_extraction'
+include { GNOMAD_FREQ_ANNOT } from '../modules/annotation/gnomad_freq_annot'
+include { GNOMAD_FREQ_FILTER } from '../modules/annotation/gnomad_freq_filter'
+include { COMMON_FILTERS } from '../modules/annotation/common_filters'
+include { VEP_ANNOTATION } from '../modules/annotation/vep_annotation'
+include { BCFTOOLS_ANNOTATE } from '../modules/annotation/bcftools_annotate'
+include { DNM_EXTRACTION } from '../modules/annotation/dnm_extraction'
 
-workflow WOMBAT {
+workflow ANNOTATION {
 
     take:
     normalized_bcfs    // channel: [fid, bcf, csi]
@@ -53,7 +53,7 @@ workflow WOMBAT {
     // Step 5: Add additional annotations from BCF files
     bcftools_annotate_input = VEP_ANNOTATION.out.annotated_vcfs
         .map { fid, vcf, tbi ->
-            [fid, vcf, tbi, params.wombat_annotation_path, params.wombat_annotation_list]
+            [fid, vcf, tbi, params.annotation_annotation_path, params.annotation_annotation_list]
         }
 
     BCFTOOLS_ANNOTATE(bcftools_annotate_input)
@@ -63,15 +63,15 @@ workflow WOMBAT {
         .join(family_pedigrees)
         .map { fid, bcf, csi, pedigree ->
             [fid, bcf, csi, pedigree, 
-             params.wombat_dnm_min_callrate, 
-             params.wombat_dnm_min_DP, 
-             params.wombat_dnm_min_GQ, 
-             params.wombat_dnm_min_VAF,
+             params.annotation_dnm_min_callrate, 
+             params.annotation_dnm_min_DP, 
+             params.annotation_dnm_min_GQ, 
+             params.annotation_dnm_min_VAF,
              params.ref_par1_start,
              params.ref_par1_end,
              params.ref_par2_start,
              params.ref_par2_end,
-             params.wombat_annotation_path]
+             params.annotation_annotation_path]
         }
 
     DNM_EXTRACTION(dnm_input)

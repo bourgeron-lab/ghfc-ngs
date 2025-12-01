@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: SNVs frequency filtering module - separates rare and common variants using gnomAD frequency thresholds
+ * Annotation: SNVs frequency filtering module - separates rare and common variants using gnomAD frequency thresholds
  */
 
 nextflow.enable.dsl=2

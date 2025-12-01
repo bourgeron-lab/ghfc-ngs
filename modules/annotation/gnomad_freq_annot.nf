@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: SNVs frequency annotation module using gnomAD
+ * Annotation: SNVs frequency annotation module using gnomAD
  */
 
 nextflow.enable.dsl=2

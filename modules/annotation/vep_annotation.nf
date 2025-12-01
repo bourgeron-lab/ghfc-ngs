@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: VEP annotation module for family VCF files
+ * Annotation: VEP annotation module for family VCF files
  */
 
 nextflow.enable.dsl=2

@@ -55,29 +55,29 @@ flowchart TB
         glnexus_glnexus --> glnexus_norm --> glnexus_vcf
     end
 
-    subgraph wombat [**Wombat**]
+    subgraph annotation [**Annotation**]
         direction TB
-        wombat_a_gnomad["annotate gnomAD (bcftools)"]
-        wombat_f_gnomad["filter on gnomAD (bcftools)"]
-        wombat_common_vcf["families/**{FID}**/snvs/**{FID}**.common.bcf"]:::of
-        wombat_common_ex["extract GTs only and fill *NA* with *0/0*"]
-        wombat_common_gt["families/**{FID}**/snvs/**{FID}**.common_gt.bcf"]:::of
-        wombat_rare_vcf["families/**{FID}**/snvs/**{FID}**.rare.bcf"]:::of
-        wombat_rare_vep["VEP annotation (using **{vep_config}**)"]
-        wombat_rare_annot["bcftools annotate for MPC-v2, Revel, spliceAI"]
-        wombat_rare_file["families/**{FID}**/snvs/**{FID}**.rare.**{vep_config}**.annotated.bcf"]:::of
-        wombat_rare_split["split by impact HIGH, MEDIUM, LOW (slivar)"]
+        annotation_a_gnomad["annotate gnomAD (bcftools)"]
+        annotation_f_gnomad["filter on gnomAD (bcftools)"]
+        annotation_common_vcf["families/**{FID}**/snvs/**{FID}**.common.bcf"]:::of
+        annotation_common_ex["extract GTs only and fill *NA* with *0/0*"]
+        annotation_common_gt["families/**{FID}**/snvs/**{FID}**.common_gt.bcf"]:::of
+        annotation_rare_vcf["families/**{FID}**/snvs/**{FID}**.rare.bcf"]:::of
+        annotation_rare_vep["VEP annotation (using **{vep_config}**)"]
+        annotation_rare_annot["bcftools annotate for MPC-v2, Revel, spliceAI"]
+        annotation_rare_file["families/**{FID}**/snvs/**{FID}**.rare.**{vep_config}**.annotated.bcf"]:::of
+        annotation_rare_split["split by impact HIGH, MEDIUM, LOW (slivar)"]
 
-        wombat_rare_high["families/**{FID}**/snvs/**{FID}**.rare.high.bcf families/**{FID}**/snvs/**{FID}**.rare.high.tsv"]:::of
-        wombat_rare_medium["families/**{FID}**/snvs/**{FID}**.rare.medium.bcf families/**{FID}**/snvs/**{FID}**.rare.medium.tsv"]:::of
-        wombat_rare_low["families/**{FID}**/snvs/**{FID}**.rare.low.bcf families/**{FID}**/snvs/**{FID}**.rare.low.tsv"]:::of
+        annotation_rare_high["families/**{FID}**/snvs/**{FID}**.rare.high.bcf families/**{FID}**/snvs/**{FID}**.rare.high.tsv"]:::of
+        annotation_rare_medium["families/**{FID}**/snvs/**{FID}**.rare.medium.bcf families/**{FID}**/snvs/**{FID}**.rare.medium.tsv"]:::of
+        annotation_rare_low["families/**{FID}**/snvs/**{FID}**.rare.low.bcf families/**{FID}**/snvs/**{FID}**.rare.low.tsv"]:::of
 
-        wombat_a_gnomad --> wombat_f_gnomad
-        wombat_f_gnomad --> wombat_common_vcf --> wombat_common_ex --> wombat_common_gt
-        wombat_f_gnomad --> wombat_rare_vcf --> wombat_rare_vep --> wombat_rare_annot --> wombat_rare_file --> wombat_rare_split
-        wombat_rare_split --> wombat_rare_high
-        wombat_rare_split --> wombat_rare_medium
-        wombat_rare_split --> wombat_rare_low
+        annotation_a_gnomad --> annotation_f_gnomad
+        annotation_f_gnomad --> annotation_common_vcf --> annotation_common_ex --> annotation_common_gt
+        annotation_f_gnomad --> annotation_rare_vcf --> annotation_rare_vep --> annotation_rare_annot --> annotation_rare_file --> annotation_rare_split
+        annotation_rare_split --> annotation_rare_high
+        annotation_rare_split --> annotation_rare_medium
+        annotation_rare_split --> annotation_rare_low
     end
 
     subgraph snps [**SNPs files**]
@@ -106,8 +106,8 @@ flowchart TB
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus
-    glnexus ==> wombat
-    wombat_common_gt ==> snps
+    glnexus ==> annotation
+    annotation_common_gt ==> snps
 
     classDef os fill: #d18181ff, stroke-width: 0px, font-size: 12pt, color: #fff ;
     classDef of fill: #7869a1ff, stroke-width: 0px, font-size: 12pt, color: #fff ;

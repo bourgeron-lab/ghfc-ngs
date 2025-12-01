@@ -14,7 +14,7 @@ nextflow.enable.dsl = 2
 include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT_SAMPLE } from './workflows/deepvariant_sample'
 include { DEEPVARIANT_FAMILY } from './workflows/deepvariant_family'
-include { WOMBAT } from './workflows/wombat'
+include { ANNOTATION } from './workflows/annotation'
 include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
 
 /*
@@ -35,7 +35,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'wombat', 'snvs_common_cohort']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_common_cohort']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -154,31 +154,31 @@ workflow {
         family_pedigrees_output = DEEPVARIANT_FAMILY.out.family_pedigrees
     }
     
-    // Run wombat (gnomAD annotation, filtering, VEP) if needed and allowed
-    wombat_common_bcfs_output = Channel.empty()
-    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
-        log.info "Running wombat for ${analysis_plan.wombat.needed.size()} families..."
+    // Run annotation (gnomAD annotation, filtering, VEP) if needed and allowed
+    annotation_common_bcfs_output = Channel.empty()
+    if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
+        log.info "Running annotation for ${analysis_plan.annotation.needed.size()} families..."
         
         // Get all available normalized family BCFs (existing + newly created)
         all_available_normalized_bcfs = channels.existing_normalized_bcfs.mix(normalized_bcfs_output ?: Channel.empty())
         
-        // Filter for families that need wombat
-        wombat_bcfs = all_available_normalized_bcfs
+        // Filter for families that need annotation
+        annotation_bcfs = all_available_normalized_bcfs
             .filter { fid, bcf, csi -> 
-                fid in analysis_plan.wombat.needed 
+                fid in analysis_plan.annotation.needed 
             }
         
         // Get all available family pedigrees (existing + newly created)
         all_available_family_pedigrees = channels.existing_family_pedigrees.mix(family_pedigrees_output ?: Channel.empty())
         
-        // Filter for families that need wombat
-        wombat_pedigrees = all_available_family_pedigrees
+        // Filter for families that need annotation
+        annotation_pedigrees = all_available_family_pedigrees
             .filter { fid, pedigree -> 
-                fid in analysis_plan.wombat.needed 
+                fid in analysis_plan.annotation.needed 
             }
         
-        WOMBAT(wombat_bcfs, wombat_pedigrees)
-        wombat_common_bcfs_output = WOMBAT.out.filtered_common_bcfs
+        ANNOTATION(annotation_bcfs, annotation_pedigrees)
+        annotation_common_bcfs_output = ANNOTATION.out.filtered_common_bcfs
     }
     
     // Run cohort common variants merge if needed and allowed
@@ -186,9 +186,9 @@ workflow {
         log.info "Running cohort common variants merge..."
         
         // Get all available common filtered BCFs (existing + newly created)
-        if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
+        if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
             // Mix existing BCFs with newly created ones
-            all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(wombat_common_bcfs_output)
+            all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(annotation_common_bcfs_output)
         } else {
             // Use only existing BCFs if no new ones were created
             all_available_common_bcfs = channels.existing_common_filtered_bcfs
@@ -237,7 +237,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         alignment: [needed: [], existing: []],
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
-        wombat: [needed: [], existing: []],
+        annotation: [needed: [], existing: []],
         snvs_common_cohort: [needed: [], existing: []]
     ]
     
@@ -256,7 +256,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing wombat outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF - all part of wombat)
+    // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF - all part of annotation)
     // Note: {FID}.gnomad.bcf is intermediate and not published
     families.each { fid ->
         def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
@@ -275,11 +275,11 @@ def createAnalysisPlan(families, individuals, family_members) {
             new File(common_gt_bcf_path).exists() && new File(common_gt_csi_path).exists() &&
             new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists() &&
             new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists()) {
-            plan.wombat.existing.add(fid)
+            plan.annotation.existing.add(fid)
         } else {
-            // Need wombat if normalized BCFs exist or will be created
+            // Need annotation if normalized BCFs exist or will be created
             if (fid in plan.deepvariant_family.existing || fid in plan.deepvariant_family.needed) {
-                plan.wombat.needed.add(fid)
+                plan.annotation.needed.add(fid)
             }
         }
     }
@@ -292,7 +292,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         plan.snvs_common_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
-        def families_with_common_bcfs = plan.wombat.existing + plan.wombat.needed
+        def families_with_common_bcfs = plan.annotation.existing + plan.annotation.needed
         if (families_with_common_bcfs.size() > 0) {
             plan.snvs_common_cohort.needed.add('cohort')  // Single cohort entry
         }
@@ -347,7 +347,7 @@ def displayAnalysisSummary(analysis_plan) {
     == SNVs/INDELs Calling ==
     DEEPVARIANT_SAMPLE: ${analysis_plan.deepvariant_sample.existing.size()} individuals done and ${analysis_plan.deepvariant_sample.needed.size()} to do
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
-    WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
+    ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     == Common Variants ==
     SNVS_COMMON_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     ========================================================================================
@@ -362,8 +362,8 @@ def displayAnalysisSummary(analysis_plan) {
     if (analysis_plan.deepvariant_family.needed) {
         log.info "Families needing family calling, normalization, and pedigree: ${analysis_plan.deepvariant_family.needed.join(', ')}"
     }
-    if (analysis_plan.wombat.needed) {
-        log.info "Families needing wombat (gnomAD annotation, filtering, and VEP): ${analysis_plan.wombat.needed.join(', ')}"
+    if (analysis_plan.annotation.needed) {
+        log.info "Families needing annotation (gnomAD annotation, filtering, and VEP): ${analysis_plan.annotation.needed.join(', ')}"
     }
     if (analysis_plan.snvs_common_cohort.needed) {
         log.info "Cohort needing common variant merge: Yes"
@@ -388,9 +388,9 @@ def validateStepsAvailability(analysis_plan) {
         errors.add("DeepVariant family step is required for ${analysis_plan.deepvariant_family.needed.size()} families but not included in steps parameter")
     }
     
-    // Check if wombat is needed but not available
-    if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in params.steps)) {
-        errors.add("Wombat step is required for ${analysis_plan.wombat.needed.size()} families but not included in steps parameter")
+    // Check if annotation is needed but not available
+    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in params.steps)) {
+        errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
     
     if (errors) {
@@ -401,7 +401,7 @@ def validateStepsAvailability(analysis_plan) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, wombat, snvs_common_cohort
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_common_cohort
         ========================================================================================
         """
         exit 1, "Pipeline stopped due to missing required steps"
@@ -559,7 +559,7 @@ def createChannels(analysis_plan) {
             fid in analysis_plan.deepvariant_family.existing
         }
     
-    // Create channel for existing common filtered BCF files (output from wombat, used by snvs_common_cohort)
+    // Create channel for existing common filtered BCF files (output from annotation, used by snvs_common_cohort)
     channels.existing_common_filtered_bcfs = Channel
         .fromPath("${params.data}/families/*/vcfs/*.common_gt.bcf")
         .map { bcf ->
@@ -568,7 +568,7 @@ def createChannels(analysis_plan) {
             [fid, bcf, csi_path]
         }
         .filter { fid, bcf, csi_path -> 
-            fid in analysis_plan.wombat.existing && new File(csi_path).exists()
+            fid in analysis_plan.annotation.existing && new File(csi_path).exists()
         }
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]

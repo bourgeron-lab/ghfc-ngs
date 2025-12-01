@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * Wombat: De novo mutation extraction module using slivar
+ * Annotation: De novo mutation extraction module using slivar
  */
 
 nextflow.enable.dsl=2
