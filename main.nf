@@ -15,7 +15,7 @@ include { ALIGNMENT } from './workflows/alignment'
 include { DEEPVARIANT_SAMPLE } from './workflows/deepvariant_sample'
 include { DEEPVARIANT_FAMILY } from './workflows/deepvariant_family'
 include { ANNOTATION } from './workflows/annotation'
-include { SNVS_COMMON_COHORT } from './workflows/snvs_common_cohort'
+include { SNVS_COHORT } from './workflows/snvs_cohort'
 
 /*
 ========================================================================================
@@ -35,7 +35,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_common_cohort']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -179,22 +179,28 @@ workflow {
         
         ANNOTATION(annotation_bcfs, annotation_pedigrees)
         annotation_common_bcfs_output = ANNOTATION.out.filtered_common_bcfs
+        annotation_dnm_output = ANNOTATION.out.dnm_bcfs
+    } else {
+        annotation_dnm_output = Channel.empty()
     }
     
     // Run cohort common variants merge if needed and allowed
-    if (analysis_plan.snvs_common_cohort.needed.size() > 0 && 'snvs_common_cohort' in params.steps) {
-        log.info "Running cohort common variants merge..."
+    if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in params.steps) {
+        log.info "Running cohort common variants merge and DNM concatenation..."
         
         // Get all available common filtered BCFs (existing + newly created)
         if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
             // Mix existing BCFs with newly created ones
             all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(annotation_common_bcfs_output)
+            // Get DNM files - mix existing with newly created
+            all_available_dnm_files = channels.existing_dnm_files.mix(annotation_dnm_output)
         } else {
             // Use only existing BCFs if no new ones were created
             all_available_common_bcfs = channels.existing_common_filtered_bcfs
+            all_available_dnm_files = channels.existing_dnm_files
         }
         
-        SNVS_COMMON_COHORT(all_available_common_bcfs)
+        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files)
     }
 }
 
@@ -246,7 +252,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
-        snvs_common_cohort: [needed: [], existing: []]
+        snvs_cohort: [needed: [], existing: []]
     ]
     
     // Check existing family outputs (normalized BCF and pedigree - all part of deepvariant_family)
@@ -301,12 +307,12 @@ def createAnalysisPlan(families, individuals, family_members) {
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
     
     if (new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()) {
-        plan.snvs_common_cohort.existing.add('cohort')  // Single cohort entry
+        plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
         def families_with_common_bcfs = plan.annotation.existing + plan.annotation.needed
         if (families_with_common_bcfs.size() > 0) {
-            plan.snvs_common_cohort.needed.add('cohort')  // Single cohort entry
+            plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
         }
     }
     
@@ -361,7 +367,7 @@ def displayAnalysisSummary(analysis_plan) {
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     == Common Variants ==
-    SNVS_COMMON_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_common_cohort.needed.size() > 0 ? 'Yes' : 'No'}
+    SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     ========================================================================================
     """
     
@@ -377,7 +383,7 @@ def displayAnalysisSummary(analysis_plan) {
     if (analysis_plan.annotation.needed) {
         log.info "Families needing annotation (gnomAD annotation, filtering, and VEP): ${analysis_plan.annotation.needed.join(', ')}"
     }
-    if (analysis_plan.snvs_common_cohort.needed) {
+    if (analysis_plan.snvs_cohort.needed) {
         log.info "Cohort needing common variant merge: Yes"
     }
 }
@@ -413,7 +419,7 @@ def validateStepsAvailability(analysis_plan) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_common_cohort
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort
         ========================================================================================
         """
         exit 1, "Pipeline stopped due to missing required steps"
@@ -571,7 +577,7 @@ def createChannels(analysis_plan) {
             fid in analysis_plan.deepvariant_family.existing
         }
     
-    // Create channel for existing common filtered BCF files (output from annotation, used by snvs_common_cohort)
+    // Create channel for existing common filtered BCF files (output from annotation, used by snvs_cohort)
     channels.existing_common_filtered_bcfs = Channel
         .fromPath("${params.data}/families/*/vcfs/*.common_gt.bcf")
         .map { bcf ->
@@ -584,6 +590,24 @@ def createChannels(analysis_plan) {
         }
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]
+        }
+    
+    // Create channel for existing DNM files (output from annotation, used by snvs_cohort)
+    channels.existing_dnm_files = Channel
+        .fromPath("${params.data}/families/*/vcfs/*.rare.${params.vep_config_name}.annotated.dnm.tsv")
+        .map { tsv ->
+            def fid = tsv.parent.parent.name  // Get family ID from path
+            def bcf_path = tsv.toString().replaceAll(/\.tsv$/, '.bcf')
+            def csi_path = "${bcf_path}.csi"
+            [fid, bcf_path, csi_path, tsv]
+        }
+        .filter { fid, bcf_path, csi_path, tsv -> 
+            fid in analysis_plan.annotation.existing && 
+            new File(bcf_path).exists() && 
+            new File(csi_path).exists()
+        }
+        .map { fid, bcf_path, csi_path, tsv ->
+            [fid, file(bcf_path), file(csi_path), tsv]
         }
     
     return channels

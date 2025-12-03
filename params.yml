@@ -7,8 +7,8 @@ steps: [
     "deepvariant_sample",
     "deepvariant_family",
     "annotation",
-    "snvs_common_cohort",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_common_cohort
+    "snvs_cohort",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"

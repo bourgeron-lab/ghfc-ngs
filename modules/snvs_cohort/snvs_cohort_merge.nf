@@ -1,13 +1,13 @@
 #!/usr/bin/env nextflow
 
 /*
- * SNVs common cohort merge module
+ * SNVs cohort merge module
  * Merges all family common_gt.bcf files into a cohort-level BCF
  */
 
 nextflow.enable.dsl=2
 
-process snvs_common_cohort {
+process SNVS_COHORT_MERGE {
   /*
   Merge all family common_gt.bcf files into a cohort-level BCF file
 
