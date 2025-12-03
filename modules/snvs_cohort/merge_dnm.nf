@@ -47,16 +47,19 @@ process MERGE_DNM {
   output_tsv = "${cohort_name}.${vep_config_name}.dnm.tsv"
 
   """
+  # List all unique DNM TSV files (sorted for consistency)
+  ls -1 *.dnm.tsv | sort -u > file_list.txt
+  
   # Get the first file to extract the header
-  first_file=\$(ls *.dnm.tsv | head -n 1)
+  first_file=\$(head -n 1 file_list.txt)
   
   # Write header from first file
   head -n 1 "\${first_file}" > ${output_tsv}
   
   # Concatenate all files, skipping their headers
-  for file in *.dnm.tsv; do
-    tail -n +2 "\${file}"
-  done >> ${output_tsv}
+  while IFS= read -r file; do
+    tail -n +2 "\${file}" >> ${output_tsv}
+  done < file_list.txt
   """
 
   stub:
