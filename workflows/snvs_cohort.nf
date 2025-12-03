@@ -13,30 +13,44 @@ workflow SNVS_COHORT {
     take:
     filtered_common_bcfs    // channel: [fid, bcf, csi]
     dnm_files              // channel: [fid, bcf, csi, tsv]
+    need_bcf_merge         // boolean: true if BCF merge is needed
+    need_dnm_merge         // boolean: true if DNM merge is needed
 
     main:
 
-    // Collect all BCF files and their indices for cohort merge
-    bcf_files = filtered_common_bcfs
-        .map { fid, bcf, csi -> bcf }
-        .collect()
-    
-    csi_files = filtered_common_bcfs
-        .map { fid, bcf, csi -> csi }
-        .collect()
+    // Conditionally run BCF merge
+    if (need_bcf_merge) {
+        // Collect all BCF files and their indices for cohort merge
+        bcf_files = filtered_common_bcfs
+            .map { fid, bcf, csi -> bcf }
+            .collect()
+        
+        csi_files = filtered_common_bcfs
+            .map { fid, bcf, csi -> csi }
+            .collect()
 
-    // Run cohort merge
-    SNVS_COHORT_MERGE(params.cohort_name, bcf_files, csi_files)
+        // Run cohort merge
+        SNVS_COHORT_MERGE(params.cohort_name, bcf_files, csi_files)
+        cohort_bcf_output = SNVS_COHORT_MERGE.out.cohort_bcf
+    } else {
+        cohort_bcf_output = Channel.empty()
+    }
 
-    // Collect all DNM TSV files for concatenation
-    dnm_tsv_files = dnm_files
-        .map { fid, bcf, csi, tsv -> tsv }
-        .collect()
+    // Conditionally run DNM merge
+    if (need_dnm_merge) {
+        // Collect all DNM TSV files for concatenation
+        dnm_tsv_files = dnm_files
+            .map { fid, bcf, csi, tsv -> tsv }
+            .collect()
 
-    // Run DNM merge
-    MERGE_DNM(params.cohort_name, dnm_tsv_files, params.vep_config_name)
+        // Run DNM merge
+        MERGE_DNM(params.cohort_name, dnm_tsv_files, params.vep_config_name)
+        cohort_dnm_output = MERGE_DNM.out.cohort_dnm_tsv
+    } else {
+        cohort_dnm_output = Channel.empty()
+    }
 
     emit:
-    cohort_bcf = SNVS_COHORT_MERGE.out.cohort_bcf
-    cohort_dnm_tsv = MERGE_DNM.out.cohort_dnm_tsv
+    cohort_bcf = cohort_bcf_output
+    cohort_dnm_tsv = cohort_dnm_output
 }

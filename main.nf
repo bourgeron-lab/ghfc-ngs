@@ -186,7 +186,10 @@ workflow {
     
     // Run cohort common variants merge if needed and allowed
     if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in params.steps) {
-        log.info "Running cohort common variants merge and DNM concatenation..."
+        def merge_tasks = []
+        if (analysis_plan.snvs_cohort.need_bcf_merge) merge_tasks.add("BCF merge")
+        if (analysis_plan.snvs_cohort.need_dnm_merge) merge_tasks.add("DNM concatenation")
+        log.info "Running cohort: ${merge_tasks.join(' and ')}..."
         
         // Get all available common filtered BCFs (existing + newly created)
         if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
@@ -200,7 +203,9 @@ workflow {
             all_available_dnm_files = channels.existing_dnm_files
         }
         
-        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files)
+        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files, 
+                    analysis_plan.snvs_cohort.need_bcf_merge, 
+                    analysis_plan.snvs_cohort.need_dnm_merge)
     }
 }
 
@@ -302,17 +307,24 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
 
-    // Check existing cohort common BCF file
+    // Check existing cohort files (common BCF and DNM TSV)
     def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
+    def cohort_dnm_tsv_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.${params.vep_config_name}.dnm.tsv"
     
-    if (new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()) {
+    def cohort_bcf_exists = new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()
+    def cohort_dnm_exists = new File(cohort_dnm_tsv_path).exists()
+    
+    if (cohort_bcf_exists && cohort_dnm_exists) {
         plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
         def families_with_common_bcfs = plan.annotation.existing + plan.annotation.needed
         if (families_with_common_bcfs.size() > 0) {
             plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
+            // Track what needs to be generated
+            plan.snvs_cohort.need_bcf_merge = !cohort_bcf_exists
+            plan.snvs_cohort.need_dnm_merge = !cohort_dnm_exists
         }
     }
     
