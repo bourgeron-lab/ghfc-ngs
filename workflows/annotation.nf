@@ -43,34 +43,36 @@ workflow ANNOTATION {
     COMMON_FILTERS(GNOMAD_FREQ_FILTER.out.common_bcfs)
 
     // Step 4: Annotate rare variants with VEP
-    vep_input = GNOMAD_FREQ_FILTER.out.rare_vcfs
+    // First, separate rare VCFs into those needing VEP vs those with existing VEP results
+    rare_vcfs_with_check = GNOMAD_FREQ_FILTER.out.rare_vcfs
         .map { fid, vcf, tbi ->
-            [fid, vcf, tbi, params.vep_config]
-        }
-
-    VEP_ANNOTATION(vep_input)
-
-    // Step 5: Add additional annotations from BCF files
-    // Check for existing VEP annotated files for families that might be skipped
-    existing_vep_vcfs = normalized_bcfs
-        .map { fid, bcf, csi ->
             def vep_vcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz")
             def vep_tbi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi")
-            def annotated_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf")
-            def annotated_csi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi")
             
-            // Only use existing VEP files if final annotated BCF doesn't exist but VEP files do
-            if (!annotated_bcf.exists() && vep_vcf.exists() && vep_tbi.exists()) {
-                return [fid, vep_vcf, vep_tbi]
+            // Check if VEP results already exist
+            if (vep_vcf.exists() && vep_tbi.exists()) {
+                return [fid: fid, vcf: vcf, tbi: tbi, vep_vcf: vep_vcf, vep_tbi: vep_tbi, has_vep: true]
             } else {
-                return null
+                return [fid: fid, vcf: vcf, tbi: tbi, vep_vcf: null, vep_tbi: null, has_vep: false]
             }
         }
-        .filter { it != null }
+    
+    // Split into two channels: those needing VEP and those with existing VEP
+    vep_needed = rare_vcfs_with_check
+        .filter { it.has_vep == false }
+        .map { [it.fid, it.vcf, it.tbi, params.vep_config] }
+    
+    vep_existing = rare_vcfs_with_check
+        .filter { it.has_vep == true }
+        .map { [it.fid, it.vep_vcf, it.vep_tbi] }
+
+    // Run VEP only for families that need it
+    VEP_ANNOTATION(vep_needed)
 
     // Combine new VEP outputs with existing VEP files
-    all_vep_vcfs = VEP_ANNOTATION.out.annotated_vcfs.mix(existing_vep_vcfs)
+    all_vep_vcfs = VEP_ANNOTATION.out.annotated_vcfs.mix(vep_existing)
     
+    // Step 5: Add additional annotations from BCF files
     bcftools_annotate_input = all_vep_vcfs
         .map { fid, vcf, tbi ->
             [fid, vcf, tbi, params.annotation_annotation_path, params.annotation_annotation_list]
