@@ -54,7 +54,7 @@ process VEP_ANNOTATION {
       --output_file ${output_vcf} \\
       --config ${vep_config} \\
       --compress_output bgzip \\
-      --fork ${task.cpus} \\
+      --fork ${(1.3 * task.cpus).round()} \\
       --format vcf \\
       --vcf \\
       --force_overwrite
