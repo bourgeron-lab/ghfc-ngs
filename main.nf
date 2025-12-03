@@ -264,7 +264,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF - all part of annotation)
+    // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF, and DNM files - all part of annotation)
     // Note: {FID}.gnomad.bcf is intermediate and not published
     families.each { fid ->
         def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
@@ -277,12 +277,16 @@ def createAnalysisPlan(families, individuals, family_members) {
         def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
         def annotated_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf"
         def annotated_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi"
+        def dnm_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.bcf"
+        def dnm_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.bcf.csi"
+        def dnm_tsv_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.tsv"
         
         if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() &&
             new File(common_bcf_path).exists() && new File(common_csi_path).exists() &&
             new File(common_gt_bcf_path).exists() && new File(common_gt_csi_path).exists() &&
             new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists() &&
-            new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists()) {
+            new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists() &&
+            new File(dnm_bcf_path).exists() && new File(dnm_csi_path).exists() && new File(dnm_tsv_path).exists()) {
             plan.annotation.existing.add(fid)
         } else {
             // Need annotation if normalized BCFs exist or will be created

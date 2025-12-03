@@ -73,15 +73,37 @@ workflow ANNOTATION {
     all_vep_vcfs = VEP_ANNOTATION.out.annotated_vcfs.mix(vep_existing)
     
     // Step 5: Add additional annotations from BCF files
-    bcftools_annotate_input = all_vep_vcfs
+    // Check for existing bcftools annotated files
+    vep_with_bcftools_check = all_vep_vcfs
         .map { fid, vcf, tbi ->
-            [fid, vcf, tbi, params.annotation_annotation_path, params.annotation_annotation_list]
+            def annotated_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf")
+            def annotated_csi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi")
+            
+            // Check if bcftools annotated results already exist
+            if (annotated_bcf.exists() && annotated_csi.exists()) {
+                return [fid: fid, vcf: vcf, tbi: tbi, annotated_bcf: annotated_bcf, annotated_csi: annotated_csi, has_bcftools: true]
+            } else {
+                return [fid: fid, vcf: vcf, tbi: tbi, annotated_bcf: null, annotated_csi: null, has_bcftools: false]
+            }
         }
+    
+    // Split into two channels: those needing bcftools annotation and those with existing results
+    bcftools_needed = vep_with_bcftools_check
+        .filter { it.has_bcftools == false }
+        .map { [it.fid, it.vcf, it.tbi, params.annotation_annotation_path, params.annotation_annotation_list] }
+    
+    bcftools_existing = vep_with_bcftools_check
+        .filter { it.has_bcftools == true }
+        .map { [it.fid, it.annotated_bcf, it.annotated_csi] }
 
-    BCFTOOLS_ANNOTATE(bcftools_annotate_input)
+    // Run bcftools annotate only for families that need it
+    BCFTOOLS_ANNOTATE(bcftools_needed)
+
+    // Combine new bcftools outputs with existing annotated BCFs
+    all_annotated_bcfs = BCFTOOLS_ANNOTATE.out.annotated_bcfs.mix(bcftools_existing)
 
     // Step 6: Extract de novo mutations
-    dnm_input = BCFTOOLS_ANNOTATE.out.annotated_bcfs
+    dnm_input = all_annotated_bcfs
         .join(family_pedigrees)
         .map { fid, bcf, csi, pedigree ->
             [fid, bcf, csi, pedigree, 
@@ -103,7 +125,7 @@ workflow ANNOTATION {
     rare_vcfs = GNOMAD_FREQ_FILTER.out.rare_vcfs
     common_bcfs = GNOMAD_FREQ_FILTER.out.common_bcfs
     filtered_common_bcfs = COMMON_FILTERS.out.filtered_common_bcfs
-    vep_annotated_vcfs = VEP_ANNOTATION.out.annotated_vcfs
-    fully_annotated_bcfs = BCFTOOLS_ANNOTATE.out.annotated_bcfs
+    vep_annotated_vcfs = all_vep_vcfs
+    fully_annotated_bcfs = all_annotated_bcfs
     dnm_bcfs = DNM_EXTRACTION.out.dnm_results
 }
