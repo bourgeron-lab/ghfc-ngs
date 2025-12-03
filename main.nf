@@ -209,10 +209,18 @@ def parsePedigreeFile(pedigree_file) {
     def individuals = [] as Set
     def family_members = [:]
     
-    file(pedigree_file).readLines().each { line ->
+    file(pedigree_file).readLines().eachWithIndex { line, index ->
+        // Skip comments and empty lines
         if (line.startsWith('#') || line.trim().isEmpty()) return
         
         def cols = line.split('\t')
+        
+        // Skip header row if first column is "FID"
+        if (index == 0 && cols[0] == 'FID') {
+            log.info "Skipping pedigree header row"
+            return
+        }
+        
         if (cols.size() < 6) {
             exit 1, "ERROR: Pedigree file must have 6 columns (FID, barcode, father, mother, sex, phenotype). Found ${cols.size()} columns in line: ${line}"
         }
