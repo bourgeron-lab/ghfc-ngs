@@ -51,7 +51,27 @@ workflow ANNOTATION {
     VEP_ANNOTATION(vep_input)
 
     // Step 5: Add additional annotations from BCF files
-    bcftools_annotate_input = VEP_ANNOTATION.out.annotated_vcfs
+    // Check for existing VEP annotated files for families that might be skipped
+    existing_vep_vcfs = normalized_bcfs
+        .map { fid, bcf, csi ->
+            def vep_vcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz")
+            def vep_tbi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi")
+            def annotated_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf")
+            def annotated_csi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi")
+            
+            // Only use existing VEP files if final annotated BCF doesn't exist but VEP files do
+            if (!annotated_bcf.exists() && vep_vcf.exists() && vep_tbi.exists()) {
+                return [fid, vep_vcf, vep_tbi]
+            } else {
+                return null
+            }
+        }
+        .filter { it != null }
+
+    // Combine new VEP outputs with existing VEP files
+    all_vep_vcfs = VEP_ANNOTATION.out.annotated_vcfs.mix(existing_vep_vcfs)
+    
+    bcftools_annotate_input = all_vep_vcfs
         .map { fid, vcf, tbi ->
             [fid, vcf, tbi, params.annotation_annotation_path, params.annotation_annotation_list]
         }
