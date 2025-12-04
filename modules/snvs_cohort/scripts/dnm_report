@@ -1,0 +1,621 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pandas", "numpy", "matplotlib", "scipy", "reportlab"]
+# ///
+
+
+# Create comprehensive PDF report
+import math
+import os
+import sys
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Image,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from scipy import stats
+
+df = pd.read_table(sys.argv[1], low_memory=False)
+
+# Record variant counts before/after optional LCR filtering and prepare a summary
+initial_variant_count = len(df)
+
+if "LCR" not in df.columns:
+    post_lcr_filter_count = initial_variant_count
+    lcr_removed_count = 0
+    lcr_removed_pct = 0.0
+else:
+    # Filter out LCR variants and update DataFrame
+    df = df[df["LCR"] != "LCR"]
+
+    post_lcr_filter_count = len(df)
+    lcr_removed_count = initial_variant_count - post_lcr_filter_count
+    lcr_removed_pct = (
+        100.0 * lcr_removed_count / initial_variant_count
+        if initial_variant_count > 0
+        else 0.0
+    )
+
+# Prepare a textual summary that can be added to the PDF later.
+# The PDF generation code can use `lcr_filter_stats` or `lcr_summary_lines`.
+lcr_filter_stats = {
+    "initial_variants": initial_variant_count,
+    "post_lcr_filter_variants": post_lcr_filter_count,
+    "removed_variants": lcr_removed_count,
+    "removed_pct": lcr_removed_pct,
+}
+
+lcr_summary_lines = [
+    "<b>LCR filtering summary</b>",
+    f"Number of variants before filtering: {initial_variant_count}",
+    f"Number of variants after filtering: {post_lcr_filter_count}",
+    f"Number of variants removed by LCR filter: {lcr_removed_count} ({lcr_removed_pct:.2f}%)",
+]
+
+if "sample_id" not in df.columns:
+    raise SystemExit("Input table does not contain a 'sample_id' column.")
+
+# Check for chr:pos:ref:alt column to differentiate SNVs and InDels
+if "chr:pos:ref:alt" not in df.columns:
+    raise SystemExit("Input table does not contain a 'chr:pos:ref:alt' column.")
+
+
+# Function to classify variant type from chr:pos:ref:alt
+def classify_variant(variant_id):
+    """Classify variant as SNV or InDel based on chr:pos:ref:alt format"""
+    parts = str(variant_id).split(":")
+    if len(parts) != 4:
+        return "Unknown"
+    ref = parts[2]
+    alt = parts[3]
+
+    # SNV: both ref and alt are single nucleotides from ACGT
+    if len(ref) == 1 and len(alt) == 1 and ref in "ACGT" and alt in "ACGT":
+        return "SNV"
+    else:
+        return "InDel"
+
+
+# Add variant type column
+df["variant_type"] = df["chr:pos:ref:alt"].apply(classify_variant)
+
+# Store variant type counts for PDF report
+variant_type_counts = df["variant_type"].value_counts()
+snv_count = variant_type_counts.get("SNV", 0)
+indel_count = variant_type_counts.get("InDel", 0)
+unknown_count = variant_type_counts.get("Unknown", 0)
+
+
+# Function to calculate statistics and outliers for a dataset
+def calculate_stats(data, label=""):
+    counts = data.groupby("sample_id").size()
+
+    num_samples = len(counts)
+    mean_rows = counts.mean()
+    std_rows = counts.std()
+
+    # Calculate outliers using 2 standard deviations from mean
+    # Round up the threshold to the closest integer
+    outlier_threshold = math.ceil(mean_rows + 2 * std_rows)
+    outliers = counts[counts > outlier_threshold]
+
+    return {
+        "counts": counts,
+        "num_samples": num_samples,
+        "mean": mean_rows,
+        "std": std_rows,
+        "min": counts.min(),
+        "max": counts.max(),
+        "outlier_threshold": outlier_threshold,
+        "outliers": outliers,
+    }
+
+
+# Calculate statistics for all variants (genomic), SNVs only, and InDels only
+genomic_all_stats = calculate_stats(df, "Genomic - All variants (SNVs and InDels) ")
+genomic_snv_stats = calculate_stats(
+    df[df["variant_type"] == "SNV"], "Genomic - SNVs only "
+)
+genomic_indel_stats = calculate_stats(
+    df[df["variant_type"] == "InDel"], "Genomic - InDels only "
+)
+
+# Filter for coding variants (highest_impact <= 30)
+# Check if highest_impact column exists
+if "highest_impact" not in df.columns:
+    print(
+        "\nWarning: 'highest_impact' column not found. Skipping coding variants analysis."
+    )
+    df_coding = pd.DataFrame()  # Empty dataframe
+    coding_all_stats = None
+    coding_snv_stats = None
+    coding_indel_stats = None
+    coding_filter_message = (
+        "Coding variants analysis skipped: 'highest_impact' column not found"
+    )
+else:
+    # Split highest_impact on '_' and filter where first value (as int) <= 30
+    def is_coding_variant(impact_str):
+        if pd.isna(impact_str):
+            return False
+        parts = str(impact_str).split("_")
+        if len(parts) == 0:
+            return False
+        try:
+            impact_rank = int(parts[0])
+            return impact_rank <= 30
+        except (ValueError, IndexError):
+            return False
+
+    df_coding = df[df["highest_impact"].apply(is_coding_variant)]
+
+    # Store coding filter info for PDF
+    coding_variant_count = len(df_coding)
+    total_variant_count = len(df)
+    coding_filter_message = f"Coding variants (highest_impact ≤ 30): {coding_variant_count} out of {total_variant_count} variants"
+
+    # Calculate statistics for coding variants
+    coding_all_stats = calculate_stats(
+        df_coding, "Coding - All variants (SNVs and InDels) "
+    )
+    coding_snv_stats = calculate_stats(
+        df_coding[df_coding["variant_type"] == "SNV"], "Coding - SNVs only "
+    )
+    coding_indel_stats = calculate_stats(
+        df_coding[df_coding["variant_type"] == "InDel"], "Coding - InDels only "
+    )
+
+
+# Function to create density plot
+def create_density_plot(stats_dict, title, color="lightblue", edge_color="darkblue"):
+    """Create a density plot for the given statistics"""
+    counts = stats_dict["counts"]
+    mean_val = stats_dict["mean"]
+    std_val = stats_dict["std"]
+    outlier_threshold = stats_dict["outlier_threshold"]
+    outliers = stats_dict["outliers"]
+
+    values = counts.values
+    min_count = int(values.min())
+    max_count = int(values.max())
+
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Create density plot using KDE
+    density = stats.gaussian_kde(values)
+    x_range = np.linspace(min_count - 1, max_count + 1, 500)
+    y_density = density(x_range)
+
+    # Plot density
+    ax.fill_between(
+        x_range, y_density, alpha=0.7, color=color, edgecolor=edge_color, linewidth=1.5
+    )
+    ax.plot(x_range, y_density, color=edge_color, linewidth=2)
+
+    # Add vertical lines for mean and thresholds
+    # Round up for upper threshold, round down for lower threshold
+    upper_threshold = math.ceil(mean_val + 2 * std_val)
+    lower_threshold = math.floor(mean_val - 2 * std_val)
+
+    ax.axvline(
+        mean_val,
+        color="red",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Mean = {mean_val:.2f}",
+    )
+    ax.axvline(
+        upper_threshold,
+        color="orange",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Mean + 2*SD = {upper_threshold}",
+    )
+    if lower_threshold > 0:
+        ax.axvline(
+            lower_threshold,
+            color="orange",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Mean - 2*SD = {lower_threshold}",
+        )
+
+    # Set labels and title
+    ax.set_xlabel("Number of de novo variants per sample", fontsize=11)
+    ax.set_ylabel("Density", fontsize=11)
+    ax.set_title(title, fontsize=12, weight="bold")
+    ax.legend(loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+
+    # If there are outliers, add text labels at x-axis positions (no dots)
+    if not outliers.empty:
+        # Sort outliers by x position to handle overlaps
+        sorted_outliers = sorted(outliers.items(), key=lambda x: x[1])
+
+        # Track y positions to avoid overlap
+        label_positions = {}
+        y_offset = 0
+        max_y_density = max(y_density)
+
+        for i, (sample_id, n_variants) in enumerate(sorted_outliers):
+            x = float(n_variants)
+
+            # Check if this label would overlap with previous ones
+            y_pos = 0
+            if i > 0:
+                prev_x = float(sorted_outliers[i - 1][1])
+                # If too close to previous (within ~3 units), stack it higher
+                if abs(x - prev_x) < 3:
+                    y_pos = label_positions.get(prev_x, 0) + max_y_density * 0.08
+                else:
+                    y_pos = 0
+
+            label_positions[x] = y_pos
+
+            # Place text above y=0 for readability, left-aligned with position
+            ax.text(
+                x,
+                y_pos,
+                str(sample_id),
+                fontsize=8,
+                ha="left",
+                va="bottom",
+                rotation=45,
+                color="red",
+                weight="bold",
+            )
+            # Add a small vertical line to mark the position
+            ax.axvline(x, ymin=0, ymax=0.05, color="red", linewidth=2, alpha=0.8)
+
+    return fig
+
+
+# Create plots for genomic variants
+fig_genomic_all = create_density_plot(
+    genomic_all_stats,
+    "Distribution of de novo variants per sample (SNVs and InDels, mean ± 2*SD)",
+    color="lightblue",
+    edge_color="darkblue",
+)
+plot_file_genomic_all = f"{sys.argv[1]}.dnm_distribution_genomic_all_temp.png"
+fig_genomic_all.tight_layout()
+fig_genomic_all.savefig(
+    plot_file_genomic_all, format="png", bbox_inches="tight", dpi=300
+)
+plt.close(fig_genomic_all)
+
+fig_genomic_snv = create_density_plot(
+    genomic_snv_stats,
+    "Distribution of de novo SNVs per sample (mean ± 2*SD)",
+    color="lightgreen",
+    edge_color="darkgreen",
+)
+plot_file_genomic_snv = f"{sys.argv[1]}.dnm_distribution_genomic_snv_temp.png"
+fig_genomic_snv.tight_layout()
+fig_genomic_snv.savefig(
+    plot_file_genomic_snv, format="png", bbox_inches="tight", dpi=300
+)
+plt.close(fig_genomic_snv)
+
+fig_genomic_indel = create_density_plot(
+    genomic_indel_stats,
+    "Distribution of de novo InDels per sample (mean ± 2*SD)",
+    color="lightcoral",
+    edge_color="darkred",
+)
+plot_file_genomic_indel = f"{sys.argv[1]}.dnm_distribution_genomic_indel_temp.png"
+fig_genomic_indel.tight_layout()
+fig_genomic_indel.savefig(
+    plot_file_genomic_indel, format="png", bbox_inches="tight", dpi=300
+)
+plt.close(fig_genomic_indel)
+
+# Create plots for coding variants (if applicable)
+if coding_all_stats is not None:
+    fig_coding_all = create_density_plot(
+        coding_all_stats,
+        "Distribution of coding de novo variants per sample (SNVs and InDels, mean ± 2*SD)",
+        color="lightblue",
+        edge_color="darkblue",
+    )
+    plot_file_coding_all = f"{sys.argv[1]}.dnm_distribution_coding_all_temp.png"
+    fig_coding_all.tight_layout()
+    fig_coding_all.savefig(
+        plot_file_coding_all, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_coding_all)
+
+    fig_coding_snv = create_density_plot(
+        coding_snv_stats,
+        "Distribution of coding de novo SNVs per sample (mean ± 2*SD)",
+        color="lightgreen",
+        edge_color="darkgreen",
+    )
+    plot_file_coding_snv = f"{sys.argv[1]}.dnm_distribution_coding_snv_temp.png"
+    fig_coding_snv.tight_layout()
+    fig_coding_snv.savefig(
+        plot_file_coding_snv, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_coding_snv)
+
+    fig_coding_indel = create_density_plot(
+        coding_indel_stats,
+        "Distribution of coding de novo InDels per sample (mean ± 2*SD)",
+        color="lightcoral",
+        edge_color="darkred",
+    )
+    plot_file_coding_indel = f"{sys.argv[1]}.dnm_distribution_coding_indel_temp.png"
+    fig_coding_indel.tight_layout()
+    fig_coding_indel.savefig(
+        plot_file_coding_indel, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_coding_indel)
+
+# Get output PDF filename from command line argument (second argument)
+if len(sys.argv) < 3:
+    print("Error: Missing output PDF filename argument.")
+    print(f"Usage: {sys.argv[0]} <input_tsv_file> <output_pdf_file>")
+    sys.exit(1)
+
+output_pdf = sys.argv[2]
+doc = SimpleDocTemplate(
+    output_pdf, pagesize=letter, topMargin=0.5 * inch, bottomMargin=0.5 * inch
+)
+story = []
+styles = getSampleStyleSheet()
+
+# Custom styles
+title_style = ParagraphStyle(
+    "CustomTitle",
+    parent=styles["Heading1"],
+    fontSize=20,
+    textColor=colors.HexColor("#1f4788"),
+    spaceAfter=30,
+    alignment=TA_CENTER,
+    fontName="Helvetica-Bold",
+)
+
+subtitle_style = ParagraphStyle(
+    "CustomSubtitle",
+    parent=styles["Heading2"],
+    fontSize=12,
+    textColor=colors.HexColor("#2e5c8a"),
+    spaceAfter=12,
+    spaceBefore=20,
+    fontName="Helvetica-Bold",
+)
+
+# Title
+story.append(Paragraph("De Novo Mutation Analysis Report", title_style))
+story.append(Spacer(1, 12))
+
+# Generation info
+generation_date = datetime.now().strftime("%B %d, %Y at %H:%M")
+input_file = os.path.basename(sys.argv[1])
+story.append(Paragraph(f"<b>Input File:</b> {input_file}", styles["Normal"]))
+story.append(Paragraph(f"<b>Generated:</b> {generation_date}", styles["Normal"]))
+story.append(Spacer(1, 12))
+
+# Add LCR filtering summary
+story.append(
+    Paragraph(
+        f"<b>LCR filter:</b> before: {initial_variant_count}, after: {post_lcr_filter_count}, removed: {lcr_removed_count} ({lcr_removed_pct:.2f}%)",
+        styles["Normal"],
+    )
+)
+
+# Add variant type distribution
+story.append(
+    Paragraph(
+        f"<b>Variant types:</b> SNVs: {snv_count}, InDels: {indel_count}"
+        + (f", Unknown: {unknown_count}" if unknown_count > 0 else ""),
+        styles["Normal"],
+    )
+)
+
+# Add coding variants filter info
+story.append(
+    Paragraph(
+        f"<b>Coding filter:</b> {coding_filter_message}",
+        styles["Normal"],
+    )
+)
+story.append(Spacer(1, 12))
+
+# Add note about outlier detection methodology
+story.append(
+    Paragraph(
+        "<b>Note on outlier detection:</b> The outlier detection uses mean ± 2*SD (standard deviations) to avoid being too stringent. "
+        "Threshold values are rounded to integers: the upper threshold (mean + 2*SD) is rounded up (ceiling), "
+        "and the lower threshold (mean - 2*SD) is rounded down (floor).",
+        styles["Normal"],
+    )
+)
+story.append(Spacer(1, 24))
+
+
+# Helper function to create a section with stats table, outliers, and plot
+def add_analysis_section(
+    story, section_title, stats_dict, plot_file, styles, subtitle_style
+):
+    """Add a complete analysis section to the PDF"""
+    story.append(Paragraph(section_title, subtitle_style))
+    story.append(Spacer(1, 12))
+
+    # Summary Statistics Table
+    summary_data = [
+        ["Metric", "Value"],
+        ["Number of samples", f"{stats_dict['num_samples']}"],
+        ["Mean DNM per sample", f"{stats_dict['mean']:.2f}"],
+        ["Standard deviation", f"{stats_dict['std']:.2f}"],
+        ["Minimum DNM per sample", f"{stats_dict['min']}"],
+        ["Maximum DNM per sample", f"{stats_dict['max']}"],
+        ["Outlier threshold (mean + 2*SD)", f"{stats_dict['outlier_threshold']}"],
+    ]
+
+    summary_table = Table(summary_data, colWidths=[2.5 * inch, 1.5 * inch])
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2e5c8a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 1),
+                ("TOPPADDING", (0, 0), (-1, 0), 1),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 1), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 0),
+                ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+                ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 1), (-1, -1), 9),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+            ]
+        )
+    )
+
+    story.append(summary_table)
+    story.append(Spacer(1, 12))
+
+    # Distribution Plot
+    img = Image(plot_file, width=6.5 * inch, height=3.9 * inch)
+    story.append(img)
+    story.append(Spacer(1, 12))
+
+    # Outlier Detection (after plot)
+    outliers = stats_dict["outliers"]
+    if outliers.empty:
+        story.append(Paragraph("<b>Outlier(s):</b> None", styles["Normal"]))
+    else:
+        # Sort outliers by decreasing number of variants
+        sorted_outliers = sorted(outliers.items(), key=lambda x: x[1], reverse=True)
+
+        # Create comma-separated list with sample names and DNM counts
+        outlier_list = ", ".join(
+            [
+                f"{sample_id} ({int(n_variants)})"
+                for sample_id, n_variants in sorted_outliers
+            ]
+        )
+
+        story.append(Paragraph(f"<b>Outlier(s):</b> {outlier_list}", styles["Normal"]))
+
+    story.append(Spacer(1, 24))
+
+
+# Create a section style for major sections
+section_style = ParagraphStyle(
+    "Section",
+    parent=styles["Heading1"],
+    fontSize=16,
+    textColor=colors.HexColor("#1f4788"),
+    spaceAfter=20,
+    spaceBefore=30,
+    fontName="Helvetica-Bold",
+)
+
+# Add page break before genomic section
+story.append(PageBreak())
+
+# Add Genomic de novo variants section
+story.append(Paragraph("Genomic de novo variants", section_style))
+
+add_analysis_section(
+    story,
+    "Analysis 1: SNVs and InDels Combined",
+    genomic_all_stats,
+    plot_file_genomic_all,
+    styles,
+    subtitle_style,
+)
+
+story.append(PageBreak())
+
+add_analysis_section(
+    story,
+    "Analysis 2: SNVs Only",
+    genomic_snv_stats,
+    plot_file_genomic_snv,
+    styles,
+    subtitle_style,
+)
+
+story.append(PageBreak())
+
+add_analysis_section(
+    story,
+    "Analysis 3: InDels Only",
+    genomic_indel_stats,
+    plot_file_genomic_indel,
+    styles,
+    subtitle_style,
+)
+
+# Add Coding de novo variants section (if applicable)
+if coding_all_stats is not None:
+    story.append(PageBreak())
+    story.append(Paragraph("Coding de novo variants", section_style))
+
+    add_analysis_section(
+        story,
+        "Analysis 4: SNVs and InDels Combined (Coding)",
+        coding_all_stats,
+        plot_file_coding_all,
+        styles,
+        subtitle_style,
+    )
+
+    story.append(PageBreak())
+
+    add_analysis_section(
+        story,
+        "Analysis 5: SNVs Only (Coding)",
+        coding_snv_stats,
+        plot_file_coding_snv,
+        styles,
+        subtitle_style,
+    )
+
+    story.append(PageBreak())
+
+    add_analysis_section(
+        story,
+        "Analysis 6: InDels Only (Coding)",
+        coding_indel_stats,
+        plot_file_coding_indel,
+        styles,
+        subtitle_style,
+    )
+
+# Build PDF
+doc.build(story)
+
+# Clean up temporary plot files
+os.remove(plot_file_genomic_all)
+os.remove(plot_file_genomic_snv)
+os.remove(plot_file_genomic_indel)
+
+if coding_all_stats is not None:
+    os.remove(plot_file_coding_all)
+    os.remove(plot_file_coding_snv)
+    os.remove(plot_file_coding_indel)

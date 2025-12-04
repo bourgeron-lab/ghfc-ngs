@@ -7,6 +7,7 @@
 // Include modules
 include { SNVS_COHORT_MERGE } from '../modules/snvs_cohort/snvs_cohort_merge'
 include { MERGE_DNM } from '../modules/snvs_cohort/merge_dnm'
+include { DNM_REPORT } from '../modules/snvs_cohort/dnm_report'
 
 workflow SNVS_COHORT {
 
@@ -15,6 +16,7 @@ workflow SNVS_COHORT {
     dnm_files              // channel: [fid, bcf, csi, tsv]
     need_bcf_merge         // boolean: true if BCF merge is needed
     need_dnm_merge         // boolean: true if DNM merge is needed
+    need_dnm_report        // boolean: true if DNM report is needed
 
     main:
 
@@ -47,10 +49,25 @@ workflow SNVS_COHORT {
         MERGE_DNM(params.cohort_name, dnm_tsv_files, params.vep_config_name)
         cohort_dnm_output = MERGE_DNM.out.cohort_dnm_tsv
     } else {
-        cohort_dnm_output = Channel.empty()
+        // Use existing DNM TSV file if not regenerating
+        def existing_dnm_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.${params.vep_config_name}.dnm.tsv"
+        cohort_dnm_output = Channel.fromPath(existing_dnm_path, checkIfExists: true)
+    }
+
+    // Conditionally run DNM report
+    if (need_dnm_report) {
+        // Prepare input channel with cohort name, vep config name, and DNM TSV file
+        dnm_report_input = cohort_dnm_output
+            .map { tsv -> tuple(params.cohort_name, params.vep_config_name, tsv) }
+        
+        DNM_REPORT(dnm_report_input)
+        cohort_dnm_report_output = DNM_REPORT.out
+    } else {
+        cohort_dnm_report_output = Channel.empty()
     }
 
     emit:
     cohort_bcf = cohort_bcf_output
     cohort_dnm_tsv = cohort_dnm_output
+    cohort_dnm_report = cohort_dnm_report_output
 }
