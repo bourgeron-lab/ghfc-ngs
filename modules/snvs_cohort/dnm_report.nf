@@ -3,8 +3,6 @@ process DNM_REPORT {
     
     publishDir "${params.data}/cohorts/${cohort_name}/reports", mode: 'copy'
     
-    container 'docker://python:3.12-slim'
-    
     input:
     tuple val(cohort_name), val(vep_config_name), path(dnm_tsv)
     
