@@ -1,9 +1,5 @@
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env python3
 #
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["pandas", "numpy", "matplotlib", "scipy", "reportlab"]
-# ///
 
 
 # Create comprehensive PDF report
