@@ -8,6 +8,7 @@ steps: [
     "deepvariant_family",
     "annotation",
     "snvs_cohort",
+    "wisecondorx",
   ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort
 
 # Input/Output paths

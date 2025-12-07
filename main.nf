@@ -16,6 +16,7 @@ include { DEEPVARIANT_SAMPLE } from './workflows/deepvariant_sample'
 include { DEEPVARIANT_FAMILY } from './workflows/deepvariant_family'
 include { ANNOTATION } from './workflows/annotation'
 include { SNVS_COHORT } from './workflows/snvs_cohort'
+include { WISECONDORX } from './workflows/wisecondorx'
 
 /*
 ========================================================================================
@@ -35,7 +36,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -209,6 +210,19 @@ workflow {
                     analysis_plan.snvs_cohort.need_dnm_merge,
                     analysis_plan.snvs_cohort.need_dnm_report)
     }
+    
+    // Run WisecondorX NPZ conversion if needed and allowed
+    if (analysis_plan.wisecondorx.needed.size() > 0 && 'wisecondorx' in params.steps) {
+        log.info "Running WisecondorX NPZ conversion for ${analysis_plan.wisecondorx.needed.size()} individuals..."
+        
+        // Filter CRAM files for individuals that need WisecondorX
+        wisecondorx_crams = all_available_crams
+            .filter { barcode, cram, crai -> 
+                barcode in analysis_plan.wisecondorx.needed 
+            }
+        
+        WISECONDORX(wisecondorx_crams)
+    }
 }
 
 /*
@@ -259,7 +273,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
-        snvs_cohort: [needed: [], existing: []]
+        snvs_cohort: [needed: [], existing: []],
+        wisecondorx: [needed: [], existing: []]
     ]
     
     // Check existing family outputs (normalized BCF and pedigree - all part of deepvariant_family)
@@ -370,6 +385,20 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing WisecondorX NPZ files
+    individuals.each { barcode ->
+        def npz_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz"
+        
+        if (new File(npz_path).exists()) {
+            plan.wisecondorx.existing.add(barcode)
+        } else {
+            // Need WisecondorX if we have or will have CRAM files
+            if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
+                plan.wisecondorx.needed.add(barcode)
+            }
+        }
+    }
+    
     return plan
 }
 
@@ -385,6 +414,8 @@ def displayAnalysisSummary(analysis_plan) {
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     == Common Variants ==
     SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
+    == SVs Calling ==
+    WISECONDORX: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
     ========================================================================================
     """
     
