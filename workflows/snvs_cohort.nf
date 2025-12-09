@@ -52,13 +52,14 @@ workflow SNVS_COHORT {
         // Use existing DNM TSV file if not regenerating
         def existing_dnm_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.${params.vep_config_name}.dnm.tsv"
         cohort_dnm_output = Channel.fromPath(existing_dnm_path, checkIfExists: true)
+            .map { tsv -> tuple(params.cohort_name, tsv) }
     }
 
     // Conditionally run DNM report
     if (need_dnm_report) {
         // Prepare input channel with cohort name, vep config name, and DNM TSV file
         dnm_report_input = cohort_dnm_output
-            .map { tsv -> tuple(params.cohort_name, params.vep_config_name, tsv) }
+            .map { cohort_name, tsv -> tuple(cohort_name, params.vep_config_name, tsv) }
         
         DNM_REPORT(dnm_report_input)
         cohort_dnm_report_output = DNM_REPORT.out
