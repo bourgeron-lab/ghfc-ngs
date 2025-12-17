@@ -100,11 +100,23 @@ unknown_count = variant_type_counts.get("Unknown", 0)
 
 # Function to calculate statistics and outliers for a dataset
 def calculate_stats(data, label=""):
+    # Check if data is empty or insufficient
+    if data.empty:
+        return None
+
     counts = data.groupby("sample_id").size()
+
+    # Check if we have any samples
+    if counts.empty or len(counts) == 0:
+        return None
 
     num_samples = len(counts)
     mean_rows = counts.mean()
     std_rows = counts.std()
+
+    # Check for NaN values (can happen with single sample or all same values)
+    if pd.isna(mean_rows) or pd.isna(std_rows):
+        return None
 
     # Calculate outliers using 2 standard deviations from mean
     # Round up the threshold to the closest integer
@@ -283,47 +295,58 @@ def create_density_plot(stats_dict, title, color="lightblue", edge_color="darkbl
     return fig
 
 
-# Create plots for genomic variants
-fig_genomic_all = create_density_plot(
-    genomic_all_stats,
-    "Distribution of de novo variants per sample (SNVs and InDels, mean ± 2*SD)",
-    color="lightblue",
-    edge_color="darkblue",
-)
-plot_file_genomic_all = f"{sys.argv[1]}.dnm_distribution_genomic_all_temp.png"
-fig_genomic_all.tight_layout()
-fig_genomic_all.savefig(
-    plot_file_genomic_all, format="png", bbox_inches="tight", dpi=300
-)
-plt.close(fig_genomic_all)
+# Create plots for genomic variants (only if stats are available)
+plot_file_genomic_all = None
+plot_file_genomic_snv = None
+plot_file_genomic_indel = None
 
-fig_genomic_snv = create_density_plot(
-    genomic_snv_stats,
-    "Distribution of de novo SNVs per sample (mean ± 2*SD)",
-    color="lightgreen",
-    edge_color="darkgreen",
-)
-plot_file_genomic_snv = f"{sys.argv[1]}.dnm_distribution_genomic_snv_temp.png"
-fig_genomic_snv.tight_layout()
-fig_genomic_snv.savefig(
-    plot_file_genomic_snv, format="png", bbox_inches="tight", dpi=300
-)
-plt.close(fig_genomic_snv)
+if genomic_all_stats is not None:
+    fig_genomic_all = create_density_plot(
+        genomic_all_stats,
+        "Distribution of de novo variants per sample (SNVs and InDels, mean ± 2*SD)",
+        color="lightblue",
+        edge_color="darkblue",
+    )
+    plot_file_genomic_all = f"{sys.argv[1]}.dnm_distribution_genomic_all_temp.png"
+    fig_genomic_all.tight_layout()
+    fig_genomic_all.savefig(
+        plot_file_genomic_all, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_genomic_all)
 
-fig_genomic_indel = create_density_plot(
-    genomic_indel_stats,
-    "Distribution of de novo InDels per sample (mean ± 2*SD)",
-    color="lightcoral",
-    edge_color="darkred",
-)
-plot_file_genomic_indel = f"{sys.argv[1]}.dnm_distribution_genomic_indel_temp.png"
-fig_genomic_indel.tight_layout()
-fig_genomic_indel.savefig(
-    plot_file_genomic_indel, format="png", bbox_inches="tight", dpi=300
-)
-plt.close(fig_genomic_indel)
+if genomic_snv_stats is not None:
+    fig_genomic_snv = create_density_plot(
+        genomic_snv_stats,
+        "Distribution of de novo SNVs per sample (mean ± 2*SD)",
+        color="lightgreen",
+        edge_color="darkgreen",
+    )
+    plot_file_genomic_snv = f"{sys.argv[1]}.dnm_distribution_genomic_snv_temp.png"
+    fig_genomic_snv.tight_layout()
+    fig_genomic_snv.savefig(
+        plot_file_genomic_snv, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_genomic_snv)
+
+if genomic_indel_stats is not None:
+    fig_genomic_indel = create_density_plot(
+        genomic_indel_stats,
+        "Distribution of de novo InDels per sample (mean ± 2*SD)",
+        color="lightcoral",
+        edge_color="darkred",
+    )
+    plot_file_genomic_indel = f"{sys.argv[1]}.dnm_distribution_genomic_indel_temp.png"
+    fig_genomic_indel.tight_layout()
+    fig_genomic_indel.savefig(
+        plot_file_genomic_indel, format="png", bbox_inches="tight", dpi=300
+    )
+    plt.close(fig_genomic_indel)
 
 # Create plots for coding variants (if applicable)
+plot_file_coding_all = None
+plot_file_coding_snv = None
+plot_file_coding_indel = None
+
 if coding_all_stats is not None:
     fig_coding_all = create_density_plot(
         coding_all_stats,
@@ -338,6 +361,7 @@ if coding_all_stats is not None:
     )
     plt.close(fig_coding_all)
 
+if coding_snv_stats is not None:
     fig_coding_snv = create_density_plot(
         coding_snv_stats,
         "Distribution of coding de novo SNVs per sample (mean ± 2*SD)",
@@ -351,6 +375,7 @@ if coding_all_stats is not None:
     )
     plt.close(fig_coding_snv)
 
+if coding_indel_stats is not None:
     fig_coding_indel = create_density_plot(
         coding_indel_stats,
         "Distribution of coding de novo InDels per sample (mean ± 2*SD)",
@@ -536,72 +561,138 @@ story.append(PageBreak())
 # Add Genomic de novo variants section
 story.append(Paragraph("Genomic de novo variants", section_style))
 
-add_analysis_section(
-    story,
-    "Analysis 1: SNVs and InDels Combined",
-    genomic_all_stats,
-    plot_file_genomic_all,
-    styles,
-    subtitle_style,
-)
+if genomic_all_stats is not None:
+    add_analysis_section(
+        story,
+        "Analysis 1: SNVs and InDels Combined",
+        genomic_all_stats,
+        plot_file_genomic_all,
+        styles,
+        subtitle_style,
+    )
+else:
+    story.append(Paragraph("Analysis 1: SNVs and InDels Combined", subtitle_style))
+    story.append(Spacer(1, 12))
+    story.append(
+        Paragraph(
+            "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+        )
+    )
+    story.append(Spacer(1, 24))
 
 story.append(PageBreak())
 
-add_analysis_section(
-    story,
-    "Analysis 2: SNVs Only",
-    genomic_snv_stats,
-    plot_file_genomic_snv,
-    styles,
-    subtitle_style,
-)
+if genomic_snv_stats is not None:
+    add_analysis_section(
+        story,
+        "Analysis 2: SNVs Only",
+        genomic_snv_stats,
+        plot_file_genomic_snv,
+        styles,
+        subtitle_style,
+    )
+else:
+    story.append(Paragraph("Analysis 2: SNVs Only", subtitle_style))
+    story.append(Spacer(1, 12))
+    story.append(
+        Paragraph(
+            "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+        )
+    )
+    story.append(Spacer(1, 24))
 
 story.append(PageBreak())
 
-add_analysis_section(
-    story,
-    "Analysis 3: InDels Only",
-    genomic_indel_stats,
-    plot_file_genomic_indel,
-    styles,
-    subtitle_style,
-)
+if genomic_indel_stats is not None:
+    add_analysis_section(
+        story,
+        "Analysis 3: InDels Only",
+        genomic_indel_stats,
+        plot_file_genomic_indel,
+        styles,
+        subtitle_style,
+    )
+else:
+    story.append(Paragraph("Analysis 3: InDels Only", subtitle_style))
+    story.append(Spacer(1, 12))
+    story.append(
+        Paragraph(
+            "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+        )
+    )
+    story.append(Spacer(1, 24))
 
 # Add Coding de novo variants section (if applicable)
-if coding_all_stats is not None:
+if (
+    coding_all_stats is not None
+    or coding_snv_stats is not None
+    or coding_indel_stats is not None
+):
     story.append(PageBreak())
     story.append(Paragraph("Coding de novo variants", section_style))
 
-    add_analysis_section(
-        story,
-        "Analysis 4: SNVs and InDels Combined (Coding)",
-        coding_all_stats,
-        plot_file_coding_all,
-        styles,
-        subtitle_style,
-    )
+    if coding_all_stats is not None:
+        add_analysis_section(
+            story,
+            "Analysis 4: SNVs and InDels Combined (Coding)",
+            coding_all_stats,
+            plot_file_coding_all,
+            styles,
+            subtitle_style,
+        )
+    else:
+        story.append(
+            Paragraph("Analysis 4: SNVs and InDels Combined (Coding)", subtitle_style)
+        )
+        story.append(Spacer(1, 12))
+        story.append(
+            Paragraph(
+                "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+            )
+        )
+        story.append(Spacer(1, 24))
 
     story.append(PageBreak())
 
-    add_analysis_section(
-        story,
-        "Analysis 5: SNVs Only (Coding)",
-        coding_snv_stats,
-        plot_file_coding_snv,
-        styles,
-        subtitle_style,
-    )
+    if coding_snv_stats is not None:
+        add_analysis_section(
+            story,
+            "Analysis 5: SNVs Only (Coding)",
+            coding_snv_stats,
+            plot_file_coding_snv,
+            styles,
+            subtitle_style,
+        )
+    else:
+        story.append(Paragraph("Analysis 5: SNVs Only (Coding)", subtitle_style))
+        story.append(Spacer(1, 12))
+        story.append(
+            Paragraph(
+                "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+            )
+        )
+        story.append(Spacer(1, 24))
 
     story.append(PageBreak())
 
-    add_analysis_section(
-        story,
-        "Analysis 6: InDels Only (Coding)",
-        coding_indel_stats,
-        plot_file_coding_indel,
-        styles,
-        subtitle_style,
-    )
+    if coding_indel_stats is not None:
+        add_analysis_section(
+            story,
+            "Analysis 6: InDels Only (Coding)",
+            coding_indel_stats,
+            plot_file_coding_indel,
+            styles,
+            subtitle_style,
+        )
+    else:
+        story.append(Paragraph("Analysis 6: InDels Only (Coding)", subtitle_style))
+        story.append(Spacer(1, 12))
+        story.append(
+            Paragraph(
+                "<b>Not enough data available for this analysis.</b>", styles["Normal"]
+            )
+        )
+        story.append(Spacer(1, 24))
 
 # Build PDF
 doc.build(story)
