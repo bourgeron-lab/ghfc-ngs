@@ -54,7 +54,8 @@ process MERGE_WOMBAT {
 
   """
   # List all matching TSV.GZ files (sorted for consistency)
-  ls -1 *.${output_name}.tsv.gz | sort -u > file_list.txt
+  # New pattern: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv.gz
+  ls -1 *.${wombat_config_name}.tsv.gz | sort -u > file_list.txt
   
   # Get the first file to extract the header
   first_file=\$(head -n 1 file_list.txt)

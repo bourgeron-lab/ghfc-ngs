@@ -67,61 +67,29 @@ workflow WOMBAT {
         wombat_outputs_channel = PYWOMBAT.out
     }
     
-    // Group PyWombat outputs by wombat_config_name and output_name for merging
-    // First, we need to read the wombat config files to get the output names
-    // For now, we'll collect all outputs and merge by pattern matching
-    
-    // Collect all wombat output files grouped by config name
-    wombat_outputs = PYWOMBAT.out
-        .groupTuple(by: 1)  // Group by wombat_config_name
-    
     if (!params.wombat_config_list || params.wombat_config_list.isEmpty()) {
         merged_outputs_channel = Channel.empty()
     } else {
         // Collect all PyWombat outputs for merging
-        // Group files by config name and then create separate channels for each output type
-        // We'll merge all files matching specific patterns
+        // PYWOMBAT now outputs: tuple(fid, wombat_config_name, single_file)
+        // Group files by wombat_config_name for merging
         merge_jobs = wombat_outputs_channel
-            .map { fid, wombat_config_name, files ->
-                // files is a list of output files from one family for one config
-                // Return tuples for each file with its config name
-                files.collect { file ->
-                    tuple(wombat_config_name, file)
-                }
-            }
-            .flatMap()  // Flatten to individual tuples
-            .groupTuple(by: 0)  // Group all files by wombat_config_name
-            .flatMap { wombat_config_name, file_list ->
-                // Extract unique output names from file names
-                // File pattern: {FID}.rare.{vep_config_name}.{wombat_config_name}.{output_name}.tsv.gz
-                def output_names = file_list.collect { file ->
-                    // Extract output_name from filename
-                    def parts = file.name.tokenize('.')
-                    // Find the index of the wombat_config_name and get the next element
-                    def idx = parts.indexOf(wombat_config_name)
-                    if (idx >= 0 && idx < parts.size() - 2) {
-                        parts[idx + 1]  // output_name is after wombat_config_name
-                    } else {
-                        null
-                    }
-                }.findAll { it != null }.unique()
-                
-                // Create a merge job for each unique output name
-                output_names.collect { output_name ->
-                    def matching_files = file_list.findAll { file ->
-                        file.name.contains(".${wombat_config_name}.${output_name}.")
-                    }
-                    tuple(params.cohort_name, matching_files, params.vep_config_name, wombat_config_name, output_name)
-                }
+            .groupTuple(by: 1)  // Group by wombat_config_name (second element)
+            .map { fid_list, wombat_config_name, file_list ->
+                // file_list is now a list of single files (one per family)
+                // The filename pattern is: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv.gz
+                // Since there's only one output file per family/config now, we don't need to extract output_name from filename
+                // The output_name is implicitly the entire result set for that config
+                tuple(params.cohort_name, file_list, params.vep_config_name, wombat_config_name, "results")
             }
         
-        // Run merge for each output name
+        // Run merge for each wombat config
         MERGE_WOMBAT(
             merge_jobs.map { it[0] },  // cohort_name
             merge_jobs.map { it[1] },  // files
             merge_jobs.map { it[2] },  // vep_config_name
             merge_jobs.map { it[3] },  // wombat_config_name
-            merge_jobs.map { it[4] }   // output_name
+            merge_jobs.map { it[4] }   // output_name (fixed as "results")
         )
         
         merged_outputs_channel = MERGE_WOMBAT.out.cohort_wombat_tsv
