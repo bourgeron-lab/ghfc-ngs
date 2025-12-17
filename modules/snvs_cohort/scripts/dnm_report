@@ -697,12 +697,17 @@ if (
 # Build PDF
 doc.build(story)
 
-# Clean up temporary plot files
-os.remove(plot_file_genomic_all)
-os.remove(plot_file_genomic_snv)
-os.remove(plot_file_genomic_indel)
+# Clean up temporary plot files (only if they were created)
+if plot_file_genomic_all is not None:
+    os.remove(plot_file_genomic_all)
+if plot_file_genomic_snv is not None:
+    os.remove(plot_file_genomic_snv)
+if plot_file_genomic_indel is not None:
+    os.remove(plot_file_genomic_indel)
 
-if coding_all_stats is not None:
+if plot_file_coding_all is not None:
     os.remove(plot_file_coding_all)
+if plot_file_coding_snv is not None:
     os.remove(plot_file_coding_snv)
+if plot_file_coding_indel is not None:
     os.remove(plot_file_coding_indel)
