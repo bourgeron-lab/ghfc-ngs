@@ -9,7 +9,8 @@ steps: [
     "annotation",
     "snvs_cohort",
     "wisecondorx",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort
+    "wombat",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -60,8 +61,12 @@ annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files fo
 # Annotation de novo mutation extraction configuration
 annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
 annotation_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
-annotation_dnm_min_GQ: "20" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
-annotation_dnm_min_VAF: "0.2" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
+annotation_dnm_min_GQ: "19" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
+annotation_dnm_min_VAF: "0.25" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
+
+# Wombat configuration
+wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat" # Directory containing Wombat YAML configuration files
+wombat_config_list: ["dataset_paper.yml"] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
 
 # Pseudo-autosomal regions (PAR) coordinates for GRCh38
 ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
