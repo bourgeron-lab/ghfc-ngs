@@ -9,14 +9,14 @@ nextflow.enable.dsl=2
 
 process MERGE_WOMBAT {
   /*
-  Merge all family Wombat TSV.GZ files into cohort-level TSV.GZ files
+  Merge all family Wombat TSV files into cohort-level TSV files
 
   Parameters
   ----------
   cohort_name : val
     Name of the cohort
   wombat_tsv_files : list
-    List of Wombat TSV.GZ files from all families
+    List of Wombat TSV files from all families
   vep_config_name : val
     VEP configuration name for output file naming
   wombat_config_name : val
@@ -26,14 +26,14 @@ process MERGE_WOMBAT {
 
   Returns
   -------
-  Tuple of cohort name, wombat config name, output name, and merged TSV.GZ file
+  Tuple of cohort name, wombat config name, output name, and merged TSV file
   */
 
   tag "${cohort_name}-${wombat_config_name}-${output_name}"
 
   publishDir "${params.data}/cohorts/${cohort_name}/wombat",
     mode: 'copy',
-    pattern: "${cohort_name}.*.tsv.gz"
+    pattern: "${cohort_name}.*.tsv"
 
   container 'docker://ubuntu:22.04'
   
@@ -50,28 +50,28 @@ process MERGE_WOMBAT {
   tuple val(cohort_name), val(wombat_config_name), val(output_name), path("${output_tsv}"), emit: cohort_wombat_tsv
 
   script:
-  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv.gz"
+  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv"
 
   """
-  # List all matching TSV.GZ files (sorted for consistency)
-  # New pattern: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv.gz
-  ls -1 *.${wombat_config_name}.tsv.gz | sort -u > file_list.txt
+  # List all matching TSV files (sorted for consistency)
+  # New pattern: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv
+  ls -1 *.${wombat_config_name}.tsv | sort -u > file_list.txt
   
   # Get the first file to extract the header
   first_file=\$(head -n 1 file_list.txt)
   
-  # Write header from first file (decompress, get header, compress)
-  zcat "\${first_file}" | head -n 1 | gzip -c > ${output_tsv}
+  # Write header from first file
+  head -n 1 "\${first_file}" > ${output_tsv}
   
   # Concatenate all files, skipping their headers
   while IFS= read -r file; do
-    zcat "\${file}" | tail -n +2 | gzip -c >> ${output_tsv}
+    tail -n +2 "\${file}" >> ${output_tsv}
   done < file_list.txt
   """
 
   stub:
-  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv.gz"
+  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv"
   """
-  echo "header" | gzip -c > ${output_tsv}
+  echo "header" > ${output_tsv}
   """
 }
