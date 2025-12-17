@@ -54,8 +54,8 @@ process MERGE_WOMBAT {
 
   """
   # List all matching TSV files (sorted for consistency)
-  # New pattern: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv
-  ls -1 *.${wombat_config_name}.tsv | sort -u > file_list.txt
+  # New pattern: {FID}.rare.{vep_config_name}.annotated.{wombat_config_name}.tsv
+  ls -1 *.annotated.${wombat_config_name}.tsv | sort -u > file_list.txt
   
   # Get the first file to extract the header
   first_file=\$(head -n 1 file_list.txt)
