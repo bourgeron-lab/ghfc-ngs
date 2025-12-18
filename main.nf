@@ -428,18 +428,32 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing Wombat TSV files
+    // Check existing Wombat files
     families.each { fid ->
-        def wombat_tsv_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.tsv.gz"
+        // Check if BCF2TSV output exists
+        def bcf2tsv_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.tsv.gz"
+        def bcf2tsv_exists = new File(bcf2tsv_output_path).exists()
         
-        if (new File(wombat_tsv_path).exists()) {
-            plan.wombat.existing.add(fid)
-            plan.wombat.need_bcf2tsv[fid] = false
-        } else {
-            // Need Wombat if annotation exists or will be created
-            if (fid in plan.annotation.existing || fid in plan.annotation.needed) {
+        // Check if PYWOMBAT outputs exist (need to check for all configs if defined)
+        def pywombat_complete = false
+        if (params.wombat_config_list && !params.wombat_config_list.isEmpty() && bcf2tsv_exists) {
+            // Check if all PYWOMBAT outputs exist
+            pywombat_complete = params.wombat_config_list.every { config_file ->
+                def config_name = config_file.replaceAll(/\.ya?ml$/, '')
+                def pywombat_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv"
+                new File(pywombat_output_path).exists()
+            }
+        }
+        
+        // Track BCF2TSV status
+        plan.wombat.need_bcf2tsv[fid] = !bcf2tsv_exists
+        
+        // Determine if family needs Wombat processing
+        if (fid in plan.annotation.existing || fid in plan.annotation.needed) {
+            if (pywombat_complete) {
+                plan.wombat.existing.add(fid)
+            } else {
                 plan.wombat.needed.add(fid)
-                plan.wombat.need_bcf2tsv[fid] = true
             }
         }
     }
