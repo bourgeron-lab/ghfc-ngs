@@ -189,6 +189,7 @@ workflow {
     }
     
     // Run Wombat analysis if needed and allowed
+    wombat_output = Channel.empty()
     if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
         log.info "Running Wombat analysis for ${analysis_plan.wombat.needed.size()} families..."
         
@@ -211,6 +212,7 @@ workflow {
             }
         
         WOMBAT(wombat_bcfs, wombat_pedigrees, analysis_plan.wombat.need_bcf2tsv)
+        wombat_output = WOMBAT.out.wombat_outputs
     }
     
     // Run cohort common variants merge if needed and allowed
@@ -219,6 +221,8 @@ workflow {
         if (analysis_plan.snvs_cohort.need_bcf_merge) merge_tasks.add("BCF merge")
         if (analysis_plan.snvs_cohort.need_dnm_merge) merge_tasks.add("DNM concatenation")
         if (analysis_plan.snvs_cohort.need_dnm_report) merge_tasks.add("DNM report")
+        def wombat_merge_count = analysis_plan.snvs_cohort.need_wombat_merges?.count { k, v -> v == true } ?: 0
+        if (wombat_merge_count > 0) merge_tasks.add("Wombat merge (${wombat_merge_count} configs)")
         log.info "Running cohort: ${merge_tasks.join(' and ')}..."
         
         // Get all available common filtered BCFs (existing + newly created)
@@ -233,10 +237,14 @@ workflow {
             all_available_dnm_files = channels.existing_dnm_files
         }
         
-        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files, 
+        // Get all available Wombat files (existing + newly created)
+        all_available_wombat_files = channels.existing_wombat_files.mix(wombat_output ?: Channel.empty())
+        
+        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files, all_available_wombat_files,
                     analysis_plan.snvs_cohort.need_bcf_merge, 
                     analysis_plan.snvs_cohort.need_dnm_merge,
-                    analysis_plan.snvs_cohort.need_dnm_report)
+                    analysis_plan.snvs_cohort.need_dnm_report,
+                    analysis_plan.snvs_cohort.need_wombat_merges)
     }
     
     // Run WisecondorX NPZ conversion if needed and allowed
@@ -353,7 +361,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
 
-    // Check existing cohort files (common BCF and DNM TSV)
+    // Check existing cohort files (common BCF, DNM TSV, and Wombat TSVs)
     def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
     def cohort_dnm_tsv_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.${params.vep_config_name}.dnm.tsv"
@@ -363,7 +371,18 @@ def createAnalysisPlan(families, individuals, family_members) {
     def cohort_dnm_exists = new File(cohort_dnm_tsv_path).exists()
     def cohort_dnm_report_exists = new File(cohort_dnm_report_path).exists()
     
-    if (cohort_bcf_exists && cohort_dnm_exists && cohort_dnm_report_exists) {
+    // Check wombat cohort files for each config
+    plan.snvs_cohort.need_wombat_merges = [:]
+    if (params.wombat_config_list && !params.wombat_config_list.isEmpty()) {
+        params.wombat_config_list.each { config_file ->
+            def config_name = config_file.replaceAll(/\.ya?ml$/, '')
+            def cohort_wombat_path = "${params.data}/cohorts/${params.cohort_name}/wombat/${params.cohort_name}.rare.${params.vep_config_name}.annotated.${config_name}.results.tsv"
+            plan.snvs_cohort.need_wombat_merges[config_name] = !new File(cohort_wombat_path).exists()
+        }
+    }
+    
+    if (cohort_bcf_exists && cohort_dnm_exists && cohort_dnm_report_exists && 
+        !plan.snvs_cohort.need_wombat_merges.any { k, v -> v == true }) {
         plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
@@ -732,6 +751,26 @@ def createChannels(analysis_plan) {
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]
         }
+    
+    // Create channel for existing Wombat files (output from wombat, used by snvs_cohort)
+    if (params.wombat_config_list && !params.wombat_config_list.isEmpty()) {
+        channels.existing_wombat_files = Channel.fromList(params.wombat_config_list)
+            .map { config_file ->
+                def config_name = config_file.replaceAll(/\.ya?ml$/, '')
+                // For each config, create entries for each family that has it
+                analysis_plan.wombat.existing.collect { fid ->
+                    def wombat_file = file("${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv")
+                    if (wombat_file.exists()) {
+                        tuple(fid, config_name, wombat_file)
+                    } else {
+                        null
+                    }
+                }.findAll { it != null }
+            }
+            .flatMap()
+    } else {
+        channels.existing_wombat_files = Channel.empty()
+    }
     
     return channels
 }

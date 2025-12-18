@@ -6,7 +6,6 @@
 // Include modules
 include { BCF2TSV } from '../modules/wombat/bcf2tsv'
 include { PYWOMBAT } from '../modules/wombat/pywombat'
-include { MERGE_WOMBAT } from '../modules/wombat/merge_wombat'
 
 workflow WOMBAT {
 
@@ -67,36 +66,7 @@ workflow WOMBAT {
         wombat_outputs_channel = PYWOMBAT.out
     }
     
-    if (!params.wombat_config_list || params.wombat_config_list.isEmpty()) {
-        merged_outputs_channel = Channel.empty()
-    } else {
-        // Collect all PyWombat outputs for merging
-        // PYWOMBAT now outputs: tuple(fid, wombat_config_name, single_file)
-        // Group files by wombat_config_name for merging
-        merge_jobs = wombat_outputs_channel
-            .groupTuple(by: 1)  // Group by wombat_config_name (second element)
-            .map { fid_list, wombat_config_name, file_list ->
-                // file_list is now a list of single files (one per family)
-                // The filename pattern is: {FID}.rare.{vep_config_name}.{wombat_config_name}.tsv.gz
-                // Since there's only one output file per family/config now, we don't need to extract output_name from filename
-                // The output_name is implicitly the entire result set for that config
-                tuple(params.cohort_name, file_list, params.vep_config_name, wombat_config_name, "results")
-            }
-        
-        // Run merge for each wombat config
-        MERGE_WOMBAT(
-            merge_jobs.map { it[0] },  // cohort_name
-            merge_jobs.map { it[1] },  // files
-            merge_jobs.map { it[2] },  // vep_config_name
-            merge_jobs.map { it[3] },  // wombat_config_name
-            merge_jobs.map { it[4] }   // output_name (fixed as "results")
-        )
-        
-        merged_outputs_channel = MERGE_WOMBAT.out.cohort_wombat_tsv
-    }
-    
     emit:
     tsv_files = all_tsv_files
     wombat_outputs = wombat_outputs_channel
-    merged_outputs = merged_outputs_channel
 }
