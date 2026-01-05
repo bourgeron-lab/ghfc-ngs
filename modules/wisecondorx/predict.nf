@@ -36,7 +36,7 @@ process PREDICT {
           path("${barcode}.plots/chr21.png"),
           path("${barcode}.plots/chr22.png"),
           path("${barcode}.plots/chrX.png"),
-          path("${barcode}.plots/chrY.png")
+          path("${barcode}.plots/chrY.png", optional: true)
     
     script:
     """
