@@ -26,6 +26,7 @@ pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/pedigree.tsv"
 ref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/GRCh38.fasta"
 ref_name: "GRCh38_GIABv3"
 oldref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/hs38DH.fa"
+wisecondorx_reference: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/WisecondorX/reference_wisecondorX_hg38_5kb.npz"
 
 # File patterns (adjust according to your naming convention)
 fastq_pattern: ""

@@ -247,17 +247,24 @@ workflow {
                     analysis_plan.snvs_cohort.need_wombat_merges)
     }
     
-    // Run WisecondorX NPZ conversion if needed and allowed
+    // Run WisecondorX predict if needed and allowed
     if (analysis_plan.wisecondorx.needed.size() > 0 && 'wisecondorx' in params.steps) {
-        log.info "Running WisecondorX NPZ conversion for ${analysis_plan.wisecondorx.needed.size()} individuals..."
+        log.info "Running WisecondorX predict for ${analysis_plan.wisecondorx.needed.size()} individuals..."
+        log.info "  - NPZ conversion needed for ${analysis_plan.wisecondorx.need_npz.size()} individuals"
+        log.info "  - Predict needed for ${analysis_plan.wisecondorx.need_predict.size()} individuals"
         
-        // Filter CRAM files for individuals that need WisecondorX
+        // Filter CRAM files for individuals that need NPZ conversion
         wisecondorx_crams = all_available_crams
             .filter { barcode, cram, crai -> 
-                barcode in analysis_plan.wisecondorx.needed 
+                barcode in analysis_plan.wisecondorx.need_npz
             }
         
-        WISECONDORX(wisecondorx_crams)
+        // Run WisecondorX workflow with existing NPZ files and CRAMs that need conversion
+        WISECONDORX(
+            wisecondorx_crams,
+            channels.existing_npz_files,
+            analysis_plan.wisecondorx.need_predict
+        )
     }
 }
 
@@ -310,7 +317,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
         snvs_cohort: [needed: [], existing: []],
-        wisecondorx: [needed: [], existing: []],
+        wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: []],
         wombat: [needed: [], existing: [], need_bcf2tsv: [:]]
     ]
     
@@ -433,16 +440,27 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing WisecondorX NPZ files
+    // Check existing WisecondorX NPZ and predict files
     individuals.each { barcode ->
         def npz_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz"
+        def predict_bed_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed"
         
-        if (new File(npz_path).exists()) {
+        def npz_exists = new File(npz_path).exists()
+        def predict_exists = new File(predict_bed_path).exists()
+        
+        if (predict_exists) {
+            // Predict is the final output
             plan.wisecondorx.existing.add(barcode)
         } else {
-            // Need WisecondorX if we have or will have CRAM files
+            // Need predict if we have or will have CRAM files
             if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
                 plan.wisecondorx.needed.add(barcode)
+                plan.wisecondorx.need_predict.add(barcode)
+                
+                // If NPZ doesn't exist, also need NPZ conversion
+                if (!npz_exists) {
+                    plan.wisecondorx.need_npz.add(barcode)
+                }
             }
         }
     }
@@ -494,7 +512,7 @@ def displayAnalysisSummary(analysis_plan) {
     == Common Variants ==
     SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     == SVs Calling ==
-    WISECONDORX: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
+    WISECONDORX PREDICT: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
     ========================================================================================
     """
     
@@ -771,6 +789,18 @@ def createChannels(analysis_plan) {
     } else {
         channels.existing_wombat_files = Channel.empty()
     }
+    
+    // Create channel for existing NPZ files (output from NPZ_CONVERT, used by predict)
+    channels.existing_npz_files = Channel
+        .fromPath("${params.data}/samples/*/svs/wisecondorx/*.npz")
+        .map { npz ->
+            def barcode = npz.parent.parent.parent.name  // Get barcode from path
+            [barcode, npz]
+        }
+        .filter { barcode, npz ->
+            // Only include NPZ files that exist but still need predict
+            barcode in analysis_plan.wisecondorx.need_predict && !(barcode in analysis_plan.wisecondorx.need_npz)
+        }
     
     return channels
 }
