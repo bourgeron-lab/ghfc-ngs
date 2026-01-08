@@ -69,6 +69,10 @@ annotation_dnm_min_VAF: "0.25" # Minimum variant allele frequency (VAF) for de n
 wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat" # Directory containing Wombat YAML configuration files
 wombat_config_list: ["dataset_paper.yml"] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
 
+# Extractor configuration
+extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
+liftover_chain: "/pasteur/helix/projects/ghfc_wgs/references/liftover/hg19ToHg38.over.chain.gz" # Chain file for GRCh37 to GRCh38 liftover
+
 # Pseudo-autosomal regions (PAR) coordinates for GRCh38
 ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
 ref_par1_end: "2781479" # PAR1 end position on chrX (GRCh38)

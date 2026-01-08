@@ -18,6 +18,7 @@ include { ANNOTATION } from './workflows/annotation'
 include { SNVS_COHORT } from './workflows/snvs_cohort'
 include { WISECONDORX } from './workflows/wisecondorx'
 include { WOMBAT } from './workflows/wombat'
+include { EXTRACTOR } from './workflows/extractor'
 
 /*
 ========================================================================================
@@ -37,7 +38,7 @@ if (!params.steps || params.steps.isEmpty()) {
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -266,6 +267,50 @@ workflow {
             analysis_plan.wisecondorx.need_predict
         )
     }
+    
+    // Run Extractor if TSV files are provided and step is allowed
+    if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in params.steps) {
+        log.info "Running Extractor for ${analysis_plan.extractor.tsv_count} TSV files on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples..."
+        
+        // Create channel from TSV list
+        extractor_tsvs = Channel.fromList(params.extractor_tsvs_list)
+            .map { tsv_path ->
+                def original_filename = file(tsv_path).baseName.replaceAll(/\.(tsv|txt|csv)$/i, '')
+                tuple(original_filename, tsv_path)
+            }
+        
+        // Get pedigree file path
+        def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
+        
+        // Create channel for normalized BCFs (for PROCESS_FAM_BCF)
+        norm_bcfs_for_extractor = channels.existing_normalized_bcfs
+            .map { fid, bcf, csi ->
+                tuple(fid, bcf, csi)
+            }
+        
+        // Create channel for wombat bcf2tsv outputs (for PROCESS_FAM_TSV)
+        wombat_tsvs_for_extractor = Channel
+            .fromPath("${params.data}/families/*/wombat/*.rare.${params.vep_config_name}.annotated.tsv.gz")
+            .map { tsv ->
+                def fid = tsv.parent.parent.name
+                tuple(fid, tsv)
+            }
+        
+        // Create channel for gVCFs (for PROCESS_IND_GVCF)
+        gvcfs_for_extractor = channels.existing_gvcfs
+            .map { barcode, gvcf, tbi ->
+                tuple(barcode, gvcf, tbi)
+            }
+        
+        EXTRACTOR(
+            extractor_tsvs,
+            pedigree_file,
+            params.liftover_chain,
+            norm_bcfs_for_extractor,
+            wombat_tsvs_for_extractor,
+            gvcfs_for_extractor
+        )
+    }
 }
 
 /*
@@ -318,8 +363,17 @@ def createAnalysisPlan(families, individuals, family_members) {
         annotation: [needed: [], existing: []],
         snvs_cohort: [needed: [], existing: []],
         wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: []],
-        wombat: [needed: [], existing: [], need_bcf2tsv: [:]]
+        wombat: [needed: [], existing: [], need_bcf2tsv: [:]],
+        extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set]
     ]
+    
+    // Check extractor TSV list
+    if (params.extractor_tsvs_list && !params.extractor_tsvs_list.isEmpty()) {
+        plan.extractor.tsv_count = params.extractor_tsvs_list.size()
+        // All families and individuals with data will be processed
+        plan.extractor.families = families
+        plan.extractor.samples = individuals
+    }
     
     // Check existing family outputs (normalized BCF and pedigree - all part of deepvariant_family)
     // Note: {FID}.vcf.gz is intermediate (GLnexus output) and not published
@@ -513,6 +567,8 @@ def displayAnalysisSummary(analysis_plan) {
     SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     == SVs Calling ==
     WISECONDORX PREDICT: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
+    == Other ==
+    EXTRACTOR: ${analysis_plan.extractor.tsv_count > 0 ? "${analysis_plan.extractor.tsv_count} TSV files to process on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples" : 'Skipped (no TSV files provided)'}
     ========================================================================================
     """
     
