@@ -115,11 +115,26 @@ workflow EXTRACTOR {
     FAM_AGGREGATE(fam_aggregate_input)
     
     // Step 6: AGGREGATE - combine all family summaries into cohort summary
-    aggregate_input = FAM_AGGREGATE.out
+    // Group summary files by original_filename
+    summaries_grouped = FAM_AGGREGATE.out
         .map { fid, original_filename, summary ->
             tuple(original_filename, summary)
         }
         .groupTuple(by: 0)
+    
+    // Group fam_tsv found/notfound files by original_filename
+    fam_tsv_files_grouped = PROCESS_FAM_TSV.out
+        .map { fid, original_filename, fam_tsv_found, fam_tsv_notfound ->
+            tuple(original_filename, fam_tsv_found, fam_tsv_notfound)
+        }
+        .groupTuple(by: 0)
+    
+    // Combine summaries with fam_tsv files
+    aggregate_input = summaries_grouped
+        .join(fam_tsv_files_grouped, by: 0)
+        .map { original_filename, summaries, fam_tsv_found_list, fam_tsv_notfound_list ->
+            tuple(original_filename, summaries, fam_tsv_found_list, fam_tsv_notfound_list)
+        }
     
     AGGREGATE(aggregate_input)
     
