@@ -33,30 +33,24 @@ workflow EXTRACTOR {
     REFACTOR(refactor_input)
     
     // Parse refactor outputs to get family/sample channels
-    // Family files: families/{FID}/extractor/{FID}.{original_filename}.tsv
+    // Create family extractor files channel from the original_filename
     family_extractor_files = REFACTOR.out.family_list
-        .splitText()
-        .map { it.trim() }
-        .combine(REFACTOR.out.refactored_files)
-        .flatMap { fid, original_filename, family_files, sample_files ->
-            def family_tsv = family_files.find { it.name.contains("/${fid}.") && it.name.endsWith('.tsv') }
-            if (family_tsv) {
-                return [[fid, original_filename, family_tsv]]
+        .flatMap { original_filename, family_list_file ->
+            def families = family_list_file.text.readLines().collect { it.trim() }.findAll { it }
+            families.collect { fid ->
+                def family_tsv = file("${params.data}/families/${fid}/extractor/${fid}.${original_filename}.tsv")
+                tuple(fid, original_filename, family_tsv)
             }
-            return []
         }
     
-    // Sample files: samples/{barcode}/extractor/{barcode}.{original_filename}.tsv
+    // Create sample extractor files channel
     sample_extractor_files = REFACTOR.out.sample_list
-        .splitText()
-        .map { it.trim() }
-        .combine(REFACTOR.out.refactored_files)
-        .flatMap { barcode, original_filename, family_files, sample_files ->
-            def sample_tsv = sample_files.find { it.name.contains("/${barcode}.") && it.name.endsWith('.tsv') }
-            if (sample_tsv) {
-                return [[barcode, original_filename, sample_tsv]]
+        .flatMap { original_filename, sample_list_file ->
+            def samples = sample_list_file.text.readLines().collect { it.trim() }.findAll { it }
+            samples.collect { barcode ->
+                def sample_tsv = file("${params.data}/samples/${barcode}/extractor/${barcode}.${original_filename}.tsv")
+                tuple(barcode, original_filename, sample_tsv)
             }
-            return []
         }
     
     // Step 2: PROCESS_FAM_TSV - match with wombat bcf2tsv output
