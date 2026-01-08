@@ -38,23 +38,28 @@ process PROCESS_FAM_BCF {
             f.write(r + '\\n')
     
     # Extract variants from BCF using bcftools
+    bcf_output = 'bcf_extracted.tsv'
+    cmd = f"bcftools query -R {regions_file} -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%INFO\\t%FORMAT[\\t%SAMPLE=%TGT]\\n' '${norm_bcf}' > {bcf_output}"
+    
     print(f"Running bcftools query with {len(regions)} regions")
     try:
         result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
         if result.stdout:
             print(f"bcftools stdout: {result.stdout[:200]}")
         if result.stderr:
-            print(f"bcftools stderr: {result.stderr[:200]}"FO\\t%FORMAT[\\t%SAMPLE=%TGT]\\n' '${norm_bcf}' > {bcf_output}"
-    
-    try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            print(f"bcftools stderr: {result.stderr[:200]}")
     except subprocess.CalledProcessError as e:
         print(f"bcftools error: {e.stderr}")
         # Create empty output
         pd.DataFrame().to_csv(bcf_output, sep='\\t', index=False)
     
     os.unlink(regions_file)
-    lines = f.readlines()
+    
+    # Parse BCF output
+    bcf_variants = {}
+    if os.path.exists(bcf_output) and os.path.getsize(bcf_output) > 0:
+        with open(bcf_output, 'r') as f:
+            lines = f.readlines()
             print(f"BCF output contains {len(lines)} lines")
             if lines:
                 print(f"First line: {lines[0][:200]}")
@@ -78,12 +83,7 @@ process PROCESS_FAM_BCF {
             if bcf_variants:
                 print(f"Sample keys: {list(bcf_variants.keys())[:3]}")
     else:
-        print(f"BCF output file is empty or doesn't exist")ey = f"{chrom}_{pos}_{ref}_{alt}"
-                    bcf_variants[key] = {
-                        'INFO': info,
-                        'FORMAT': fmt,
-                        'SAMPLES': '\\t'.join(samples)
-                    }
+        print(f"BCF output file is empty or doesn't exist")
     
     # Create match keys for extractor
     extractor_df['_match_key'] = (
