@@ -26,13 +26,14 @@ process PROCESS_FAM_BCF {
     print(f"Read {len(extractor_df)} variants from extractor TSV")
     print(f"Sample chromosomes in extractor: {extractor_df['chr'].unique()[:5].tolist()}")
     
-    # Create regions file for bcftools
+    # Create regions file for bcftools in BED format (0-based, tab-separated)
     regions = []
     for _, row in extractor_df.iterrows():
-        regions.append(f"{row['chr']}:{row['position']}-{row['position']}")
+        # BED format: chr start end (0-based start, 1-based end)
+        regions.append(f"{row['chr']}\\t{int(row['position'])-1}\\t{int(row['position'])}")
     
     # Write regions to temp file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.bed', delete=False) as f:
         regions_file = f.name
         for r in regions:
             f.write(r + '\\n')
