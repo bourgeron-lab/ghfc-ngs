@@ -1,8 +1,8 @@
 process REFACTOR {
     tag "${original_filename}"
     
-    publishDir "${params.data}/families", mode: 'copy', pattern: "families/*/*/*.tsv"
-    publishDir "${params.data}/samples", mode: 'copy', pattern: "samples/*/*/*.tsv"
+    publishDir "${params.data}", mode: 'copy', pattern: "families/*/*/*.tsv"
+    publishDir "${params.data}", mode: 'copy', pattern: "samples/*/*/*.tsv"
     
     input:
     tuple val(original_filename), path(input_tsv), path(pedigree), path(chain_file)
