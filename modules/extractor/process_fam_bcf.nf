@@ -23,6 +23,9 @@ process PROCESS_FAM_BCF {
     # Read extractor TSV
     extractor_df = pd.read_csv('${extractor_tsv}', sep='\\t')
     
+    print(f"Read {len(extractor_df)} variants from extractor TSV")
+    print(f"Sample chromosomes in extractor: {extractor_df['chr'].unique()[:5].tolist()}")
+    
     # Create regions file for bcftools
     regions = []
     for _, row in extractor_df.iterrows():
@@ -35,8 +38,13 @@ process PROCESS_FAM_BCF {
             f.write(r + '\\n')
     
     # Extract variants from BCF using bcftools
-    bcf_output = 'bcf_extracted.tsv'
-    cmd = f"bcftools query -R {regions_file} -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%INFO\\t%FORMAT[\\t%SAMPLE=%TGT]\\n' '${norm_bcf}' > {bcf_output}"
+    print(f"Running bcftools query with {len(regions)} regions")
+    try:
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        if result.stdout:
+            print(f"bcftools stdout: {result.stdout[:200]}")
+        if result.stderr:
+            print(f"bcftools stderr: {result.stderr[:200]}"FO\\t%FORMAT[\\t%SAMPLE=%TGT]\\n' '${norm_bcf}' > {bcf_output}"
     
     try:
         subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
@@ -46,12 +54,11 @@ process PROCESS_FAM_BCF {
         pd.DataFrame().to_csv(bcf_output, sep='\\t', index=False)
     
     os.unlink(regions_file)
-    
-    # Parse BCF output
-    bcf_variants = {}
-    if os.path.exists(bcf_output) and os.path.getsize(bcf_output) > 0:
-        with open(bcf_output, 'r') as f:
-            for line in f:
+    lines = f.readlines()
+            print(f"BCF output contains {len(lines)} lines")
+            if lines:
+                print(f"First line: {lines[0][:200]}")
+            for line in lines:
                 parts = line.strip().split('\\t')
                 if len(parts) >= 4:
                     chrom, pos, ref, alt = parts[0], parts[1], parts[2], parts[3]
@@ -59,7 +66,19 @@ process PROCESS_FAM_BCF {
                     fmt = parts[5] if len(parts) > 5 else ''
                     samples = parts[6:] if len(parts) > 6 else []
                     
-                    key = f"{chrom}_{pos}_{ref}_{alt}"
+                    # Handle multiallelic: ALT can be comma-separated
+                    for single_alt in alt.split(','):
+                        key = f"{chrom}_{pos}_{ref}_{single_alt}"
+                        bcf_variants[key] = {
+                            'INFO': info,
+                            'FORMAT': fmt,
+                            'SAMPLES': '\\t'.join(samples)
+                        }
+            print(f"Parsed {len(bcf_variants)} variant keys from BCF")
+            if bcf_variants:
+                print(f"Sample keys: {list(bcf_variants.keys())[:3]}")
+    else:
+        print(f"BCF output file is empty or doesn't exist")ey = f"{chrom}_{pos}_{ref}_{alt}"
                     bcf_variants[key] = {
                         'INFO': info,
                         'FORMAT': fmt,
@@ -73,6 +92,8 @@ process PROCESS_FAM_BCF {
         extractor_df['ref'].astype(str) + '_' + 
         extractor_df['alt'].astype(str)
     )
+    
+    print(f"Sample extractor keys: {extractor_df['_match_key'].head(3).tolist()}")
     
     # Split into found and not found
     found_rows = []
