@@ -27,7 +27,11 @@ process PROCESS_FAM_TSV {
     
     # Standardize column names for matching
     # Extractor columns: chr, position, ref, alt, sample_id
-    # Wombat columns: CHROM, POS, REF, ALT, ...
+    # Wombat columns: CHROM or #CHROM, POS, REF, ALT, ...
+    
+    # Handle both CHROM and #CHROM column names
+    if '#CHROM' in wombat_df.columns:
+        wombat_df = wombat_df.rename(columns={'#CHROM': 'CHROM'})
     
     # Create match keys
     extractor_df['_match_key'] = (
