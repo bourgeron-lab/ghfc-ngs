@@ -275,7 +275,7 @@ workflow {
         // Create channel from TSV list
         extractor_tsvs = Channel.fromList(params.extractor_tsvs_list)
             .map { tsv_path ->
-                def original_filename = file(tsv_path).baseName.replaceAll(/\.(tsv|txt|csv)$/i, '')
+                def original_filename = file(tsv_path).baseName.replaceAll(/\.(?i)(tsv|txt|csv)$/, '')
                 tuple(original_filename, tsv_path)
             }
         
