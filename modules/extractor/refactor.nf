@@ -67,21 +67,16 @@ process REFACTOR {
         return None
     
     # Read pedigree to get sample-to-family mapping
-    pedigree_df = pd.read_csv('${pedigree}', sep='\\t')
-    # Pedigree columns: FID, IID, PAT, MAT, SEX, PHENO (or similar)
-    # Find IID column
-    iid_col = None
-    fid_col = None
-    for col in pedigree_df.columns:
-        if col.lower() in ['iid', 'sample', 'sample_id', 'barcode', 'individual']:
-            iid_col = col
-        if col.lower() in ['fid', 'family', 'family_id']:
-            fid_col = col
+    # Pedigree format: FID, IID, PAT, MAT, SEX, PHENO (no header or header starting with FID)
+    pedigree_df = pd.read_csv('${pedigree}', sep='\\t', header=None, 
+                               names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO'])
     
-    if not iid_col or not fid_col:
-        raise ValueError(f"Cannot find IID/FID columns in pedigree. Columns: {list(pedigree_df.columns)}")
+    # Skip header if first row starts with 'FID'
+    if pedigree_df.iloc[0]['FID'] == 'FID':
+        pedigree_df = pedigree_df.iloc[1:].reset_index(drop=True)
     
-    sample_to_family = dict(zip(pedigree_df[iid_col].astype(str), pedigree_df[fid_col].astype(str)))
+    # Create sample-to-family mapping using positional columns
+    sample_to_family = dict(zip(pedigree_df['IID'].astype(str), pedigree_df['FID'].astype(str)))
     
     # Read input TSV
     df = pd.read_csv('${input_tsv}', sep='\\t')
