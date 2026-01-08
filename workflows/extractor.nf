@@ -91,24 +91,24 @@ workflow EXTRACTOR {
     
     // Step 5: FAM_AGGREGATE - combine results per family
     // Need to join family-level results with sample-level results
-    fam_aggregate_input = family_extractor_files
-        .map { fid, original_filename, extractor_tsv ->
-            tuple(fid, original_filename, extractor_tsv)
+    
+    // Group individual gVCF results by original_filename
+    ind_gvcf_grouped = PROCESS_IND_GVCF.out
+        .map { barcode, original_filename, ind_gvcf ->
+            tuple(original_filename, ind_gvcf)
         }
-        .join(PROCESS_FAM_TSV.out, by: [0, 1])  // fid, original_filename
-        .join(PROCESS_FAM_BCF.out, by: [0, 1])  // fid, original_filename
-        .map { fid, original_filename, extractor_tsv, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound ->
-            tuple(fid, original_filename, extractor_tsv, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound)
+        .groupTuple(by: 0)
+    
+    // Join all family-level outputs
+    fam_aggregate_input = PROCESS_FAM_TSV.out
+        .join(PROCESS_FAM_BCF.out, by: [0, 1])  // Join on [fid, original_filename]
+        .map { fid, original_filename, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound ->
+            tuple(original_filename, fid, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound)
         }
-        .combine(
-            PROCESS_IND_GVCF.out
-                .map { barcode, original_filename, ind_gvcf ->
-                    tuple(original_filename, ind_gvcf)
-                }
-                .groupTuple(by: 0),
-            by: 1  // original_filename
-        )
-        .map { original_filename, fid, extractor_tsv, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound, ind_gvcf_files ->
+        .combine(ind_gvcf_grouped, by: 0)  // Combine by original_filename
+        .map { original_filename, fid, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound, ind_gvcf_files ->
+            // Reconstruct the extractor_tsv path
+            def extractor_tsv = file("${params.data}/families/${fid}/extractor/${fid}.${original_filename}.tsv")
             tuple(fid, original_filename, extractor_tsv, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound, ind_gvcf_files)
         }
     
