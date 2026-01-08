@@ -279,9 +279,6 @@ workflow {
                 tuple(original_filename, tsv_path)
             }
         
-        // Get pedigree file path
-        def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
-        
         // Create channel for normalized BCFs (for PROCESS_FAM_BCF)
         norm_bcfs_for_extractor = channels.existing_normalized_bcfs
             .map { fid, bcf, csi ->
