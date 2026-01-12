@@ -51,21 +51,60 @@ process PROCESS_FAM_TSV {
     # Find matches
     matched_keys = set(extractor_df['_match_key']) & set(wombat_df['_match_key'])
     
+    # Identify non-sample columns in wombat (those that don't contain ':')
+    wombat_non_sample_cols = [col for col in wombat_df.columns if ':' not in col and col != '_match_key']
+    
     # Create found dataframe (merge on match key - may produce multiple rows)
     found_extractor = extractor_df[extractor_df['_match_key'].isin(matched_keys)].copy()
     found_wombat = wombat_df[wombat_df['_match_key'].isin(matched_keys)].copy()
     
     if len(found_extractor) > 0:
-        # Merge to get wombat annotations
-        found_df = pd.merge(
-            found_extractor,
-            found_wombat,
-            on='_match_key',
-            how='left',
-            suffixes=('', '_wombat')
-        )
-        # Remove temporary key column
-        found_df = found_df.drop(columns=['_match_key'])
+        # For each row, extract the sample-specific columns from wombat
+        found_rows = []
+        for _, ext_row in found_extractor.iterrows():
+            sample_id = ext_row['sample_id']
+            match_key = ext_row['_match_key']
+            
+            # Find the matching wombat row
+            wombat_row = found_wombat[found_wombat['_match_key'] == match_key]
+            
+            if len(wombat_row) > 0:
+                wombat_row = wombat_row.iloc[0]
+                
+                # Find the sample column (format: SAMPLE:GT:SAMPLE:DP:SAMPLE:GQ:SAMPLE:AD)
+                sample_col = None
+                for col in found_wombat.columns:
+                    if col.startswith(f"{sample_id}:"):
+                        sample_col = col
+                        break
+                
+                # Start with extractor columns
+                row_dict = ext_row.drop('_match_key').to_dict()
+                
+        header_cols = ['chr', 'position', 'ref', 'alt', 'sample_id'] + \
+                      [f"wombat_{col}" for col in wombat_non_sample_cols if col != '_match_key'] + \
+                      ['GT', 'DP', 'GQ', 'AD']
+        pd.DataFrame(columns=header_cols
+                    row_dict[f"wombat_{col}"] = wombat_row[col]
+                
+                # Parse sample-specific columns
+                if sample_col and pd.notna(wombat_row[sample_col]):
+                    sample_values = str(wombat_row[sample_col]).split(':')
+                    # Expected format: GT:DP:GQ:AD (4 values)
+                    row_dict['GT'] = sample_values[0] if len(sample_values) > 0 else '.'
+                    row_dict['DP'] = sample_values[1] if len(sample_values) > 1 else '.'
+                    row_dict['GQ'] = sample_values[2] if len(sample_values) > 2 else '.'
+                    row_dict['AD'] = sample_values[3] if len(sample_values) > 3 else '.'
+                else:
+                    # No sample data found
+                    row_dict['GT'] = '.'
+                    row_dict['DP'] = '.'
+                    row_dict['GQ'] = '.'
+                    row_dict['AD'] = '.'
+                
+                found_rows.append(row_dict)
+        
+        found_df = pd.DataFrame(found_rows) if found_rows else pd.DataFrame()
     else:
         found_df = pd.DataFrame()
     
