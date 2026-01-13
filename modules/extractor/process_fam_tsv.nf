@@ -81,10 +81,8 @@ process PROCESS_FAM_TSV {
                 # Start with extractor columns
                 row_dict = ext_row.drop('_match_key').to_dict()
                 
-        header_cols = ['chr', 'position', 'ref', 'alt', 'sample_id'] + \
-                      [f"wombat_{col}" for col in wombat_non_sample_cols if col != '_match_key'] + \
-                      ['GT', 'DP', 'GQ', 'AD']
-        pd.DataFrame(columns=header_cols
+                # Add non-sample wombat columns
+                for col in wombat_non_sample_cols:
                     row_dict[f"wombat_{col}"] = wombat_row[col]
                 
                 # Parse sample-specific columns
