@@ -27,6 +27,8 @@ process REFACTOR {
     REF_COLS = ['ref', 'reference']
     ALT_COLS = ['alt', 'alternative']
     SAMPLE_COLS = ['sample', 'sample_id', 'barcode']
+    PATERNAL_COLS = ['paternal_id', 'father_id', 'father', 'paternal', 'pat']
+    MATERNAL_COLS = ['maternal_id', 'mother_id', 'mother', 'maternal', 'mat']
     
     # Find first matching column from priority list (case-insensitive)
     def find_column(df, col_list):
@@ -87,6 +89,8 @@ process REFACTOR {
     ref_col = find_column(df, REF_COLS)
     alt_col = find_column(df, ALT_COLS)
     sample_col = find_column(df, SAMPLE_COLS)
+    paternal_col = find_column(df, PATERNAL_COLS)
+    maternal_col = find_column(df, MATERNAL_COLS)
     
     missing_cols = []
     if not chr_col: missing_cols.append('chromosome')
@@ -97,6 +101,9 @@ process REFACTOR {
     
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}. Available columns: {list(df.columns)}")
+    
+    print(f"Found paternal column: {paternal_col if paternal_col else 'None'}")
+    print(f"Found maternal column: {maternal_col if maternal_col else 'None'}")
     
     # Initialize liftover if needed
     lo = None
@@ -109,6 +116,17 @@ process REFACTOR {
     result_df['ref'] = df[ref_col]
     result_df['alt'] = df[alt_col]
     result_df['sample_id'] = df[sample_col].astype(str)
+    
+    # Add paternal and maternal IDs if available
+    if paternal_col:
+        result_df['paternal_id'] = df[paternal_col].astype(str).replace({'0': '', 'nan': '', '.': ''})
+    else:
+        result_df['paternal_id'] = ''
+    
+    if maternal_col:
+        result_df['maternal_id'] = df[maternal_col].astype(str).replace({'0': '', 'nan': '', '.': ''})
+    else:
+        result_df['maternal_id'] = ''
     
     # Handle position (with liftover if needed)
     if needs_liftover:
@@ -128,7 +146,7 @@ process REFACTOR {
         result_df['position'] = df[pos_col].astype(int)
     
     # Reorder columns
-    result_df = result_df[['chr', 'position', 'ref', 'alt', 'sample_id']]
+    result_df = result_df[['chr', 'position', 'ref', 'alt', 'sample_id', 'paternal_id', 'maternal_id']]
     
     # Map samples to families
     result_df['family_id'] = result_df['sample_id'].map(sample_to_family)
@@ -147,7 +165,7 @@ process REFACTOR {
     
     for family_id in result_df['family_id'].unique():
         family_df = result_df[result_df['family_id'] == family_id].copy()
-        family_df = family_df[['chr', 'position', 'ref', 'alt', 'sample_id']]
+        family_df = family_df[['chr', 'position', 'ref', 'alt', 'sample_id', 'paternal_id', 'maternal_id']]
         
         # Create family output
         family_dir = f"families/{family_id}/extractor"

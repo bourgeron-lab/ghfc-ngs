@@ -85,20 +85,42 @@ process PROCESS_FAM_TSV {
                 for col in wombat_non_sample_cols:
                     row_dict[f"wombat_{col}"] = wombat_row[col]
                 
-                # Parse sample-specific columns
-                if sample_col and pd.notna(wombat_row[sample_col]):
-                    sample_values = str(wombat_row[sample_col]).split(':')
-                    # Expected format: GT:DP:GQ:AD (4 values)
-                    row_dict['GT'] = sample_values[0] if len(sample_values) > 0 else '.'
-                    row_dict['DP'] = sample_values[1] if len(sample_values) > 1 else '.'
-                    row_dict['GQ'] = sample_values[2] if len(sample_values) > 2 else '.'
-                    row_dict['AD'] = sample_values[3] if len(sample_values) > 3 else '.'
-                else:
-                    # No sample data found
-                    row_dict['GT'] = '.'
-                    row_dict['DP'] = '.'
-                    row_dict['GQ'] = '.'
-                    row_dict['AD'] = '.'
+                # Helper function to extract genotype data for a sample
+                def extract_sample_genotype(sample_barcode, prefix=''):
+                    if not sample_barcode or sample_barcode in ['0', '.', '', 'nan']:
+                        return {f'{prefix}GT': '.', f'{prefix}DP': '.', f'{prefix}GQ': '.', f'{prefix}AD': '.'}
+                    
+                    # Find the sample column
+                    sample_column = None
+                    for col in found_wombat.columns:
+                        if col.startswith(f"{sample_barcode}:"):
+                            sample_column = col
+                            break
+                    
+                    if sample_column and pd.notna(wombat_row[sample_column]):
+                        values = str(wombat_row[sample_column]).split(':')
+                        return {
+                            f'{prefix}GT': values[0] if len(values) > 0 else '.',
+                            f'{prefix}DP': values[1] if len(values) > 1 else '.',
+                            f'{prefix}GQ': values[2] if len(values) > 2 else '.',
+                            f'{prefix}AD': values[3] if len(values) > 3 else '.'
+                        }
+                    else:
+                        return {f'{prefix}GT': '.', f'{prefix}DP': '.', f'{prefix}GQ': '.', f'{prefix}AD': '.'}
+                
+                # Extract sample genotype
+                sample_gt = extract_sample_genotype(sample_id)
+                row_dict.update(sample_gt)
+                
+                # Extract paternal genotype if available
+                paternal_id = ext_row.get('paternal_id', '')
+                paternal_gt = extract_sample_genotype(paternal_id, prefix='paternal_')
+                row_dict.update(paternal_gt)
+                
+                # Extract maternal genotype if available
+                maternal_id = ext_row.get('maternal_id', '')
+                maternal_gt = extract_sample_genotype(maternal_id, prefix='maternal_')
+                row_dict.update(maternal_gt)
                 
                 found_rows.append(row_dict)
         
@@ -118,9 +140,10 @@ process PROCESS_FAM_TSV {
         found_df.to_csv(found_output, sep='\\t', index=False)
     else:
         # Create empty file with header
-        header_cols = ['chr', 'position', 'ref', 'alt', 'sample_id'] + \
+        header_cols = ['chr', 'position', 'ref', 'alt', 'sample_id', 'paternal_id', 'maternal_id'] + \
                       [f"wombat_{col}" for col in wombat_non_sample_cols] + \
-                      ['GT', 'DP', 'GQ', 'AD']
+                      ['GT', 'DP', 'GQ', 'AD', 'paternal_GT', 'paternal_DP', 'paternal_GQ', 'paternal_AD', \
+                       'maternal_GT', 'maternal_DP', 'maternal_GQ', 'maternal_AD']
         pd.DataFrame(columns=header_cols).to_csv(found_output, sep='\\t', index=False)
     
     notfound_df.to_csv(notfound_output, sep='\\t', index=False)
