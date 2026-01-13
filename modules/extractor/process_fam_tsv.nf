@@ -120,8 +120,10 @@ process PROCESS_FAM_TSV {
         found_df.to_csv(found_output, sep='\\t', index=False)
     else:
         # Create empty file with header
-        pd.DataFrame(columns=extractor_df.drop(columns=['_match_key']).columns.tolist() + 
-                     wombat_df.drop(columns=['_match_key']).columns.tolist()).to_csv(found_output, sep='\\t', index=False)
+        header_cols = ['chr', 'position', 'ref', 'alt', 'sample_id'] + \
+                      [f"wombat_{col}" for col in wombat_non_sample_cols] + \
+                      ['GT', 'DP', 'GQ', 'AD']
+        pd.DataFrame(columns=header_cols).to_csv(found_output, sep='\\t', index=False)
     
     notfound_df.to_csv(notfound_output, sep='\\t', index=False)
     
