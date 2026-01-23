@@ -57,7 +57,7 @@ vep_config_name: "ensembl_vep_115" # Name suffix for output files
 
 # Annotation additional annotation configuration
 annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
-annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf"] # List of BCF files for additional annotation
+annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf", "LCR.grch38.bed.gz"] # List of BCF files for additional annotation
 
 # Annotation de novo mutation extraction configuration
 annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
@@ -67,7 +67,7 @@ annotation_dnm_min_VAF: "0.25" # Minimum variant allele frequency (VAF) for de n
 
 # Wombat configuration
 wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat" # Directory containing Wombat YAML configuration files
-wombat_config_list: ["dataset_paper.yml"] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
+wombat_config_list: ["rare_variants_high_impact.yml", "de_novo_mutations.yml"] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
 
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])

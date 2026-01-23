@@ -51,19 +51,45 @@ process BCFTOOLS_ANNOTATE {
   output_bcf = "${base_name}.annotated.bcf"
   
   // Build the annotation command chain
-  def annotation_commands = annotation_list.collect { bcf_file ->
-    """
-    bcftools annotate \\
-      --threads ${task.cpus} \\
-      -a ${annotation_path}/${bcf_file} \\
-      -c INFO \\
-      -O b \\
-      -o tmp_annotated.bcf \\
-      input.bcf
+  def annotation_commands = annotation_list.collect { annot_file ->
+    // Check if file is bed.gz or bcf
+    def is_bed = annot_file.endsWith('.bed.gz')
     
-    mv tmp_annotated.bcf input.bcf
-    bcftools index input.bcf
-    """
+    if (is_bed) {
+      // Handle bed.gz files (e.g., LCR regions)
+      def annotation_name = annot_file.replaceAll(/\.grch38\.bed\.gz$/, '').replaceAll(/\.bed\.gz$/, '').toUpperCase()
+      """
+      echo "Adding ${annotation_name} annotation"
+      echo '##INFO=<ID=${annotation_name},Number=0,Type=Flag,Description="Variant falls in ${annotation_name} region">' > ${annotation_name}_header.txt
+      
+      bcftools annotate \\
+        --threads ${task.cpus} \\
+        -a ${annotation_path}/${annot_file} \\
+        -h ${annotation_name}_header.txt \\
+        -c CHROM,FROM,TO \\
+        --mark-sites +${annotation_name} \\
+        -O b \\
+        -o tmp_annotated.bcf \\
+        input.bcf
+      
+      mv tmp_annotated.bcf input.bcf
+      bcftools index input.bcf
+      """
+    } else {
+      // Handle BCF files
+      """
+      bcftools annotate \\
+        --threads ${task.cpus} \\
+        -a ${annotation_path}/${annot_file} \\
+        -c INFO \\
+        -O b \\
+        -o tmp_annotated.bcf \\
+        input.bcf
+      
+      mv tmp_annotated.bcf input.bcf
+      bcftools index input.bcf
+      """
+    }
   }.join('\n\n')
 
   """

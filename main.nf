@@ -182,10 +182,8 @@ workflow {
         
         ANNOTATION(annotation_bcfs, annotation_pedigrees)
         annotation_common_bcfs_output = ANNOTATION.out.filtered_common_bcfs
-        annotation_dnm_output = ANNOTATION.out.dnm_bcfs
         annotation_annotated_bcfs_output = ANNOTATION.out.fully_annotated_bcfs
     } else {
-        annotation_dnm_output = Channel.empty()
         annotation_annotated_bcfs_output = Channel.empty()
     }
     
@@ -220,8 +218,6 @@ workflow {
     if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in params.steps) {
         def merge_tasks = []
         if (analysis_plan.snvs_cohort.need_bcf_merge) merge_tasks.add("BCF merge")
-        if (analysis_plan.snvs_cohort.need_dnm_merge) merge_tasks.add("DNM concatenation")
-        if (analysis_plan.snvs_cohort.need_dnm_report) merge_tasks.add("DNM report")
         def wombat_merge_count = analysis_plan.snvs_cohort.need_wombat_merges?.count { k, v -> v == true } ?: 0
         if (wombat_merge_count > 0) merge_tasks.add("Wombat merge (${wombat_merge_count} configs)")
         log.info "Running cohort: ${merge_tasks.join(' and ')}..."
@@ -230,21 +226,16 @@ workflow {
         if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
             // Mix existing BCFs with newly created ones
             all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(annotation_common_bcfs_output)
-            // Get DNM files - mix existing with newly created
-            all_available_dnm_files = channels.existing_dnm_files.mix(annotation_dnm_output)
         } else {
             // Use only existing BCFs if no new ones were created
             all_available_common_bcfs = channels.existing_common_filtered_bcfs
-            all_available_dnm_files = channels.existing_dnm_files
         }
         
         // Get all available Wombat files (existing + newly created)
         all_available_wombat_files = channels.existing_wombat_files.mix(wombat_output ?: Channel.empty())
         
-        SNVS_COHORT(all_available_common_bcfs, all_available_dnm_files, all_available_wombat_files,
+        SNVS_COHORT(all_available_common_bcfs, all_available_wombat_files,
                     analysis_plan.snvs_cohort.need_bcf_merge, 
-                    analysis_plan.snvs_cohort.need_dnm_merge,
-                    analysis_plan.snvs_cohort.need_dnm_report,
                     analysis_plan.snvs_cohort.need_wombat_merges)
     }
     
@@ -387,7 +378,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, final annotated BCF, and DNM files - all part of annotation)
+    // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, and final annotated BCF - all part of annotation)
     // Note: {FID}.gnomad.bcf is intermediate and not published
     families.each { fid ->
         def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
@@ -400,16 +391,12 @@ def createAnalysisPlan(families, individuals, family_members) {
         def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
         def annotated_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf"
         def annotated_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi"
-        def dnm_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.bcf"
-        def dnm_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.bcf.csi"
-        def dnm_tsv_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.dnm.tsv"
         
         if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() &&
             new File(common_bcf_path).exists() && new File(common_csi_path).exists() &&
             new File(common_gt_bcf_path).exists() && new File(common_gt_csi_path).exists() &&
             new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists() &&
-            new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists() &&
-            new File(dnm_bcf_path).exists() && new File(dnm_csi_path).exists() && new File(dnm_tsv_path).exists()) {
+            new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists()) {
             plan.annotation.existing.add(fid)
         } else {
             // Need annotation if normalized BCFs exist or will be created
@@ -419,15 +406,11 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
 
-    // Check existing cohort files (common BCF, DNM TSV, and Wombat TSVs)
+    // Check existing cohort files (common BCF and Wombat TSVs)
     def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
-    def cohort_dnm_tsv_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.${params.vep_config_name}.dnm.tsv"
-    def cohort_dnm_report_path = "${params.data}/cohorts/${params.cohort_name}/reports/${params.cohort_name}.${params.vep_config_name}.dnm.report.pdf"
     
     def cohort_bcf_exists = new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()
-    def cohort_dnm_exists = new File(cohort_dnm_tsv_path).exists()
-    def cohort_dnm_report_exists = new File(cohort_dnm_report_path).exists()
     
     // Check wombat cohort files for each config
     plan.snvs_cohort.need_wombat_merges = [:]
@@ -439,8 +422,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
-    if (cohort_bcf_exists && cohort_dnm_exists && cohort_dnm_report_exists && 
-        !plan.snvs_cohort.need_wombat_merges.any { k, v -> v == true }) {
+    if (cohort_bcf_exists && !plan.snvs_cohort.need_wombat_merges.any { k, v -> v == true }) {
         plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
@@ -449,8 +431,6 @@ def createAnalysisPlan(families, individuals, family_members) {
             plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
             // Track what needs to be generated
             plan.snvs_cohort.need_bcf_merge = !cohort_bcf_exists
-            plan.snvs_cohort.need_dnm_merge = !cohort_dnm_exists
-            plan.snvs_cohort.need_dnm_report = !cohort_dnm_report_exists
         }
     }
     
@@ -788,24 +768,6 @@ def createChannels(analysis_plan) {
         }
         .map { fid, bcf, csi_path ->
             [fid, bcf, file(csi_path)]
-        }
-    
-    // Create channel for existing DNM files (output from annotation, used by snvs_cohort)
-    channels.existing_dnm_files = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.rare.${params.vep_config_name}.annotated.dnm.tsv")
-        .map { tsv ->
-            def fid = tsv.parent.parent.name  // Get family ID from path
-            def bcf_path = tsv.toString().replaceAll(/\.tsv$/, '.bcf')
-            def csi_path = "${bcf_path}.csi"
-            [fid, bcf_path, csi_path, tsv]
-        }
-        .filter { fid, bcf_path, csi_path, tsv -> 
-            fid in analysis_plan.annotation.existing && 
-            new File(bcf_path).exists() && 
-            new File(csi_path).exists()
-        }
-        .map { fid, bcf_path, csi_path, tsv ->
-            [fid, file(bcf_path), file(csi_path), tsv]
         }
     
     // Create channel for existing annotated BCF files (output from annotation, used by wombat)

@@ -13,7 +13,6 @@ include { GNOMAD_FREQ_FILTER } from '../modules/annotation/gnomad_freq_filter'
 include { COMMON_FILTERS } from '../modules/annotation/common_filters'
 include { VEP_ANNOTATION } from '../modules/annotation/vep_annotation'
 include { BCFTOOLS_ANNOTATE } from '../modules/annotation/bcftools_annotate'
-include { DNM_EXTRACTION } from '../modules/annotation/dnm_extraction'
 
 workflow ANNOTATION {
 
@@ -102,24 +101,6 @@ workflow ANNOTATION {
     // Combine new bcftools outputs with existing annotated BCFs
     all_annotated_bcfs = BCFTOOLS_ANNOTATE.out.annotated_bcfs.mix(bcftools_existing)
 
-    // Step 6: Extract de novo mutations
-    dnm_input = all_annotated_bcfs
-        .join(family_pedigrees)
-        .map { fid, bcf, csi, pedigree ->
-            [fid, bcf, csi, pedigree, 
-             params.annotation_dnm_min_callrate, 
-             params.annotation_dnm_min_DP, 
-             params.annotation_dnm_min_GQ, 
-             params.annotation_dnm_min_VAF,
-             params.ref_par1_start,
-             params.ref_par1_end,
-             params.ref_par2_start,
-             params.ref_par2_end,
-             params.annotation_annotation_path]
-        }
-
-    DNM_EXTRACTION(dnm_input)
-
     emit:
     gnomad_bcfs = GNOMAD_FREQ_ANNOT.out.annotated_bcfs
     rare_vcfs = GNOMAD_FREQ_FILTER.out.rare_vcfs
@@ -127,5 +108,4 @@ workflow ANNOTATION {
     filtered_common_bcfs = COMMON_FILTERS.out.filtered_common_bcfs
     vep_annotated_vcfs = all_vep_vcfs
     fully_annotated_bcfs = all_annotated_bcfs
-    dnm_bcfs = DNM_EXTRACTION.out.dnm_results
 }

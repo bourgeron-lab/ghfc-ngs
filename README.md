@@ -545,6 +545,12 @@ For issues and questions:
 5. Ensure all required steps are listed in parameters
 6. Review Nextflow documentation: <https://www.nextflow.io/docs/latest/>
 
+## TODO
+
+### Pipeline Updates
+
+- **DNM Report Script**: The `dnm_report` script needs to be heavily updated to work with the new Wombat-based de novo mutation extraction workflow. The script is currently disabled as de novo mutations are now extracted via Wombat configuration files (`de_novo_mutations.yml`) rather than the legacy `dnm_extraction` module.
+
 ## Citation
 
 If you use this pipeline in your research, please cite:
