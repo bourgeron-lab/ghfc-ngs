@@ -58,12 +58,15 @@ process MERGE_FAMILY_ABERRATIONS {
   # Check if first field is a typical header indicator (case-insensitive)
   # Headers typically start with: #, track, browser, chr, chrom, chromosome (not a number or X/Y)
   if echo "\${first_field}" | grep -qiE '^(#|track|browser|chr|chrom|chromosome)\$'; then
-    # Has header - write it once from first file
-    echo "\${first_line}" > ${output_bed}
+    # Has header - write it with added barcode column
+    echo -e "\${first_line}\tbarcode" > ${output_bed}
     
-    # Concatenate all files, skipping their first line (header)
+    # Concatenate all files, skipping their first line (header) and adding barcode column
     while IFS= read -r file; do
-      tail -n +2 "\${file}" >> ${output_bed}
+      # Extract barcode from filename (remove _aberrations.bed suffix)
+      barcode=\$(basename "\${file}" _aberrations.bed)
+      # Add barcode column to each line
+      tail -n +2 "\${file}" | awk -v bc="\${barcode}" '{print \$0 "\t" bc}' >> ${output_bed}
     done < file_list.txt
     
     # Sort only the data lines (skip header at line 1)
@@ -71,8 +74,18 @@ process MERGE_FAMILY_ABERRATIONS {
     tail -n +2 ${output_bed} | sort -k1,1V -k2,2n >> ${output_bed}.tmp
     mv ${output_bed}.tmp ${output_bed}
   else
-    # No header detected, just concatenate and sort all files
-    cat *_aberrations.bed | sort -k1,1V -k2,2n > ${output_bed}
+    # No header detected, just concatenate with barcode column and sort
+    > ${output_bed}
+    while IFS= read -r file; do
+      # Extract barcode from filename
+      barcode=\$(basename "\${file}" _aberrations.bed)
+      # Add barcode column to each line
+      awk -v bc="\${barcode}" '{print \$0 "\t" bc}' "\${file}" >> ${output_bed}
+    done < file_list.txt
+    
+    # Sort the file
+    sort -k1,1V -k2,2n ${output_bed} > ${output_bed}.tmp
+    mv ${output_bed}.tmp ${output_bed}
   fi
   """
 

@@ -56,12 +56,15 @@ process MERGE_COHORT_ABERRATIONS {
   # Check if first field is a typical header indicator (case-insensitive)
   # Headers typically start with: #, track, browser, chr, chrom, chromosome (not a number or X/Y)
   if echo "\${first_field}" | grep -qiE '^(#|track|browser|chr|chrom|chromosome)\$'; then
-    # Has header - write it once from first file
-    echo "\${first_line}" > ${output_bed}
+    # Has header - write it with added family_id column
+    echo -e "\${first_line}\tfamily_id" > ${output_bed}
     
-    # Concatenate all files, skipping their first line (header)
+    # Concatenate all files, skipping their first line (header) and adding family_id column
     while IFS= read -r file; do
-      tail -n +2 "\${file}" >> ${output_bed}
+      # Extract family ID from filename (remove _aberrations.bed suffix)
+      fid=\$(basename "\${file}" _aberrations.bed)
+      # Add family_id column to each line
+      tail -n +2 "\${file}" | awk -v fid="\${fid}" '{print \$0 "\t" fid}' >> ${output_bed}
     done < file_list.txt
     
     # Sort only the data lines (skip header at line 1)
@@ -69,8 +72,18 @@ process MERGE_COHORT_ABERRATIONS {
     tail -n +2 ${output_bed} | sort -k1,1V -k2,2n >> ${output_bed}.tmp
     mv ${output_bed}.tmp ${output_bed}
   else
-    # No header detected, just concatenate and sort all files
-    cat *_aberrations.bed | sort -k1,1V -k2,2n > ${output_bed}
+    # No header detected, just concatenate with family_id column and sort
+    > ${output_bed}
+    while IFS= read -r file; do
+      # Extract family ID from filename
+      fid=\$(basename "\${file}" _aberrations.bed)
+      # Add family_id column to each line
+      awk -v fid="\${fid}" '{print \$0 "\t" fid}' "\${file}" >> ${output_bed}
+    done < file_list.txt
+    
+    # Sort the file
+    sort -k1,1V -k2,2n ${output_bed} > ${output_bed}.tmp
+    mv ${output_bed}.tmp ${output_bed}
   fi
   """
 
