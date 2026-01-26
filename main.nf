@@ -240,10 +240,26 @@ workflow {
     }
     
     // Run WisecondorX predict if needed and allowed
-    if (analysis_plan.wisecondorx.needed.size() > 0 && 'wisecondorx' in params.steps) {
-        log.info "Running WisecondorX predict for ${analysis_plan.wisecondorx.needed.size()} individuals..."
-        log.info "  - NPZ conversion needed for ${analysis_plan.wisecondorx.need_npz.size()} individuals"
-        log.info "  - Predict needed for ${analysis_plan.wisecondorx.need_predict.size()} individuals"
+    if ((analysis_plan.wisecondorx.needed.size() > 0 || 
+         analysis_plan.wisecondorx.need_family_merge.any { k, v -> v == true } || 
+         analysis_plan.wisecondorx.need_cohort_merge) && 'wisecondorx' in params.steps) {
+        
+        def tasks = []
+        if (analysis_plan.wisecondorx.needed.size() > 0) {
+            tasks.add("predict for ${analysis_plan.wisecondorx.needed.size()} individuals")
+        }
+        def family_merge_count = analysis_plan.wisecondorx.need_family_merge.count { k, v -> v == true } ?: 0
+        if (family_merge_count > 0) {
+            tasks.add("family merge for ${family_merge_count} families")
+        }
+        if (analysis_plan.wisecondorx.need_cohort_merge) {
+            tasks.add("cohort merge")
+        }
+        log.info "Running WisecondorX: ${tasks.join(', ')}..."
+        if (analysis_plan.wisecondorx.needed.size() > 0) {
+            log.info "  - NPZ conversion needed for ${analysis_plan.wisecondorx.need_npz.size()} individuals"
+            log.info "  - Predict needed for ${analysis_plan.wisecondorx.need_predict.size()} individuals"
+        }
         
         // Filter CRAM files for individuals that need NPZ conversion
         wisecondorx_crams = all_available_crams
@@ -255,7 +271,10 @@ workflow {
         WISECONDORX(
             wisecondorx_crams,
             channels.existing_npz_files,
-            analysis_plan.wisecondorx.need_predict
+            analysis_plan.wisecondorx.need_predict,
+            pedigree_data.family_members,
+            analysis_plan.wisecondorx.need_family_merge,
+            analysis_plan.wisecondorx.need_cohort_merge
         )
     }
     
@@ -350,7 +369,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
         snvs_cohort: [needed: [], existing: []],
-        wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: []],
+        wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_cohort_merge: false],
         wombat: [needed: [], existing: [], need_bcf2tsv: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set]
     ]
@@ -493,6 +512,40 @@ def createAnalysisPlan(families, individuals, family_members) {
                     plan.wisecondorx.need_npz.add(barcode)
                 }
             }
+        }
+    }
+    
+    // Check existing WisecondorX family aberrations files
+    families.each { fid ->
+        def family_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.bed"
+        def family_aberrations_exists = new File(family_aberrations_path).exists()
+        
+        if (!family_aberrations_exists) {
+            // Check if any family members have or will have individual aberrations
+            def family_has_aberrations = individuals.any { barcode ->
+                family_members[barcode] == fid && 
+                (barcode in plan.wisecondorx.existing || barcode in plan.wisecondorx.needed)
+            }
+            
+            if (family_has_aberrations) {
+                plan.wisecondorx.need_family_merge[fid] = true
+            }
+        }
+    }
+    
+    // Check existing WisecondorX cohort aberrations file
+    def cohort_aberrations_path = "${params.data}/cohorts/${params.cohort_name}/svs/wisecondorx/${params.cohort_name}_aberrations.bed"
+    def cohort_aberrations_exists = new File(cohort_aberrations_path).exists()
+    
+    if (!cohort_aberrations_exists) {
+        // Check if any families have or will have family aberrations
+        def cohort_has_families = families.any { fid ->
+            def family_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.bed"
+            new File(family_aberrations_path).exists() || plan.wisecondorx.need_family_merge[fid] == true
+        }
+        
+        if (cohort_has_families) {
+            plan.wisecondorx.need_cohort_merge = true
         }
     }
     
