@@ -58,6 +58,7 @@ vep_config_name: "ensembl_vep_115" # Name suffix for output files
 # Annotation additional annotation configuration
 annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
 annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf", "LCR.grch38.bed.gz"] # List of BCF files for additional annotation
+annotation_gencode: "gencode.v47.basic" # Gencode version for WisecondorX aberrations annotation
 
 # Annotation de novo mutation extraction configuration
 annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)

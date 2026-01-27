@@ -2,12 +2,14 @@
  * WisecondorX Workflow
  * Converts CRAM files to NPZ format and runs WisecondorX predict for CNV analysis
  * Merges aberration BED files at family and cohort level
+ * Annotates family aberrations with gencode gene and exon information
  */
 
 // Include modules
 include { NPZ_CONVERT } from '../modules/wisecondorx/npz_convert'
 include { PREDICT } from '../modules/wisecondorx/predict'
 include { MERGE_FAMILY_ABERRATIONS } from '../modules/wisecondorx/merge_family'
+include { ANNOTATE_ABERRATIONS } from '../modules/wisecondorx/annotate_aberrations'
 include { MERGE_COHORT_ABERRATIONS } from '../modules/wisecondorx/merge_cohort'
 
 workflow WISECONDORX {
@@ -18,6 +20,7 @@ workflow WISECONDORX {
     need_predict       // list of barcodes that need predict
     family_members     // map: [barcode: fid] - mapping of barcodes to family IDs
     need_family_merge  // map: [fid: boolean] - whether family merge is needed
+    need_family_annotate // map: [fid: boolean] - whether family annotation is needed
     need_cohort_merge  // boolean: whether cohort merge is needed
 
     main:
@@ -87,25 +90,53 @@ workflow WISECONDORX {
         family_output = channel.empty()
     }
     
+    // Annotate family aberrations if needed
+    if (need_family_annotate && !need_family_annotate.isEmpty()) {
+        // Create channel for existing family aberrations
+        existing_family_aberrations_for_annot = channel
+            .fromPath("${params.data}/families/*/svs/wisecondorx/*_aberrations.bed")
+            .map { bed ->
+                def fid = bed.name.replaceAll(/_aberrations\.bed$/, '')
+                tuple(fid, bed)
+            }
+        
+        // Mix with newly created family aberrations
+        all_family_aberrations_for_annot = existing_family_aberrations_for_annot.mix(family_output)
+        
+        // Filter for families that need annotation
+        families_to_annotate = all_family_aberrations_for_annot
+            .filter { fid, bed ->
+                need_family_annotate[fid] == true
+            }
+            .map { fid, bed ->
+                tuple(fid, bed, params.annotation_annotation_path, params.annotation_gencode)
+            }
+        
+        ANNOTATE_ABERRATIONS(families_to_annotate)
+        annotated_output = ANNOTATE_ABERRATIONS.out.annotated_aberrations
+    } else {
+        annotated_output = channel.empty()
+    }
+    
     // Merge cohort aberrations if needed
     if (need_cohort_merge) {
-        // Create channel for existing family aberrations
-        existing_family_aberrations = channel
-            .fromPath("${params.data}/families/*/svs/wisecondorx/*_aberrations.bed")
+        // Create channel for existing annotated family aberrations
+        existing_annotated_family_aberrations = channel
+            .fromPath("${params.data}/families/*/svs/wisecondorx/*_aberrations.annotated.bed")
             .collect()
         
-        // Mix with newly created family aberrations if any
-        if (need_family_merge && !need_family_merge.isEmpty()) {
-            all_family_aberrations = existing_family_aberrations
-                .mix(family_output.map { fid, bed -> bed }.collect())
+        // Mix with newly annotated family aberrations if any
+        if (need_family_annotate && !need_family_annotate.isEmpty()) {
+            all_annotated_family_aberrations = existing_annotated_family_aberrations
+                .mix(annotated_output.map { fid, bed -> bed }.collect())
                 .flatten()
                 .collect()
         } else {
-            all_family_aberrations = existing_family_aberrations
+            all_annotated_family_aberrations = existing_annotated_family_aberrations
         }
         
         // Create cohort merge input
-        cohort_input = all_family_aberrations
+        cohort_input = all_annotated_family_aberrations
             .map { bed_files -> tuple(params.cohort_name, bed_files) }
         
         MERGE_COHORT_ABERRATIONS(cohort_input)
@@ -118,5 +149,6 @@ workflow WISECONDORX {
     npz_files = NPZ_CONVERT.out
     predict_results = PREDICT.out
     family_aberrations = family_output
+    annotated_family_aberrations = annotated_output
     cohort_aberrations = cohort_output
 }
