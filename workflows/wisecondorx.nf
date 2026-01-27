@@ -8,6 +8,7 @@
 // Include modules
 include { NPZ_CONVERT } from '../modules/wisecondorx/npz_convert'
 include { PREDICT } from '../modules/wisecondorx/predict'
+include { REFORMAT_CHR } from '../modules/wisecondorx/reformat_chr'
 include { MERGE_FAMILY_ABERRATIONS } from '../modules/wisecondorx/merge_family'
 include { ANNOTATE_ABERRATIONS } from '../modules/wisecondorx/annotate_aberrations'
 include { MERGE_COHORT_ABERRATIONS } from '../modules/wisecondorx/merge_cohort'
@@ -52,31 +53,34 @@ workflow WISECONDORX {
     
     // Extract aberrations BED files from predict output
     aberrations_beds = PREDICT.out
-        .map { barcode, bed, stats, segments, bins, plots ->
+        .map { barcode, bed, _stats, _segments, _bins, _plots ->
             tuple(barcode, bed)
         }
     
+    // Reformat chromosome names to add chr prefix
+    REFORMAT_CHR(aberrations_beds)
+    
     // Merge family aberrations if needed
     if (need_family_merge && !need_family_merge.isEmpty()) {
-        // Create channel for existing individual aberrations
-        existing_aberrations = channel
-            .fromPath("${params.data}/samples/*/svs/wisecondorx/*_aberrations.bed")
+        // Create channel for existing individual chr-prefixed aberrations
+        existing_chr_aberrations = channel
+            .fromPath("${params.data}/samples/*/svs/wisecondorx/*_aberrations.chr.bed")
             .map { bed ->
-                def barcode = bed.name.replaceAll(/_aberrations\.bed$/, '')
+                def barcode = bed.name.replaceAll(/_aberrations\.chr\.bed$/, '')
                 tuple(barcode, bed)
             }
         
-        // Mix existing with newly created aberrations
-        all_aberrations = existing_aberrations.mix(aberrations_beds)
+        // Mix existing with newly created chr-prefixed aberrations
+        all_chr_aberrations = existing_chr_aberrations.mix(REFORMAT_CHR.out.chr_aberrations)
         
         // Group by family ID
-        family_aberrations = all_aberrations
+        family_aberrations = all_chr_aberrations
             .map { barcode, bed ->
                 def fid = family_members[barcode]
                 tuple(fid, barcode, bed)
             }
             .groupTuple(by: 0)
-            .filter { fid, barcode_list, bed_list ->
+            .filter { fid, _barcode_list, _bed_list ->
                 // Only process families that need merging
                 need_family_merge[fid] == true
             }
@@ -148,6 +152,7 @@ workflow WISECONDORX {
     emit:
     npz_files = NPZ_CONVERT.out
     predict_results = PREDICT.out
+    chr_aberrations = REFORMAT_CHR.out.chr_aberrations
     family_aberrations = family_output
     annotated_family_aberrations = annotated_output
     cohort_aberrations = cohort_output

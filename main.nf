@@ -500,12 +500,14 @@ def createAnalysisPlan(families, individuals, family_members) {
     individuals.each { barcode ->
         def npz_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz"
         def predict_bed_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed"
+        def chr_bed_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed"
         
         def npz_exists = new File(npz_path).exists()
         def predict_exists = new File(predict_bed_path).exists()
+        def chr_exists = new File(chr_bed_path).exists()
         
-        if (predict_exists) {
-            // Predict is the final output
+        if (predict_exists && chr_exists) {
+            // Both predict and chr reformat are done
             plan.wisecondorx.existing.add(barcode)
         } else {
             // Need predict if we have or will have CRAM files
