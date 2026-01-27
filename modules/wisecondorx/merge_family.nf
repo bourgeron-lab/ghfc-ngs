@@ -46,7 +46,7 @@ process MERGE_FAMILY_ABERRATIONS {
 
   """
   # List all BED files (sorted for consistency)
-  ls -1 *_aberrations.bed | sort -u > file_list.txt
+  ls -1 *_aberrations.chr.bed | sort -u > file_list.txt
   
   # Get the first file to check for header
   first_file=\$(head -n 1 file_list.txt)
@@ -63,8 +63,8 @@ process MERGE_FAMILY_ABERRATIONS {
     
     # Concatenate all files, skipping their first line (header) and adding barcode column
     while IFS= read -r file; do
-      # Extract barcode from filename (remove _aberrations.bed suffix)
-      barcode=\$(basename "\${file}" _aberrations.bed)
+      # Extract barcode from filename (remove _aberrations.chr.bed suffix)
+      barcode=\$(basename "\${file}" _aberrations.chr.bed)
       # Add barcode column to each line
       tail -n +2 "\${file}" | awk -v bc="\${barcode}" '{print \$0 "\t" bc}' >> ${output_bed}
     done < file_list.txt
@@ -78,7 +78,7 @@ process MERGE_FAMILY_ABERRATIONS {
     > ${output_bed}
     while IFS= read -r file; do
       # Extract barcode from filename
-      barcode=\$(basename "\${file}" _aberrations.bed)
+      barcode=\$(basename "\${file}" _aberrations.chr.bed)
       # Add barcode column to each line
       awk -v bc="\${barcode}" '{print \$0 "\t" bc}' "\${file}" >> ${output_bed}
     done < file_list.txt
