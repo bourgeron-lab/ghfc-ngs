@@ -86,35 +86,75 @@ process ANNOTATE_ABERRATIONS {
   # Intersect with each annotation file and collect results
   # 1. Genic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_genes} -wa -wb | \
-    awk '{line_num=\$(NF); gene=\$(NF-3); print line_num "\\t" gene}' | \
-    sort -u | \
-    sort -k1,1n | \
-    awk '{genes[NR]=\$1; symbols[NR]=symbols[NR] (symbols[NR] ? "," : "") \$2} 
-         END {for(i=1; i<=NR; i++) if(genes[i]!=genes[i-1] || i==1) print genes[i] "\\t" symbols[i]}' > genic_symbol.txt
+    awk '{print \$8 "\\t" \$NF}' | \
+    sort -k1,1n -k2,2 | \
+    uniq | \
+    awk '{
+      if (\$1 == prev_line) {
+        genes = genes "," \$2
+      } else {
+        if (NR > 1) print prev_line "\\t" genes
+        prev_line = \$1
+        genes = \$2
+      }
+    }
+    END {
+      if (NR > 0) print prev_line "\\t" genes
+    }' > genic_symbol.txt
   
   # 2. Genic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_genes} -wa -wb | \
-    awk '{line_num=\$(NF); gene=\$(NF-3); print line_num "\\t" gene}' | \
-    sort -u | \
-    sort -k1,1n | \
-    awk '{genes[NR]=\$1; symbols[NR]=symbols[NR] (symbols[NR] ? "," : "") \$2} 
-         END {for(i=1; i<=NR; i++) if(genes[i]!=genes[i-1] || i==1) print genes[i] "\\t" symbols[i]}' > genic_ensg.txt
+    awk '{print \$8 "\\t" \$NF}' | \
+    sort -k1,1n -k2,2 | \
+    uniq | \
+    awk '{
+      if (\$1 == prev_line) {
+        genes = genes "," \$2
+      } else {
+        if (NR > 1) print prev_line "\\t" genes
+        prev_line = \$1
+        genes = \$2
+      }
+    }
+    END {
+      if (NR > 0) print prev_line "\\t" genes
+    }' > genic_ensg.txt
   
   # 3. Exonic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_exons} -wa -wb | \
-    awk '{line_num=\$(NF); gene=\$(NF-3); print line_num "\\t" gene}' | \
-    sort -u | \
-    sort -k1,1n | \
-    awk '{genes[NR]=\$1; symbols[NR]=symbols[NR] (symbols[NR] ? "," : "") \$2} 
-         END {for(i=1; i<=NR; i++) if(genes[i]!=genes[i-1] || i==1) print genes[i] "\\t" symbols[i]}' > exonic_symbol.txt
+    awk '{print \$8 "\\t" \$NF}' | \
+    sort -k1,1n -k2,2 | \
+    uniq | \
+    awk '{
+      if (\$1 == prev_line) {
+        genes = genes "," \$2
+      } else {
+        if (NR > 1) print prev_line "\\t" genes
+        prev_line = \$1
+        genes = \$2
+      }
+    }
+    END {
+      if (NR > 0) print prev_line "\\t" genes
+    }' > exonic_symbol.txt
   
   # 4. Exonic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_exons} -wa -wb | \
-    awk '{line_num=\$(NF); gene=\$(NF-3); print line_num "\\t" gene}' | \
-    sort -u | \
-    sort -k1,1n | \
-    awk '{genes[NR]=\$1; symbols[NR]=symbols[NR] (symbols[NR] ? "," : "") \$2} 
-         END {for(i=1; i<=NR; i++) if(genes[i]!=genes[i-1] || i==1) print genes[i] "\\t" symbols[i]}' > exonic_ensg.txt
+    awk '{print \$8 "\\t" \$NF}' | \
+    sort -k1,1n -k2,2 | \
+    uniq | \
+    awk '{
+      if (\$1 == prev_line) {
+        genes = genes "," \$2
+      } else {
+        if (NR > 1) print prev_line "\\t" genes
+        prev_line = \$1
+        genes = \$2
+      }
+    }
+    END {
+      if (NR > 0) print prev_line "\\t" genes
+    }' > exonic_ensg.txt
   
   # Merge annotations with original data
   awk '{print NR "\\t" \$0}' data.bed | \
