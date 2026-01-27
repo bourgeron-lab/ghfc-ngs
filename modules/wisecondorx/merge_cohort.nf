@@ -44,7 +44,7 @@ process MERGE_COHORT_ABERRATIONS {
 
   """
   # List all BED files (sorted for consistency)
-  ls -1 *_aberrations.bed | sort -u > file_list.txt
+  ls -1 *_aberrations.annotated.bed | sort -u > file_list.txt
   
   # Get the first file to check for header
   first_file=\$(head -n 1 file_list.txt)
@@ -61,8 +61,8 @@ process MERGE_COHORT_ABERRATIONS {
     
     # Concatenate all files, skipping their first line (header) and adding family_id column
     while IFS= read -r file; do
-      # Extract family ID from filename (remove _aberrations.bed suffix)
-      fid=\$(basename "\${file}" _aberrations.bed)
+      # Extract family ID from filename (remove _aberrations.annotated.bed suffix)
+      fid=\$(basename "\${file}" _aberrations.annotated.bed)
       # Add family_id column to each line
       tail -n +2 "\${file}" | awk -v fid="\${fid}" '{print \$0 "\t" fid}' >> ${output_bed}
     done < file_list.txt
@@ -76,7 +76,7 @@ process MERGE_COHORT_ABERRATIONS {
     > ${output_bed}
     while IFS= read -r file; do
       # Extract family ID from filename
-      fid=\$(basename "\${file}" _aberrations.bed)
+      fid=\$(basename "\${file}" _aberrations.annotated.bed)
       # Add family_id column to each line
       awk -v fid="\${fid}" '{print \$0 "\t" fid}' "\${file}" >> ${output_bed}
     done < file_list.txt
