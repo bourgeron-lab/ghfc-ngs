@@ -3,6 +3,8 @@
  * Converts CRAM files to NPZ format and runs WisecondorX predict for CNV analysis
  * Merges aberration BED files at family and cohort level
  * Annotates family aberrations with gencode gene and exon information
+ * 
+ * Skips processing if output files already exist - only runs necessary modules
  */
 
 // Include modules
@@ -16,8 +18,8 @@ include { MERGE_COHORT_ABERRATIONS } from '../modules/wisecondorx/merge_cohort'
 workflow WISECONDORX {
 
     take:
-    cram_files         // channel: [barcode, cram, crai]
-    existing_npz_files // channel: [barcode, npz]
+    cram_files         // channel: [barcode, cram, crai] - only CRAMs that need NPZ conversion
+    existing_npz_files // channel: [barcode, npz] - existing NPZ files
     need_predict       // list of barcodes that need predict
     family_members     // map: [barcode: fid] - mapping of barcodes to family IDs
     need_family_merge  // map: [fid: boolean] - whether family merge is needed
@@ -32,49 +34,91 @@ workflow WISECONDORX {
             tuple(barcode, cram, crai, file(params.ref))
         }
     
-    // Run NPZ conversion for samples that need it
+    // Run NPZ conversion for samples that need it (cram_files already filtered by main.nf)
     NPZ_CONVERT(cram_with_ref)
     
     // Mix existing NPZ files with newly converted ones
     all_npz_files = existing_npz_files
         .mix(NPZ_CONVERT.out)
     
-    // Filter NPZ files for samples that need predict
-    npz_for_predict = all_npz_files
-        .filter { barcode, npz ->
+    // Check which samples need predict vs have existing results
+    npz_with_status = all_npz_files
+        .filter { barcode, _npz ->
             barcode in need_predict
         }
         .map { barcode, npz ->
-            tuple(barcode, npz, file(params.wisecondorx_reference))
+            def predict_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed")
+            def chr_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
+            
+            def has_predict = predict_bed.exists()
+            def has_chr = chr_bed.exists()
+            
+            [barcode: barcode, npz: npz, 
+             predict_bed: predict_bed, chr_bed: chr_bed,
+             has_predict: has_predict, has_chr: has_chr]
         }
+    
+    // Samples needing PREDICT
+    npz_for_predict = npz_with_status
+        .filter { rec -> !rec.has_predict }
+        .map { rec -> tuple(rec.barcode, rec.npz, file(params.wisecondorx_reference)) }
+    
+    // Existing predict results
+    existing_predict_beds = npz_with_status
+        .filter { rec -> rec.has_predict }
+        .map { rec -> tuple(rec.barcode, rec.predict_bed) }
     
     // Run WisecondorX predict
     PREDICT(npz_for_predict)
     
     // Extract aberrations BED files from predict output
-    aberrations_beds = PREDICT.out
+    new_aberrations_beds = PREDICT.out
         .map { barcode, bed, _stats, _segments, _bins, _plots ->
             tuple(barcode, bed)
         }
     
+    // Combine new + existing predict results
+    all_aberrations_beds = new_aberrations_beds.mix(existing_predict_beds)
+    
+    // Check which samples need chr reformat
+    aberrations_with_chr_status = all_aberrations_beds
+        .map { barcode, bed ->
+            def chr_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
+            def has_chr = chr_bed.exists()
+            [barcode: barcode, bed: bed, chr_bed: chr_bed, has_chr: has_chr]
+        }
+    
+    // Samples needing chr reformat
+    beds_for_chr_reformat = aberrations_with_chr_status
+        .filter { rec -> !rec.has_chr }
+        .map { rec -> tuple(rec.barcode, rec.bed) }
+    
+    // Existing chr-reformatted beds
+    existing_chr_beds = aberrations_with_chr_status
+        .filter { rec -> rec.has_chr }
+        .map { rec -> tuple(rec.barcode, rec.chr_bed) }
+    
     // Reformat chromosome names to add chr prefix
-    REFORMAT_CHR(aberrations_beds)
+    REFORMAT_CHR(beds_for_chr_reformat)
+    
+    // Combine new + existing chr-reformatted results
+    all_chr_aberrations = REFORMAT_CHR.out.chr_aberrations.mix(existing_chr_beds)
     
     // Merge family aberrations if needed
     if (need_family_merge && !need_family_merge.isEmpty()) {
-        // Create channel for existing individual chr-prefixed aberrations
-        existing_chr_aberrations = channel
+        // Create channel for ALL existing individual chr-prefixed aberrations (not just newly created)
+        all_existing_chr_aberrations = channel
             .fromPath("${params.data}/samples/*/svs/wisecondorx/*_aberrations.chr.bed")
             .map { bed ->
                 def barcode = bed.name.replaceAll(/_aberrations\.chr\.bed$/, '')
                 tuple(barcode, bed)
             }
         
-        // Mix existing with newly created chr-prefixed aberrations
-        all_chr_aberrations = existing_chr_aberrations.mix(REFORMAT_CHR.out.chr_aberrations)
+        // Mix ALL existing (from disk) with newly created chr-prefixed aberrations
+        combined_chr_aberrations = all_existing_chr_aberrations.mix(REFORMAT_CHR.out.chr_aberrations)
         
         // Group by family ID
-        family_aberrations = all_chr_aberrations
+        family_aberrations = combined_chr_aberrations
             .map { barcode, bed ->
                 def fid = family_members[barcode]
                 tuple(fid, barcode, bed)
@@ -109,7 +153,7 @@ workflow WISECONDORX {
         
         // Filter for families that need annotation
         families_to_annotate = all_family_aberrations_for_annot
-            .filter { fid, bed ->
+            .filter { fid, _bed ->
                 need_family_annotate[fid] == true
             }
             .map { fid, bed ->
@@ -132,7 +176,7 @@ workflow WISECONDORX {
         // Mix with newly annotated family aberrations if any
         if (need_family_annotate && !need_family_annotate.isEmpty()) {
             all_annotated_family_aberrations = existing_annotated_family_aberrations
-                .mix(annotated_output.map { fid, bed -> bed }.collect())
+                .mix(annotated_output.map { _fid, bed -> bed }.collect())
                 .flatten()
                 .collect()
         } else {
@@ -152,7 +196,7 @@ workflow WISECONDORX {
     emit:
     npz_files = NPZ_CONVERT.out
     predict_results = PREDICT.out
-    chr_aberrations = REFORMAT_CHR.out.chr_aberrations
+    chr_aberrations = all_chr_aberrations
     family_aberrations = family_output
     annotated_family_aberrations = annotated_output
     cohort_aberrations = cohort_output
