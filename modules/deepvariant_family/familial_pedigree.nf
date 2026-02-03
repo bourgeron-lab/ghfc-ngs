@@ -41,9 +41,20 @@ process FAMILIAL_PEDIGREE {
 
   script:
   """
-  # Extract header and family-specific rows from cohort pedigree
-  head -n 1 ${pedigree_file} > ${fid}.pedigree.tsv
-  awk -F'\\t' '\$1 == "${fid}"' ${pedigree_file} >> ${fid}.pedigree.tsv
+  #!/bin/bash
+  set -euo pipefail
+  
+  # Check if the first line is a header (starts with "FID" followed by tab or space)
+  first_field=\$(head -n 1 ${pedigree_file} | awk '{print \$1}')
+  
+  if [ "\${first_field}" = "FID" ]; then
+    # Has header - include it and extract family rows (skip header in awk)
+    head -n 1 ${pedigree_file} > ${fid}.pedigree.tsv
+    awk -F'\\t' 'NR > 1 && \$1 == "${fid}"' ${pedigree_file} >> ${fid}.pedigree.tsv
+  else
+    # No header - extract all matching rows directly
+    awk -F'\\t' '\$1 == "${fid}"' ${pedigree_file} > ${fid}.pedigree.tsv
+  fi
   """
 
   stub:
