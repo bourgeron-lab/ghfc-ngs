@@ -55,6 +55,10 @@ process ANNOTATE_ABERRATIONS {
   #!/bin/bash
   set -euo pipefail
   
+  # Set temp directory to current work directory and memory buffer for sort
+  export TMPDIR=\$(pwd)
+  SORT_OPTS="-T \${TMPDIR} -S 2G"
+  
   # Extract header if present
   first_field=\$(head -n 1 ${aberrations_bed} | awk '{print \$1}')
   
@@ -87,7 +91,7 @@ process ANNOTATE_ABERRATIONS {
   # 1. Genic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_genes} -wa -wb | \
     awk '{print \$8 "\\t" \$NF}' | \
-    sort -k1,1n -k2,2 | \
+    sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
       if (\$1 == prev_line) {
@@ -105,7 +109,7 @@ process ANNOTATE_ABERRATIONS {
   # 2. Genic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_genes} -wa -wb | \
     awk '{print \$8 "\\t" \$NF}' | \
-    sort -k1,1n -k2,2 | \
+    sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
       if (\$1 == prev_line) {
@@ -123,7 +127,7 @@ process ANNOTATE_ABERRATIONS {
   # 3. Exonic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_exons} -wa -wb | \
     awk '{print \$8 "\\t" \$NF}' | \
-    sort -k1,1n -k2,2 | \
+    sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
       if (\$1 == prev_line) {
@@ -141,7 +145,7 @@ process ANNOTATE_ABERRATIONS {
   # 4. Exonic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_exons} -wa -wb | \
     awk '{print \$8 "\\t" \$NF}' | \
-    sort -k1,1n -k2,2 | \
+    sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
       if (\$1 == prev_line) {
@@ -158,7 +162,7 @@ process ANNOTATE_ABERRATIONS {
   
   # Merge annotations with original data
   awk '{print NR "\\t" \$0}' data.bed | \
-    sort -k1,1n | \
+    sort \${SORT_OPTS} -k1,1n | \
     awk 'BEGIN {
       # Read annotations
       while((getline < "genic_symbol.txt") > 0) genic_sym[\$1]=\$2;
