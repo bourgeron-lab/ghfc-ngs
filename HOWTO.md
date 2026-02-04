@@ -58,10 +58,10 @@ Additionaly the container images used by the workflow are defined there and can 
 
 ```bash
 # DeepVariant process settings requires version > 1.8
-withName: 'DV_MAKE_EXAMPLES' {
+withName: 'MAKE_EXAMPLES' {
         cpus = 95
         memory = '460.GB'
-        container = 'docker://google/deepvariant:1.9.0'
+        container = 'docker://google/deepvariant:1.10.0-beta'
     }
 ```
 
