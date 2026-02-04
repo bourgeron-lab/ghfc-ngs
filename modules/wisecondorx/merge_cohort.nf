@@ -43,22 +43,26 @@ process MERGE_COHORT_ABERRATIONS {
   output_bed = "${cohort_name}_aberrations.bed"
 
   """
+  # Set temp directory to current work directory and memory buffer for sort
+  export TMPDIR=\$(pwd)
+  SORT_OPTS="-T \${TMPDIR} -S 4G"
+
   # List all BED files (sorted for consistency)
   ls -1 *_aberrations.annotated.bed | sort -u > file_list.txt
-  
+
   # Get the first file to check for header
   first_file=\$(head -n 1 file_list.txt)
   first_line=\$(head -n 1 "\${first_file}")
-  
+
   # Extract first field (column) from the first line
   first_field=\$(echo "\${first_line}" | awk '{print \$1}')
-  
+
   # Check if first field is a typical header indicator (case-insensitive)
   # Headers typically start with: #, track, browser, chr, chrom, chromosome (not a number or X/Y)
   if echo "\${first_field}" | grep -qiE '^(#|track|browser|chr|chrom|chromosome)\$'; then
     # Has header - write it with added family_id column
     echo -e "\${first_line}\tfamily_id" > ${output_bed}
-    
+
     # Concatenate all files, skipping their first line (header) and adding family_id column
     while IFS= read -r file; do
       # Extract family ID from filename (remove _aberrations.annotated.bed suffix)
@@ -66,10 +70,10 @@ process MERGE_COHORT_ABERRATIONS {
       # Add family_id column to each line
       tail -n +2 "\${file}" | awk -v fid="\${fid}" '{print \$0 "\t" fid}' >> ${output_bed}
     done < file_list.txt
-    
+
     # Sort only the data lines (skip header at line 1)
     head -n 1 ${output_bed} > ${output_bed}.tmp
-    tail -n +2 ${output_bed} | sort -k1,1V -k2,2n >> ${output_bed}.tmp
+    tail -n +2 ${output_bed} | sort \${SORT_OPTS} -k1,1V -k2,2n >> ${output_bed}.tmp
     mv ${output_bed}.tmp ${output_bed}
   else
     # No header detected, just concatenate with family_id column and sort
@@ -80,9 +84,9 @@ process MERGE_COHORT_ABERRATIONS {
       # Add family_id column to each line
       awk -v fid="\${fid}" '{print \$0 "\t" fid}' "\${file}" >> ${output_bed}
     done < file_list.txt
-    
+
     # Sort the file
-    sort -k1,1V -k2,2n ${output_bed} > ${output_bed}.tmp
+    sort \${SORT_OPTS} -k1,1V -k2,2n ${output_bed} > ${output_bed}.tmp
     mv ${output_bed}.tmp ${output_bed}
   fi
   """
