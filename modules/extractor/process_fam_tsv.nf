@@ -4,7 +4,7 @@ process PROCESS_FAM_TSV {
     publishDir "${params.data}/families/${fid}/extractor", mode: 'copy'
     
     input:
-    tuple val(fid), val(original_filename), path(extractor_tsv), path(wombat_tsv)
+    tuple val(fid), val(original_filename), path(extractor_tsv), path(wombat_parquet)
     
     output:
     tuple val(fid), val(original_filename), path("${fid}.${original_filename}.fam_tsv.found.tsv"), path("${fid}.${original_filename}.fam_tsv.notfound.tsv")
@@ -13,17 +13,15 @@ process PROCESS_FAM_TSV {
     """
     #!/usr/bin/env python3
     import pandas as pd
-    import gzip
     
     fid = '${fid}'
     original_filename = '${original_filename}'
     
     # Read extractor TSV
     extractor_df = pd.read_csv('${extractor_tsv}', sep='\\t')
-    
-    # Read wombat TSV (gzipped bcf2tsv output)
-    with gzip.open('${wombat_tsv}', 'rt') as f:
-        wombat_df = pd.read_csv(f, sep='\\t')
+
+    # Read wombat Parquet (bcf2parquet output)
+    wombat_df = pd.read_parquet('${wombat_parquet}')
     
     # Standardize column names for matching
     # Extractor columns: chr, position, ref, alt, sample_id

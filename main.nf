@@ -210,7 +210,7 @@ workflow {
                 fid in analysis_plan.wombat.needed 
             }
         
-        WOMBAT(wombat_bcfs, wombat_pedigrees, analysis_plan.wombat.need_bcf2tsv)
+        WOMBAT(wombat_bcfs, wombat_pedigrees, analysis_plan.wombat.need_bcf2parquet)
         wombat_output = WOMBAT.out.wombat_outputs
     }
     
@@ -301,12 +301,12 @@ workflow {
                 tuple(fid, bcf, csi)
             }
         
-        // Create channel for wombat bcf2tsv outputs (for PROCESS_FAM_TSV)
-        wombat_tsvs_for_extractor = Channel
-            .fromPath("${params.data}/families/*/wombat/*.rare.${params.vep_config_name}.annotated.tsv.gz")
-            .map { tsv ->
-                def fid = tsv.parent.parent.name
-                tuple(fid, tsv)
+        // Create channel for wombat bcf2parquet outputs (for PROCESS_FAM_TSV)
+        wombat_parquets_for_extractor = Channel
+            .fromPath("${params.data}/families/*/wombat/*.rare.${params.vep_config_name}.annotated.parquet")
+            .map { parquet ->
+                def fid = parquet.parent.parent.name
+                tuple(fid, parquet)
             }
         
         // Create channel for gVCFs (for PROCESS_IND_GVCF)
@@ -320,7 +320,7 @@ workflow {
             pedigree_file,
             params.liftover_chain,
             norm_bcfs_for_extractor,
-            wombat_tsvs_for_extractor,
+            wombat_parquets_for_extractor,
             gvcfs_for_extractor
         )
     }
@@ -376,7 +376,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         annotation: [needed: [], existing: []],
         snvs_cohort: [needed: [], existing: []],
         wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
-        wombat: [needed: [], existing: [], need_bcf2tsv: [:]],
+        wombat: [needed: [], existing: [], need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set]
     ]
     
@@ -575,13 +575,13 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing Wombat files
     families.each { fid ->
-        // Check if BCF2TSV output exists
-        def bcf2tsv_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.tsv.gz"
-        def bcf2tsv_exists = new File(bcf2tsv_output_path).exists()
-        
+        // Check if BCF2PARQUET output exists
+        def bcf2parquet_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet"
+        def bcf2parquet_exists = new File(bcf2parquet_output_path).exists()
+
         // Check if PYWOMBAT outputs exist (need to check for all configs if defined)
         def pywombat_complete = false
-        if (params.wombat_config_list && !params.wombat_config_list.isEmpty() && bcf2tsv_exists) {
+        if (params.wombat_config_list && !params.wombat_config_list.isEmpty() && bcf2parquet_exists) {
             // Check if all PYWOMBAT outputs exist
             pywombat_complete = params.wombat_config_list.every { config_file ->
                 def config_name = config_file.replaceAll(/\.ya?ml$/, '')
@@ -589,9 +589,9 @@ def createAnalysisPlan(families, individuals, family_members) {
                 new File(pywombat_output_path).exists()
             }
         }
-        
-        // Track BCF2TSV status
-        plan.wombat.need_bcf2tsv[fid] = !bcf2tsv_exists
+
+        // Track BCF2PARQUET status
+        plan.wombat.need_bcf2parquet[fid] = !bcf2parquet_exists
         
         // Determine if family needs Wombat processing
         if (fid in plan.annotation.existing || fid in plan.annotation.needed) {

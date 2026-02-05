@@ -19,7 +19,7 @@ workflow EXTRACTOR {
     pedigree            // path to pedigree file
     chain_file          // path to liftover chain file
     norm_bcfs           // channel: [fid, bcf, csi]
-    wombat_tsvs         // channel: [fid, tsv.gz]
+    wombat_parquets     // channel: [fid, parquet]
     gvcfs               // channel: [barcode, gvcf, tbi]
 
     main:
@@ -53,14 +53,14 @@ workflow EXTRACTOR {
             }
         }
     
-    // Step 2: PROCESS_FAM_TSV - match with wombat bcf2tsv output
+    // Step 2: PROCESS_FAM_TSV - match with wombat bcf2parquet output
     fam_tsv_input = family_extractor_files
         .map { fid, original_filename, extractor_tsv ->
             tuple(fid, original_filename, extractor_tsv)
         }
-        .combine(wombat_tsvs, by: 0)  // Join on fid
-        .map { fid, original_filename, extractor_tsv, wombat_tsv ->
-            tuple(fid, original_filename, extractor_tsv, wombat_tsv)
+        .combine(wombat_parquets, by: 0)  // Join on fid
+        .map { fid, original_filename, extractor_tsv, wombat_parquet ->
+            tuple(fid, original_filename, extractor_tsv, wombat_parquet)
         }
     
     PROCESS_FAM_TSV(fam_tsv_input)
