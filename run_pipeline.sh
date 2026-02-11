@@ -5,7 +5,7 @@ unset HTTP_PROXY https_proxy http_proxy HTTPS_PROXY
 module load graalvm/ce-java23-23.0.1
 module load apptainer
 module load graphviz
-module load nextflow
+# module load nextflow
 
 set -euo pipefail
 

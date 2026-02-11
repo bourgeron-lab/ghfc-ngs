@@ -12,6 +12,7 @@ workflow WOMBAT {
     take:
     annotated_bcfs     // channel: [fid, bcf, csi]
     family_pedigrees   // channel: [fid, pedigree_file]
+    normalized_bcfs    // channel: [fid, bcf, csi]
     need_bcf2parquet   // map: [fid: boolean] - whether BCF2PARQUET is needed for each family
 
     main:
@@ -51,12 +52,13 @@ workflow WOMBAT {
         // For each Parquet file, create entries for each wombat config
         pywombat_input = all_parquet_files
             .combine(family_pedigrees, by: 0)  // Combine by fid to get pedigree
-            .map { fid, parquet, pedigree ->
+            .combine(normalized_bcfs, by: 0)   // Combine by fid to get normalized BCF
+            .map { fid, parquet, pedigree, norm_bcf, norm_csi ->
                 // Create a list of tuples, one for each wombat config
                 params.wombat_config_list.collect { config_file ->
                     def config_name = config_file.replaceAll(/\.ya?ml$/, '')
                     def config_path = file("${params.wombat_config_path}/${config_file}")
-                    tuple(fid, parquet, pedigree, config_path, config_name, params.vep_config_name)
+                    tuple(fid, parquet, pedigree, config_path, config_name, params.vep_config_name, norm_bcf, norm_csi)
                 }
             }
             .flatMap()  // Flatten the list of tuples into individual tuples

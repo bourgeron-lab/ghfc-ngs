@@ -203,14 +203,23 @@ workflow {
         
         // Get all available family pedigrees (existing + newly created)
         all_available_family_pedigrees_wombat = channels.existing_family_pedigrees.mix(family_pedigrees_output ?: Channel.empty())
-        
+
         // Filter for families that need Wombat
         wombat_pedigrees = all_available_family_pedigrees_wombat
-            .filter { fid, pedigree -> 
-                fid in analysis_plan.wombat.needed 
+            .filter { fid, pedigree ->
+                fid in analysis_plan.wombat.needed
             }
-        
-        WOMBAT(wombat_bcfs, wombat_pedigrees, analysis_plan.wombat.need_bcf2parquet)
+
+        // Get all available normalized BCFs (existing + newly created)
+        all_available_normalized_bcfs_wombat = channels.existing_normalized_bcfs.mix(normalized_bcfs_output ?: Channel.empty())
+
+        // Filter for families that need Wombat
+        wombat_normalized_bcfs = all_available_normalized_bcfs_wombat
+            .filter { fid, bcf, csi ->
+                fid in analysis_plan.wombat.needed
+            }
+
+        WOMBAT(wombat_bcfs, wombat_pedigrees, wombat_normalized_bcfs, analysis_plan.wombat.need_bcf2parquet)
         wombat_output = WOMBAT.out.wombat_outputs
     }
     
