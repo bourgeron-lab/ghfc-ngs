@@ -11,6 +11,13 @@ process PYWOMBAT {
 
     script:
     """
+    echo "===="
+    echo wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref}
+    echo "===="
+    which wombat
+    echo "==="
+    cat ${wombat_config}
+    echo "===="
     wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref}
     """
 }
