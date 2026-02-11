@@ -15,9 +15,11 @@ process PYWOMBAT {
     echo wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref}
     echo "===="
     which wombat
+    echo "===="
+    ls -alh /opt/conda/bin/wombat
     echo "==="
     cat ${wombat_config}
     echo "===="
-    wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref}
+    wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref} -v
     """
 }
