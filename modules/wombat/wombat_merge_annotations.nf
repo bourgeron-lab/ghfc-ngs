@@ -14,6 +14,6 @@ process WOMBAT_MERGE_ANNOTATIONS {
     wombat merge-annotations \
         --tsv ${filtered_tsv} \
         --annotations ${vep_annotations} \
-        -o ${fid}.rare.${vep_config_name}.annotated.${wombat_config_name}.tsv -v
+        -o ${fid}.rare.${vep_config_name}.annotated.${wombat_config_name} -v
     """
 }
