@@ -163,7 +163,8 @@ process ANNOTATE_ABERRATIONS {
   # Merge annotations with original data
   awk '{print NR "\\t" \$0}' data.bed | \
     sort \${SORT_OPTS} -k1,1n | \
-    awk 'BEGIN {
+    awk -F'\\t' 'BEGIN {
+      OFS="\\t";
       # Read annotations
       while((getline < "genic_symbol.txt") > 0) genic_sym[\$1]=\$2;
       while((getline < "genic_ensg.txt") > 0) genic_ensg[\$1]=\$2;
