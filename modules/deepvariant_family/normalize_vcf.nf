@@ -11,7 +11,10 @@ process NORMALIZE {
 
     tag "$fid"
 
-    publishDir "${params.data}/families/${fid}/vcfs", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/vcfs"
+    }, mode: 'copy'
 
     input:
     tuple val(fid), path(vcf), path(tbi)

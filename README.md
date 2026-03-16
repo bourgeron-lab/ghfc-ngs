@@ -397,21 +397,21 @@ max_time: "240.h"
 
 ### Smart File Detection
 
-The pipeline automatically detects existing files and skips unnecessary work:
+The pipeline automatically detects existing files and skips unnecessary work. All sample and family paths are resolved using the two-level shard scheme (`{S1}/{S2}` computed from the entity ID — see [Sharding scheme](#sharding-scheme)).
 
-- **CRAM files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram` (and `.crai`)
-- **Coverage bedgraph files**: `${data}/samples/${barcode}/sequences/${barcode}.by${bin}.bedgraph.gz` (and `.tbi`)
-- **Individual gVCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz` (and `.tbi`)
-- **VAF bedgraph files**: `${data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz` (and `.tbi`)
-- **Normalized family BCF files**: `${data}/families/${FID}/vcfs/${FID}.norm.bcf` (and `.csi`)
-- **Family pedigree files**: `${data}/families/${FID}/${FID}.pedigree.tsv`
-- **Rare variant VCF files**: `${data}/families/${FID}/vcfs/${FID}.rare.vcf.gz` (and `.tbi`)
-- **Common variant BCF files**: `${data}/families/${FID}/vcfs/${FID}.common.bcf` and `${FID}.common_gt.bcf` (with `.csi`)
-- **VEP annotated VCF files**: `${data}/families/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz` (and `.tbi`)
-- **Fully annotated BCF files**: `${data}/families/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf` (and `.csi`)
-- **Wombat TSV files**: `${data}/families/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
-- **WisecondorX NPZ files**: `${data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz`
-- **WisecondorX aberrations**: `${data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
+- **CRAM files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.${ref_name}.cram` (and `.crai`)
+- **Coverage bedgraph files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.by${bin}.bedgraph.gz` (and `.tbi`)
+- **Individual gVCF files**: `${data}/samples/{S1}/{S2}/${barcode}/deepvariant/${barcode}.g.vcf.gz` (and `.tbi`)
+- **VAF bedgraph files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.vaf.bedgraph.gz` (and `.tbi`)
+- **Normalized family BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.norm.bcf` (and `.csi`)
+- **Family pedigree files**: `${data}/families/{S1}/{S2}/${FID}/${FID}.pedigree.tsv`
+- **Rare variant VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.vcf.gz` (and `.tbi`)
+- **Common variant BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.common.bcf` and `${FID}.common_gt.bcf` (with `.csi`)
+- **VEP annotated VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz` (and `.tbi`)
+- **Fully annotated BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf` (and `.csi`)
+- **Wombat TSV files**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
+- **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.npz`
+- **WisecondorX aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
 - **Cohort BCF files**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf` (and `.csi`)
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
@@ -419,6 +419,18 @@ If these files exist with their indices (where applicable), the corresponding st
 ## Input Data Structure
 
 The pipeline expects the following directory structure:
+
+### Sharding scheme
+
+`samples/` and `families/` use a **two-level sharding** scheme to avoid large flat directories. Given an entity ID:
+
+1. Strip all `-`, `.`, and `_` characters.
+2. **Shard 1** = last character of the stripped ID (uppercased).
+3. **Shard 2** = second-to-last character (uppercased).
+
+Examples: `C000EZJ` → `samples/J/Z/C000EZJ/`; `C0733-011-068` → `families/8/6/C0733-011-068/`
+
+Cohort directories are **not** sharded.
 
 ```
 data/
@@ -431,52 +443,54 @@ data/
 │   ├── SAMPLE1.cram
 │   ├── SAMPLE1.cram.crai
 │   └── ...
-├── samples/                       # Sample-specific output directories
-│   ├── BC001/                     # Sample barcode directory
-│   │   ├── sequences/             # CRAM and bedgraph files
-│   │   │   ├── BC001.GRCh38_GIABv3.cram
-│   │   │   ├── BC001.GRCh38_GIABv3.cram.crai
-│   │   │   ├── BC001.by1000.bedgraph.gz        # Coverage bedgraph
-│   │   │   ├── BC001.by1000.bedgraph.gz.tbi
-│   │   │   ├── BC001.vaf.bedgraph.gz           # VAF bedgraph
-│   │   │   └── BC001.vaf.bedgraph.gz.tbi
-│   │   ├── deepvariant/           # DeepVariant outputs
-│   │   │   ├── BC001.g.vcf.gz
-│   │   │   ├── BC001.g.vcf.gz.tbi
-│   │   │   ├── BC001.vcf.gz
-│   │   │   └── BC001.vcf.gz.tbi
-│   │   └── svs/                   # SV calling outputs
-│   │       └── wisecondorx/
-│   │           ├── BC001.npz
-│   │           ├── BC001_aberrations.bed
-│   │           └── BC001_aberrations.chr.bed
-│   └── ...
-├── families/                      # Family-specific output directories
-│   ├── FID001/                    # Family directory
-│   │   ├── FID001.pedigree.tsv    # Family-specific pedigree
-│   │   ├── vcfs/
-│   │   │   ├── FID001.norm.bcf                                      # Normalized family BCF
-│   │   │   ├── FID001.norm.bcf.csi
-│   │   │   ├── FID001.rare.vcf.gz                                   # Rare variants (pre-VEP)
-│   │   │   ├── FID001.rare.vcf.gz.tbi
-│   │   │   ├── FID001.common.bcf                                    # Common variants
-│   │   │   ├── FID001.common.bcf.csi
-│   │   │   ├── FID001.common_gt.bcf                                 # Common variants (GT only)
-│   │   │   ├── FID001.common_gt.bcf.csi
-│   │   │   ├── FID001.rare.ensembl_vep_115.vcf.gz                   # VEP annotated
-│   │   │   ├── FID001.rare.ensembl_vep_115.vcf.gz.tbi
-│   │   │   ├── FID001.rare.ensembl_vep_115.annotated.bcf            # Fully annotated
-│   │   │   └── FID001.rare.ensembl_vep_115.annotated.bcf.csi
-│   │   ├── wombat/
-│   │   │   ├── FID001.rare.ensembl_vep_115.annotated.tsv.gz                        # BCF to TSV
-│   │   │   ├── FID001.rare.ensembl_vep_115.annotated.de_novo_mutations.tsv         # Wombat filtered
-│   │   │   └── FID001.rare.ensembl_vep_115.annotated.rare_variants_high_impact.tsv
-│   │   └── svs/
-│   │       └── wisecondorx/
-│   │           ├── FID001_aberrations.bed           # Family merged
-│   │           └── FID001_aberrations.annotated.bed # Gene annotated
-│   └── ...
-├── cohorts/                       # Cohort-specific output directories
+├── samples/                       # Sample-specific output directories (sharded)
+│   └── {S1}/                      # Shard level 1 (single character)
+│       └── {S2}/                  # Shard level 2 (single character)
+│           └── BC001/             # Sample barcode directory
+│               ├── sequences/     # CRAM and bedgraph files
+│               │   ├── BC001.GRCh38_GIABv3.cram
+│               │   ├── BC001.GRCh38_GIABv3.cram.crai
+│               │   ├── BC001.by1000.bedgraph.gz        # Coverage bedgraph
+│               │   ├── BC001.by1000.bedgraph.gz.tbi
+│               │   ├── BC001.vaf.bedgraph.gz           # VAF bedgraph
+│               │   └── BC001.vaf.bedgraph.gz.tbi
+│               ├── deepvariant/   # DeepVariant outputs
+│               │   ├── BC001.g.vcf.gz
+│               │   ├── BC001.g.vcf.gz.tbi
+│               │   ├── BC001.vcf.gz
+│               │   └── BC001.vcf.gz.tbi
+│               └── svs/           # SV calling outputs
+│                   └── wisecondorx/
+│                       ├── BC001.npz
+│                       ├── BC001_aberrations.bed
+│                       └── BC001_aberrations.chr.bed
+├── families/                      # Family-specific output directories (sharded)
+│   └── {S1}/                      # Shard level 1 (single character)
+│       └── {S2}/                  # Shard level 2 (single character)
+│           └── FID001/            # Family directory
+│               ├── FID001.pedigree.tsv    # Family-specific pedigree
+│               ├── vcfs/
+│               │   ├── FID001.norm.bcf                                      # Normalized family BCF
+│               │   ├── FID001.norm.bcf.csi
+│               │   ├── FID001.rare.vcf.gz                                   # Rare variants (pre-VEP)
+│               │   ├── FID001.rare.vcf.gz.tbi
+│               │   ├── FID001.common.bcf                                    # Common variants
+│               │   ├── FID001.common.bcf.csi
+│               │   ├── FID001.common_gt.bcf                                 # Common variants (GT only)
+│               │   ├── FID001.common_gt.bcf.csi
+│               │   ├── FID001.rare.ensembl_vep_115.vcf.gz                   # VEP annotated
+│               │   ├── FID001.rare.ensembl_vep_115.vcf.gz.tbi
+│               │   ├── FID001.rare.ensembl_vep_115.annotated.bcf            # Fully annotated
+│               │   └── FID001.rare.ensembl_vep_115.annotated.bcf.csi
+│               ├── wombat/
+│               │   ├── FID001.rare.ensembl_vep_115.annotated.tsv.gz                        # BCF to TSV
+│               │   ├── FID001.rare.ensembl_vep_115.annotated.de_novo_mutations.tsv         # Wombat filtered
+│               │   └── FID001.rare.ensembl_vep_115.annotated.rare_variants_high_impact.tsv
+│               └── svs/
+│                   └── wisecondorx/
+│                       ├── FID001_aberrations.bed           # Family merged
+│                       └── FID001_aberrations.annotated.bed # Gene annotated
+├── cohorts/                       # Cohort-specific output directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── vcfs/
 │       │   ├── COHORT_NAME.common_gt.bcf            # Cohort common variants
@@ -518,40 +532,42 @@ Where:
 
 The pipeline generates:
 
+All sample and family output paths include two shard levels (`{S1}/{S2}`) computed from the entity ID. See [Sharding scheme](#sharding-scheme).
+
 ### Alignment Outputs
 
-- **Final CRAM files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram`
-- **CRAM indices**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.cram.crai`
-- **Bedgraph files**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.bedgraph.gz`
-- **Bedgraph indices**: `${data}/samples/${barcode}/sequences/${barcode}.${ref_name}.bedgraph.gz.tbi`
+- **Final CRAM files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.${ref_name}.cram`
+- **CRAM indices**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.${ref_name}.cram.crai`
+- **Bedgraph files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.by${bin}.bedgraph.gz`
+- **Bedgraph indices**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.by${bin}.bedgraph.gz.tbi`
 
 ### DeepVariant Sample Outputs
 
-- **Individual VCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.vcf.gz`
-- **Individual gVCF files**: `${data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz`
+- **Individual VCF files**: `${data}/samples/{S1}/{S2}/${barcode}/deepvariant/${barcode}.vcf.gz`
+- **Individual gVCF files**: `${data}/samples/{S1}/{S2}/${barcode}/deepvariant/${barcode}.g.vcf.gz`
 - **VCF indices**: `*.vcf.gz.tbi` and `*.g.vcf.gz.tbi`
-- **VAF bedgraph files**: `${data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz`
-- **VAF bedgraph indices**: `${data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi`
+- **VAF bedgraph files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.vaf.bedgraph.gz`
+- **VAF bedgraph indices**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi`
 
 ### DeepVariant Family Outputs
 
-- **Normalized BCF files**: `${data}/families/${FID}/vcfs/${FID}.norm.bcf`
-- **Normalized BCF indices**: `${data}/families/${FID}/vcfs/${FID}.norm.bcf.csi`
-- **Family pedigree files**: `${data}/families/${FID}/${FID}.pedigree.tsv`
+- **Normalized BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.norm.bcf`
+- **Normalized BCF indices**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.norm.bcf.csi`
+- **Family pedigree files**: `${data}/families/{S1}/{S2}/${FID}/${FID}.pedigree.tsv`
 
 ### Annotation Outputs
 
-- **Rare variant VCF files** (pre-VEP): `${data}/families/${FID}/vcfs/${FID}.rare.vcf.gz`
-- **Common variant BCF files**: `${data}/families/${FID}/vcfs/${FID}.common.bcf`
-- **Common variant BCF (GT only)**: `${data}/families/${FID}/vcfs/${FID}.common_gt.bcf`
-- **VEP annotated rare VCF files**: `${data}/families/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz`
-- **Fully annotated BCF files**: `${data}/families/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf`
+- **Rare variant VCF files** (pre-VEP): `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.vcf.gz`
+- **Common variant BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.common.bcf`
+- **Common variant BCF (GT only)**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.common_gt.bcf`
+- **VEP annotated rare VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz`
+- **Fully annotated BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf`
 - **All indices**: `*.tbi` for VCF.gz and `*.csi` for BCF files
 
 ### Wombat Outputs
 
-- **BCF to TSV conversion**: `${data}/families/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.tsv.gz`
-- **PyWombat filtered results**: `${data}/families/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
+- **BCF to TSV conversion**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.tsv.gz`
+- **PyWombat filtered results**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
   - One file per configuration in `wombat_config_list`
 
 ### SNVs Cohort Outputs
@@ -562,11 +578,11 @@ The pipeline generates:
 
 ### WisecondorX Outputs
 
-- **Individual NPZ files**: `${data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz`
-- **Individual aberrations**: `${data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed`
-- **Individual aberrations (chr format)**: `${data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
-- **Family merged aberrations**: `${data}/families/${FID}/svs/wisecondorx/${FID}_aberrations.bed`
-- **Family annotated aberrations**: `${data}/families/${FID}/svs/wisecondorx/${FID}_aberrations.annotated.bed`
+- **Individual NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.npz`
+- **Individual aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed`
+- **Individual aberrations (chr format)**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
+- **Family merged aberrations**: `${data}/families/{S1}/{S2}/${FID}/svs/wisecondorx/${FID}_aberrations.bed`
+- **Family annotated aberrations**: `${data}/families/{S1}/{S2}/${FID}/svs/wisecondorx/${FID}_aberrations.annotated.bed`
 - **Cohort merged aberrations**: `${data}/cohorts/${cohort_name}/svs/wisecondorx/${cohort_name}_aberrations.bed`
 
 ### Extractor Outputs

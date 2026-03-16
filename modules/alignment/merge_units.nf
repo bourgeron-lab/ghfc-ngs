@@ -2,7 +2,10 @@ process MERGE_UNITS {
     
     tag "$barcode"
     
-    publishDir "${data_dir}/samples/${barcode}/sequences", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(barcode)
+        "${data_dir}/samples/${s1}/${s2}/${barcode}/sequences"
+    }, mode: 'copy'
     
     input:
     tuple val(barcode), path(crams), path(crais)

@@ -1,7 +1,10 @@
 process PROCESS_FAM_BCF {
     tag "${fid}_${original_filename}"
     
-    publishDir "${params.data}/families/${fid}/extractor", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/extractor"
+    }, mode: 'copy'
     
     input:
     tuple val(fid), val(original_filename), path(extractor_tsv), path(norm_bcf), path(norm_bcf_csi)

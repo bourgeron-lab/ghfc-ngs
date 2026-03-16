@@ -1,7 +1,10 @@
 process PROCESS_IND_GVCF {
     tag "${barcode}_${original_filename}"
     
-    publishDir "${params.data}/samples/${barcode}/extractor", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(barcode)
+        "${params.data}/samples/${s1}/${s2}/${barcode}/extractor"
+    }, mode: 'copy'
     
     input:
     tuple val(barcode), val(original_filename), path(extractor_tsv), path(gvcf), path(gvcf_tbi)

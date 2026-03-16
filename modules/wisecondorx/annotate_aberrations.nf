@@ -29,7 +29,10 @@ process ANNOTATE_ABERRATIONS {
 
   tag "${fid}"
 
-  publishDir "${params.data}/families/${fid}/svs/wisecondorx",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(fid)
+    "${params.data}/families/${s1}/${s2}/${fid}/svs/wisecondorx"
+  },
     mode: 'copy',
     pattern: "${fid}_aberrations.annotated.bed"
 

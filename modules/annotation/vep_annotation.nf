@@ -28,7 +28,10 @@ process VEP_ANNOTATION {
 
   tag "$fid"
 
-  publishDir "${params.data}/families/${fid}/vcfs",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(fid)
+    "${params.data}/families/${s1}/${s2}/${fid}/vcfs"
+  },
     mode: 'copy',
     pattern: "*.${params.vep_config_name}.vcf.gz*"
 

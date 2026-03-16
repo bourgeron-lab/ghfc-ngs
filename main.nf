@@ -312,7 +312,7 @@ workflow {
         
         // Create channel for wombat bcf2parquet outputs (for PROCESS_FAM_TSV)
         wombat_parquets_for_extractor = Channel
-            .fromPath("${params.data}/families/*/wombat/*.rare.${params.vep_config_name}.annotated.parquet")
+            .fromPath("${params.data}/families/*/*/*/wombat/*.rare.${params.vep_config_name}.annotated.parquet")
             .map { parquet ->
                 def fid = parquet.parent.parent.name
                 tuple(fid, parquet)
@@ -400,9 +400,10 @@ def createAnalysisPlan(families, individuals, family_members) {
     // Check existing family outputs (normalized BCF and pedigree - all part of deepvariant_family)
     // Note: {FID}.vcf.gz is intermediate (GLnexus output) and not published
     families.each { fid ->
-        def norm_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf"
-        def norm_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.norm.bcf.csi"
-        def pedigree_path = "${params.data}/families/${fid}/${fid}.pedigree.tsv"
+        def fam_dir = Sharding.getFamilyDir(params.data, fid)
+        def norm_bcf_path = "${fam_dir}/vcfs/${fid}.norm.bcf"
+        def norm_csi_path = "${fam_dir}/vcfs/${fid}.norm.bcf.csi"
+        def pedigree_path = "${fam_dir}/${fid}.pedigree.tsv"
         
         if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() &&
             new File(pedigree_path).exists()) {
@@ -415,16 +416,17 @@ def createAnalysisPlan(families, individuals, family_members) {
     // Check existing annotation outputs (rare/common VCF.gz/BCFs, common_gt BCF, VEP VCF.gz, and final annotated BCF - all part of annotation)
     // Note: {FID}.gnomad.bcf is intermediate and not published
     families.each { fid ->
-        def rare_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz"
-        def rare_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz.tbi"
-        def common_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf"
-        def common_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common.bcf.csi"
-        def common_gt_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf"
-        def common_gt_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi"
-        def vep_vcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz"
-        def vep_tbi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
-        def annotated_bcf_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf"
-        def annotated_csi_path = "${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi"
+        def fam_dir = Sharding.getFamilyDir(params.data, fid)
+        def rare_vcf_path = "${fam_dir}/vcfs/${fid}.rare.vcf.gz"
+        def rare_tbi_path = "${fam_dir}/vcfs/${fid}.rare.vcf.gz.tbi"
+        def common_bcf_path = "${fam_dir}/vcfs/${fid}.common.bcf"
+        def common_csi_path = "${fam_dir}/vcfs/${fid}.common.bcf.csi"
+        def common_gt_bcf_path = "${fam_dir}/vcfs/${fid}.common_gt.bcf"
+        def common_gt_csi_path = "${fam_dir}/vcfs/${fid}.common_gt.bcf.csi"
+        def vep_vcf_path = "${fam_dir}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz"
+        def vep_tbi_path = "${fam_dir}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi"
+        def annotated_bcf_path = "${fam_dir}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf"
+        def annotated_csi_path = "${fam_dir}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi"
         
         if (new File(rare_vcf_path).exists() && new File(rare_tbi_path).exists() &&
             new File(common_bcf_path).exists() && new File(common_csi_path).exists() &&
@@ -470,10 +472,11 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing individual gVCF files and VAF bedgraphs (both outputs of deepvariant_sample)
     individuals.each { barcode ->
-        def gvcf_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz"
-        def gvcf_tbi_path = "${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz.tbi"
-        def vaf_bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz"
-        def vaf_bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi"
+        def smp_dir = Sharding.getSampleDir(params.data, barcode)
+        def gvcf_path = "${smp_dir}/deepvariant/${barcode}.g.vcf.gz"
+        def gvcf_tbi_path = "${smp_dir}/deepvariant/${barcode}.g.vcf.gz.tbi"
+        def vaf_bedgraph_path = "${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz"
+        def vaf_bedgraph_tbi_path = "${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz.tbi"
         
         if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists() && 
             new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists()) {
@@ -489,10 +492,11 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing CRAM and bedgraph files (both produced by alignment workflow)
     individuals.each { barcode ->
-        def cram_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram"
-        def crai_path = "${params.data}/samples/${barcode}/sequences/${barcode}.${params.ref_name}.cram.crai"
-        def bedgraph_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
-        def bedgraph_tbi_path = "${params.data}/samples/${barcode}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
+        def smp_dir = Sharding.getSampleDir(params.data, barcode)
+        def cram_path = "${smp_dir}/sequences/${barcode}.${params.ref_name}.cram"
+        def crai_path = "${smp_dir}/sequences/${barcode}.${params.ref_name}.cram.crai"
+        def bedgraph_path = "${smp_dir}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
+        def bedgraph_tbi_path = "${smp_dir}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
         
         if (new File(cram_path).exists() && new File(crai_path).exists() &&
             new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
@@ -507,9 +511,10 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing WisecondorX NPZ and predict files
     individuals.each { barcode ->
-        def npz_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}.npz"
-        def predict_bed_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed"
-        def chr_bed_path = "${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed"
+        def smp_dir = Sharding.getSampleDir(params.data, barcode)
+        def npz_path = "${smp_dir}/svs/wisecondorx/${barcode}.npz"
+        def predict_bed_path = "${smp_dir}/svs/wisecondorx/${barcode}_aberrations.bed"
+        def chr_bed_path = "${smp_dir}/svs/wisecondorx/${barcode}_aberrations.chr.bed"
         
         def npz_exists = new File(npz_path).exists()
         def predict_exists = new File(predict_bed_path).exists()
@@ -534,7 +539,7 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing WisecondorX family aberrations files
     families.each { fid ->
-        def family_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.bed"
+        def family_aberrations_path = "${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.bed"
         def family_aberrations_exists = new File(family_aberrations_path).exists()
         
         if (!family_aberrations_exists) {
@@ -552,12 +557,13 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing WisecondorX annotated family aberrations files
     families.each { fid ->
-        def annotated_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
+        def fam_dir = Sharding.getFamilyDir(params.data, fid)
+        def annotated_aberrations_path = "${fam_dir}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
         def annotated_aberrations_exists = new File(annotated_aberrations_path).exists()
-        
+
         if (!annotated_aberrations_exists) {
             // Check if family has or will have merged aberrations
-            def family_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.bed"
+            def family_aberrations_path = "${fam_dir}/svs/wisecondorx/${fid}_aberrations.bed"
             def has_family_aberrations = new File(family_aberrations_path).exists() || plan.wisecondorx.need_family_merge[fid] == true
             
             if (has_family_aberrations) {
@@ -573,7 +579,7 @@ def createAnalysisPlan(families, individuals, family_members) {
     if (!cohort_aberrations_exists) {
         // Check if any families have or will have annotated family aberrations
         def cohort_has_families = families.any { fid ->
-            def annotated_family_aberrations_path = "${params.data}/families/${fid}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
+            def annotated_family_aberrations_path = "${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
             new File(annotated_family_aberrations_path).exists() || plan.wisecondorx.need_family_annotate[fid] == true
         }
         
@@ -584,8 +590,9 @@ def createAnalysisPlan(families, individuals, family_members) {
     
     // Check existing Wombat files
     families.each { fid ->
+        def fam_dir = Sharding.getFamilyDir(params.data, fid)
         // Check if BCF2PARQUET output exists
-        def bcf2parquet_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet"
+        def bcf2parquet_output_path = "${fam_dir}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet"
         def bcf2parquet_exists = new File(bcf2parquet_output_path).exists()
 
         // Check if PYWOMBAT outputs exist (need to check for all configs if defined)
@@ -594,7 +601,7 @@ def createAnalysisPlan(families, individuals, family_members) {
             // Check if all PYWOMBAT outputs exist
             pywombat_complete = params.wombat_config_list.every { config_file ->
                 def config_name = config_file.replaceAll(/\.ya?ml$/, '')
-                def pywombat_output_path = "${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv"
+                def pywombat_output_path = "${fam_dir}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv"
                 new File(pywombat_output_path).exists()
             }
         }
@@ -755,7 +762,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing CRAM files
     channels.existing_crams = Channel
-        .fromPath("${params.data}/samples/*/sequences/*.${params.ref_name}.cram")
+        .fromPath("${params.data}/samples/*/*/*/sequences/*.${params.ref_name}.cram")
         .map { cram ->
             def barcode = cram.name.tokenize('.')[0]
             def crai_path = "${cram}.crai"
@@ -770,7 +777,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing gVCF files
     channels.existing_gvcfs = Channel
-        .fromPath("${params.data}/samples/*/deepvariant/*.g.vcf.gz")
+        .fromPath("${params.data}/samples/*/*/*/deepvariant/*.g.vcf.gz")
         .map { gvcf ->
             def barcode = gvcf.name.tokenize('.')[0]
             def tbi_path = "${gvcf}.tbi"
@@ -785,7 +792,7 @@ def createChannels(analysis_plan) {
 
     // Create channel for existing individual VCF files (not gVCF)
     channels.existing_vcfs = Channel
-        .fromPath("${params.data}/samples/*/deepvariant/*.vcf.gz")
+        .fromPath("${params.data}/samples/*/*/*/deepvariant/*.vcf.gz")
         .filter { vcf -> !vcf.name.contains('.g.vcf.gz') }  // Exclude gVCF files
         .map { vcf ->
             def barcode = vcf.name.tokenize('.')[0]
@@ -801,7 +808,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing family VCF files
     channels.existing_family_vcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.vcf.gz")
+        .fromPath("${params.data}/families/*/*/*/vcfs/*.vcf.gz")
         .filter { vcf -> !vcf.name.contains(params.vep_config_name) && !vcf.name.contains('.norm.') }  // Exclude VEP annotated and normalized files
         .map { vcf ->
             def fid = vcf.parent.parent.name  // Get family ID from path
@@ -817,7 +824,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing normalized BCF files
     channels.existing_normalized_bcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.norm.bcf")
+        .fromPath("${params.data}/families/*/*/*/vcfs/*.norm.bcf")
         .map { bcf ->
             def fid = bcf.parent.parent.name  // Get family ID from path
             def csi_path = "${bcf}.csi"
@@ -832,7 +839,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing family pedigree files
     channels.existing_family_pedigrees = Channel
-        .fromPath("${params.data}/families/*/*.pedigree.tsv")
+        .fromPath("${params.data}/families/*/*/*/*.pedigree.tsv")
         .map { pedigree ->
             def fid = pedigree.parent.name  // Get family ID from path
             [fid, pedigree]
@@ -843,7 +850,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing common filtered BCF files (output from annotation, used by snvs_cohort)
     channels.existing_common_filtered_bcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.common_gt.bcf")
+        .fromPath("${params.data}/families/*/*/*/vcfs/*.common_gt.bcf")
         .map { bcf ->
             def fid = bcf.parent.parent.name  // Get family ID from path
             def csi_path = "${bcf}.csi"
@@ -858,7 +865,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing annotated BCF files (output from annotation, used by wombat)
     channels.existing_annotated_bcfs = Channel
-        .fromPath("${params.data}/families/*/vcfs/*.rare.${params.vep_config_name}.annotated.bcf")
+        .fromPath("${params.data}/families/*/*/*/vcfs/*.rare.${params.vep_config_name}.annotated.bcf")
         .map { bcf ->
             def fid = bcf.parent.parent.name  // Get family ID from path
             def csi_path = "${bcf}.csi"
@@ -878,7 +885,7 @@ def createChannels(analysis_plan) {
                 def config_name = config_file.replaceAll(/\.ya?ml$/, '')
                 // For each config, create entries for each family that has it
                 analysis_plan.wombat.existing.collect { fid ->
-                    def wombat_file = file("${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv")
+                    def wombat_file = file("${Sharding.getFamilyDir(params.data, fid)}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv")
                     if (wombat_file.exists()) {
                         tuple(fid, config_name, wombat_file)
                     } else {
@@ -893,7 +900,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing NPZ files (output from NPZ_CONVERT, used by predict)
     channels.existing_npz_files = Channel
-        .fromPath("${params.data}/samples/*/svs/wisecondorx/*.npz")
+        .fromPath("${params.data}/samples/*/*/*/svs/wisecondorx/*.npz")
         .map { npz ->
             def barcode = npz.parent.parent.parent.name  // Get barcode from path
             [barcode, npz]

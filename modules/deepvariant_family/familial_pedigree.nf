@@ -27,7 +27,10 @@ process FAMILIAL_PEDIGREE {
 
   tag "$fid"
 
-  publishDir "${params.data}/families/${fid}",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(fid)
+    "${params.data}/families/${s1}/${s2}/${fid}"
+  },
     mode: 'copy',
     pattern: "${fid}.pedigree.tsv"
 

@@ -26,7 +26,10 @@ process CONVERT_NORM_VCF_TO_BCF {
     
     tag "$fid"
     
-    publishDir "${params.data}/families/${fid}/vcfs",
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/vcfs"
+    },
         mode: 'copy',
         pattern: "${fid}.norm.bcf*"
     

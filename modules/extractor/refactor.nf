@@ -1,14 +1,14 @@
 process REFACTOR {
     tag "${original_filename}"
     
-    publishDir "${params.data}", mode: 'copy', pattern: "families/*/*/*.tsv"
-    publishDir "${params.data}", mode: 'copy', pattern: "samples/*/*/*.tsv"
+    publishDir "${params.data}", mode: 'copy', pattern: "families/*/*/*/extractor/*.tsv"
+    publishDir "${params.data}", mode: 'copy', pattern: "samples/*/*/*/extractor/*.tsv"
     
     input:
     tuple val(original_filename), path(input_tsv), path(pedigree), path(chain_file)
     
     output:
-    tuple val(original_filename), path("families/*/*/*.tsv"), path("samples/*/*/*.tsv"), emit: refactored_files
+    tuple val(original_filename), path("families/*/*/*/extractor/*.tsv"), path("samples/*/*/*/extractor/*.tsv"), emit: refactored_files
     tuple val(original_filename), path("family_list.txt"), emit: family_list
     tuple val(original_filename), path("sample_list.txt"), emit: sample_list
     
@@ -17,7 +17,14 @@ process REFACTOR {
     #!/usr/bin/env python3
     import pandas as pd
     import os
+    import re
     from pyliftover import LiftOver
+
+    def get_shards(entity_id):
+        stripped = re.sub(r'[-._]', '', entity_id)
+        shard1 = stripped[-1].upper()
+        shard2 = stripped[-2].upper()
+        return shard1, shard2
     
     # Column name mappings (priority order)
     CHR_COLS = ['chr', 'chrom', '#chrom', 'chromosome']
@@ -168,7 +175,8 @@ process REFACTOR {
         family_df = family_df[['chr', 'position', 'ref', 'alt', 'sample_id', 'paternal_id', 'maternal_id']]
         
         # Create family output
-        family_dir = f"families/{family_id}/extractor"
+        s1, s2 = get_shards(family_id)
+        family_dir = f"families/{s1}/{s2}/{family_id}/extractor"
         os.makedirs(family_dir, exist_ok=True)
         family_output = f"{family_dir}/{family_id}.{original_filename}.tsv"
         family_df.to_csv(family_output, sep='\\t', index=False)
@@ -177,7 +185,8 @@ process REFACTOR {
         # Create sample outputs
         for sample_id in family_df['sample_id'].unique():
             sample_df = family_df[family_df['sample_id'] == sample_id].copy()
-            sample_dir = f"samples/{sample_id}/extractor"
+            s1, s2 = get_shards(sample_id)
+            sample_dir = f"samples/{s1}/{s2}/{sample_id}/extractor"
             os.makedirs(sample_dir, exist_ok=True)
             sample_output = f"{sample_dir}/{sample_id}.{original_filename}.tsv"
             sample_df.to_csv(sample_output, sep='\\t', index=False)

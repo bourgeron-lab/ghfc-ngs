@@ -1,7 +1,10 @@
 process WOMBAT_MERGE_ANNOTATIONS {
     tag "${fid}-${wombat_config_name}"
 
-    publishDir "${params.data}/families/${fid}/wombat", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/wombat"
+    }, mode: 'copy'
 
     input:
     tuple val(fid), val(wombat_config_name), val(vep_config_name), path(filtered_tsv), path(vep_annotations)

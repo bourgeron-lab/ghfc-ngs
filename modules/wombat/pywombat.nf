@@ -1,7 +1,10 @@
 process PYWOMBAT {
     tag "${fid}-${wombat_config_name}"
     
-    publishDir "${params.data}/families/${fid}/wombat", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/wombat"
+    }, mode: 'copy'
     
     input:
     tuple val(fid), path(annotated_parquet), path(pedigree), path(wombat_config), val(wombat_config_name), val(vep_config_name), path(norm_bcf), path(norm_csi)

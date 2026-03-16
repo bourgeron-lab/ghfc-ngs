@@ -25,7 +25,10 @@ process REFORMAT_CHR {
 
   tag "${barcode}"
 
-  publishDir "${params.data}/samples/${barcode}/svs/wisecondorx",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(barcode)
+    "${params.data}/samples/${s1}/${s2}/${barcode}/svs/wisecondorx"
+  },
     mode: 'copy',
     pattern: "${barcode}_aberrations.chr.bed"
 

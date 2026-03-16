@@ -30,7 +30,10 @@ process GNOMAD_FREQ_FILTER {
 
   tag "$fid"
 
-  publishDir "${params.data}/families/${fid}/vcfs",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(fid)
+    "${params.data}/families/${s1}/${s2}/${fid}/vcfs"
+  },
     mode: 'copy',
     pattern: "${fid}.{rare.vcf.gz*,common.bcf*}"
 

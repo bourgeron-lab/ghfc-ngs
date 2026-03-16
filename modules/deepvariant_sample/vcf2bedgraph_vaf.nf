@@ -26,7 +26,10 @@ process VCF2BEDGRAPH_VAF {
 
   tag "$barcode"
 
-  publishDir "${params.data}/samples/${barcode}/sequences",
+  publishDir {
+    def (s1, s2) = Sharding.getShards(barcode)
+    "${params.data}/samples/${s1}/${s2}/${barcode}/sequences"
+  },
     mode: 'copy',
     pattern: "${barcode}.vaf.bedgraph.gz*"
 

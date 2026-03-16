@@ -1,7 +1,10 @@
 process NPZ_CONVERT {
     tag "${barcode}"
     
-    publishDir "${params.data}/samples/${barcode}/svs/wisecondorx", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(barcode)
+        "${params.data}/samples/${s1}/${s2}/${barcode}/svs/wisecondorx"
+    }, mode: 'copy'
     
     input:
     tuple val(barcode), path(cram), path(crai), path(ref)

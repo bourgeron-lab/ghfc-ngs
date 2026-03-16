@@ -1,7 +1,10 @@
 process FAM_AGGREGATE {
     tag "${fid}_${original_filename}"
     
-    publishDir "${params.data}/families/${fid}/extractor", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/extractor"
+    }, mode: 'copy'
     
     input:
     tuple val(fid), val(original_filename), path(extractor_tsv), path(fam_tsv_found), path(fam_tsv_notfound), path(fam_bcf_found), path(fam_bcf_notfound), path(ind_gvcf_files)

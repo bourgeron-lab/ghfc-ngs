@@ -2,8 +2,14 @@ process POSTPROCESS_VARIANTS {
     
     tag "$barcode"
     
-    publishDir "${params.data}/samples/${barcode}/deepvariant", pattern: "${barcode}.vcf.gz*", mode: 'copy'
-    publishDir "${params.data}/samples/${barcode}/deepvariant", pattern: "${barcode}.g.vcf.gz*", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(barcode)
+        "${params.data}/samples/${s1}/${s2}/${barcode}/deepvariant"
+    }, pattern: "${barcode}.vcf.gz*", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(barcode)
+        "${params.data}/samples/${s1}/${s2}/${barcode}/deepvariant"
+    }, pattern: "${barcode}.g.vcf.gz*", mode: 'copy'
     
     input:
     tuple val(barcode), path(called_variants), path(gvcf_records), path(call_variant_outputs)

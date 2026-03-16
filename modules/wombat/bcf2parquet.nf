@@ -1,7 +1,10 @@
 process BCF2PARQUET {
     tag "${fid}"
 
-    publishDir "${params.data}/families/${fid}/wombat", mode: 'copy'
+    publishDir {
+        def (s1, s2) = Sharding.getShards(fid)
+        "${params.data}/families/${s1}/${s2}/${fid}/wombat"
+    }, mode: 'copy'
 
     input:
     tuple val(fid), path(annotated_bcf), path(annotated_csi), val(vep_config_name)
