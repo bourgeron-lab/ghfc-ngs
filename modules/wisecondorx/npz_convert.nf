@@ -10,10 +10,10 @@ process NPZ_CONVERT {
     tuple val(barcode), path(cram), path(crai), path(ref)
     
     output:
-    tuple val(barcode), path("${barcode}.npz")
-    
+    tuple val(barcode), path("${barcode}.${params.wisecondorx_binsize}.npz")
+
     script:
     """
-    WisecondorX convert ${cram} ${barcode}.npz --reference ${ref}
+    wisecondorx convert ${cram} ${barcode}.${params.wisecondorx_binsize}.npz --reference ${ref} --binsize ${params.wisecondorx_binsize}
     """
 }

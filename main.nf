@@ -512,7 +512,7 @@ def createAnalysisPlan(families, individuals, family_members) {
     // Check existing WisecondorX NPZ and predict files
     individuals.each { barcode ->
         def smp_dir = Sharding.getSampleDir(params.data, barcode)
-        def npz_path = "${smp_dir}/svs/wisecondorx/${barcode}.npz"
+        def npz_path = "${smp_dir}/svs/wisecondorx/${barcode}.${params.wisecondorx_binsize}.npz"
         def predict_bed_path = "${smp_dir}/svs/wisecondorx/${barcode}_aberrations.bed"
         def chr_bed_path = "${smp_dir}/svs/wisecondorx/${barcode}_aberrations.chr.bed"
         

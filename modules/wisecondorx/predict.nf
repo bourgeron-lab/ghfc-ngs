@@ -10,15 +10,14 @@ process PREDICT {
     tuple val(barcode), path(npz), path(reference)
     
     output:
-    tuple val(barcode), 
-          path("${barcode}_aberrations.bed"), 
-          path("${barcode}_statistics.txt"), 
-          path("${barcode}_segments.bed"), 
-          path("${barcode}_bins.bed"), 
-          path("${barcode}.plots/*.png")
-    
+    tuple val(barcode),
+          path("${barcode}_aberrations.bed"),
+          path("${barcode}_statistics.txt"),
+          path("${barcode}_segments.bed"),
+          path("${barcode}_bins.bed")
+
     script:
     """
-    WisecondorX predict ${npz} ${reference} ${barcode} --plot --bed
+    wisecondorx predict ${npz} ${reference} ${barcode} --bed ${params.wisecondorx_predict_args}
     """
 }

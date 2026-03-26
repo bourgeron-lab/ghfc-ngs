@@ -61,7 +61,7 @@ workflow WISECONDORX {
     // Samples needing PREDICT
     npz_for_predict = npz_with_status
         .filter { rec -> !rec.has_predict }
-        .map { rec -> tuple(rec.barcode, rec.npz, file(params.wisecondorx_reference)) }
+        .map { rec -> tuple(rec.barcode, rec.npz, file(params.wisecondorx_reference.replace('{binsize}', params.wisecondorx_binsize.toString()))) }
     
     // Existing predict results
     existing_predict_beds = npz_with_status
@@ -73,7 +73,7 @@ workflow WISECONDORX {
     
     // Extract aberrations BED files from predict output
     new_aberrations_beds = PREDICT.out
-        .map { barcode, bed, _stats, _segments, _bins, _plots ->
+        .map { barcode, bed, _stats, _segments, _bins ->
             tuple(barcode, bed)
         }
     
