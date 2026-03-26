@@ -900,7 +900,7 @@ def createChannels(analysis_plan) {
     
     // Create channel for existing NPZ files (output from NPZ_CONVERT, used by predict)
     channels.existing_npz_files = Channel
-        .fromPath("${params.data}/samples/*/*/*/svs/wisecondorx/*.npz")
+        .fromPath("${params.data}/samples/*/*/*/svs/wisecondorx/*.${params.wisecondorx_binsize}.npz")
         .map { npz ->
             def barcode = npz.parent.parent.parent.name  // Get barcode from path
             [barcode, npz]
