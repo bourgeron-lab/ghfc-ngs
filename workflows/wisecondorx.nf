@@ -108,7 +108,7 @@ workflow WISECONDORX {
     if (need_family_merge && !need_family_merge.isEmpty()) {
         // Create channel for ALL existing individual chr-prefixed aberrations (not just newly created)
         all_existing_chr_aberrations = channel
-            .fromPath("${params.data}/samples/*/svs/wisecondorx/*_aberrations.chr.bed")
+            .fromPath("${params.data}/samples/*/*/*/svs/wisecondorx/*_aberrations.chr.bed")
             .map { bed ->
                 def barcode = bed.name.replaceAll(/_aberrations\.chr\.bed$/, '')
                 tuple(barcode, bed)
@@ -142,7 +142,7 @@ workflow WISECONDORX {
     if (need_family_annotate && !need_family_annotate.isEmpty()) {
         // Create channel for existing family aberrations
         existing_family_aberrations_for_annot = channel
-            .fromPath("${params.data}/families/*/svs/wisecondorx/*_aberrations.bed")
+            .fromPath("${params.data}/families/*/*/*/svs/wisecondorx/*_aberrations.bed")
             .map { bed ->
                 def fid = bed.name.replaceAll(/_aberrations\.bed$/, '')
                 tuple(fid, bed)
@@ -170,7 +170,7 @@ workflow WISECONDORX {
     if (need_cohort_merge) {
         // Create channel for existing annotated family aberrations
         existing_annotated_family_aberrations = channel
-            .fromPath("${params.data}/families/*/svs/wisecondorx/*_aberrations.annotated.bed")
+            .fromPath("${params.data}/families/*/*/*/svs/wisecondorx/*_aberrations.annotated.bed")
             .collect()
         
         // Mix with newly annotated family aberrations if any
