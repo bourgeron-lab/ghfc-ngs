@@ -93,7 +93,7 @@ process ANNOTATE_ABERRATIONS {
   # Intersect with each annotation file and collect results
   # 1. Genic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_genes} -wa -wb | \
-    awk '{print \$8 "\\t" \$NF}' | \
+    awk '{print \$(NF-4) "\\t" \$NF}' | \
     sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
@@ -111,7 +111,7 @@ process ANNOTATE_ABERRATIONS {
   
   # 2. Genic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_genes} -wa -wb | \
-    awk '{print \$8 "\\t" \$NF}' | \
+    awk '{print \$(NF-4) "\\t" \$NF}' | \
     sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
@@ -129,7 +129,7 @@ process ANNOTATE_ABERRATIONS {
   
   # 3. Exonic symbols
   bedtools intersect -a data_numbered.bed -b ${symbol_exons} -wa -wb | \
-    awk '{print \$8 "\\t" \$NF}' | \
+    awk '{print \$(NF-4) "\\t" \$NF}' | \
     sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
@@ -147,7 +147,7 @@ process ANNOTATE_ABERRATIONS {
   
   # 4. Exonic ENSG
   bedtools intersect -a data_numbered.bed -b ${ensg_exons} -wa -wb | \
-    awk '{print \$8 "\\t" \$NF}' | \
+    awk '{print \$(NF-4) "\\t" \$NF}' | \
     sort \${SORT_OPTS} -k1,1n -k2,2 | \
     uniq | \
     awk '{
