@@ -22,8 +22,6 @@ process POSTPROCESS_VARIANTS {
     script:
     num_threads = params.deepvariant_threads
     """
-    mkdir -p ${params.data}/samples/${barcode}/deepvariant
-
     ulimit -v unlimited
 
     echo "Listing files in current directory:"

@@ -1,5 +1,6 @@
 process MAKE_EXAMPLES {
-    
+
+    label 'slow'
     tag "$barcode"
     
     input:

@@ -43,12 +43,21 @@ process MERGE_COHORT_ABERRATIONS {
   output_bed = "${cohort_name}_aberrations.bed"
 
   """
+  set -euo pipefail
+
   # Set temp directory to current work directory and memory buffer for sort
   export TMPDIR=\$(pwd)
   SORT_OPTS="-T \${TMPDIR} -S 4G"
 
   # List all BED files (sorted for consistency)
-  ls -1 *_aberrations.annotated.bed | sort -u > file_list.txt
+  # Tolerate a non-matching glob here so the explicit check below reports it clearly
+  ls -1 *_aberrations.annotated.bed 2>/dev/null | sort -u > file_list.txt || true
+
+  # Refuse to publish an empty cohort file over an existing one
+  if [ ! -s file_list.txt ]; then
+    echo "ERROR: no annotated family aberrations BED files were staged for cohort ${cohort_name}" >&2
+    exit 1
+  fi
 
   # Get the first file to check for header
   first_file=\$(head -n 1 file_list.txt)

@@ -1,4 +1,6 @@
 process PREDICT {
+
+    label 'slow'
     tag "${barcode}"
     
     publishDir {

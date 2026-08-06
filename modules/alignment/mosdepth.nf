@@ -1,5 +1,6 @@
 process MOSDEPTH {
 
+    label 'fast'
     tag "$barcode"
     
     publishDir {

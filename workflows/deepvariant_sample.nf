@@ -20,12 +20,13 @@ workflow DEEPVARIANT_SAMPLE {
     // Check which samples need full DeepVariant processing vs just VAF bedgraph
     cram_with_status = cram_files
         .map { barcode, cram, crai ->
-            def gvcf_path = file("${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz")
-            def gvcf_tbi_path = file("${params.data}/samples/${barcode}/deepvariant/${barcode}.g.vcf.gz.tbi")
-            def vcf_path = file("${params.data}/samples/${barcode}/deepvariant/${barcode}.vcf.gz")
-            def vcf_tbi_path = file("${params.data}/samples/${barcode}/deepvariant/${barcode}.vcf.gz.tbi")
-            def vaf_path = file("${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz")
-            def vaf_tbi_path = file("${params.data}/samples/${barcode}/sequences/${barcode}.vaf.bedgraph.gz.tbi")
+            def smp_dir = Sharding.getSampleDir(params.data, barcode)
+            def gvcf_path = file("${smp_dir}/deepvariant/${barcode}.g.vcf.gz")
+            def gvcf_tbi_path = file("${smp_dir}/deepvariant/${barcode}.g.vcf.gz.tbi")
+            def vcf_path = file("${smp_dir}/deepvariant/${barcode}.vcf.gz")
+            def vcf_tbi_path = file("${smp_dir}/deepvariant/${barcode}.vcf.gz.tbi")
+            def vaf_path = file("${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz")
+            def vaf_tbi_path = file("${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz.tbi")
             
             def has_gvcf = gvcf_path.exists() && gvcf_tbi_path.exists()
             def has_vcf = vcf_path.exists() && vcf_tbi_path.exists()

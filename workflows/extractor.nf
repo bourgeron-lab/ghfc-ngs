@@ -38,7 +38,7 @@ workflow EXTRACTOR {
         .flatMap { original_filename, family_list_file ->
             def families = family_list_file.text.readLines().collect { it.trim() }.findAll { it }
             families.collect { fid ->
-                def family_tsv = file("${params.data}/families/${fid}/extractor/${fid}.${original_filename}.tsv")
+                def family_tsv = file("${Sharding.getFamilyDir(params.data, fid)}/extractor/${fid}.${original_filename}.tsv")
                 tuple(fid, original_filename, family_tsv)
             }
         }
@@ -48,7 +48,7 @@ workflow EXTRACTOR {
         .flatMap { original_filename, sample_list_file ->
             def samples = sample_list_file.text.readLines().collect { it.trim() }.findAll { it }
             samples.collect { barcode ->
-                def sample_tsv = file("${params.data}/samples/${barcode}/extractor/${barcode}.${original_filename}.tsv")
+                def sample_tsv = file("${Sharding.getSampleDir(params.data, barcode)}/extractor/${barcode}.${original_filename}.tsv")
                 tuple(barcode, original_filename, sample_tsv)
             }
         }
@@ -108,7 +108,7 @@ workflow EXTRACTOR {
         .combine(ind_gvcf_grouped, by: 0)  // Combine by original_filename
         .map { original_filename, fid, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound, ind_gvcf_files ->
             // Reconstruct the extractor_tsv path
-            def extractor_tsv = file("${params.data}/families/${fid}/extractor/${fid}.${original_filename}.tsv")
+            def extractor_tsv = file("${Sharding.getFamilyDir(params.data, fid)}/extractor/${fid}.${original_filename}.tsv")
             tuple(fid, original_filename, extractor_tsv, fam_tsv_found, fam_tsv_notfound, fam_bcf_found, fam_bcf_notfound, ind_gvcf_files)
         }
     

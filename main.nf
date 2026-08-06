@@ -93,15 +93,23 @@ workflow {
     def channels = createChannels(analysis_plan)
     
     // Run alignment if needed and allowed
-    if (analysis_plan.alignment.needed.size() > 0 && 'alignment' in params.steps) {
-        log.info "Running alignment for ${analysis_plan.alignment.needed.size()} individuals..."
-        
+    // Also entered when CRAMs exist but their coverage bedgraphs are missing, in which case only
+    // MOSDEPTH/TABIX_INDEX run - no realignment is triggered.
+    if ((analysis_plan.alignment.needed.size() > 0 || analysis_plan.alignment.need_bedgraph.size() > 0) && 'alignment' in params.steps) {
+        if (analysis_plan.alignment.needed.size() > 0) {
+            log.info "Running alignment for ${analysis_plan.alignment.needed.size()} individuals..."
+        }
+        if (analysis_plan.alignment.need_bedgraph.size() > 0) {
+            log.info "Generating coverage bedgraphs for ${analysis_plan.alignment.need_bedgraph.size()} existing CRAMs..."
+        }
+
         ALIGNMENT(
             channels.fastq_files,
             channels.cram_37_files,
-            channels.cram_38_files
+            channels.cram_38_files,
+            channels.bedgraph_only_crams
         )
-        
+
         aligned_crams = ALIGNMENT.out.crams
     } else {
         aligned_crams = Channel.empty()
@@ -289,7 +297,8 @@ workflow {
             pedigree_data.family_members,
             analysis_plan.wisecondorx.need_family_merge,
             analysis_plan.wisecondorx.need_family_annotate,
-            analysis_plan.wisecondorx.need_cohort_merge
+            analysis_plan.wisecondorx.need_cohort_merge,
+            pedigree_data.families
         )
     }
     
@@ -379,7 +388,7 @@ def parsePedigreeFile(pedigree_file) {
 
 def createAnalysisPlan(families, individuals, family_members) {
     def plan = [
-        alignment: [needed: [], existing: []],
+        alignment: [needed: [], existing: [], need_bedgraph: []],
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
@@ -491,20 +500,30 @@ def createAnalysisPlan(families, individuals, family_members) {
     }
     
     // Check existing CRAM and bedgraph files (both produced by alignment workflow)
+    // CRAM availability and bedgraph availability are tracked separately: a sample with a usable
+    // CRAM but no coverage bedgraph only needs MOSDEPTH/TABIX_INDEX, never a full realignment.
     individuals.each { barcode ->
         def smp_dir = Sharding.getSampleDir(params.data, barcode)
         def cram_path = "${smp_dir}/sequences/${barcode}.${params.ref_name}.cram"
         def crai_path = "${smp_dir}/sequences/${barcode}.${params.ref_name}.cram.crai"
         def bedgraph_path = "${smp_dir}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
         def bedgraph_tbi_path = "${smp_dir}/sequences/${barcode}.by${params.bin}.bedgraph.gz.tbi"
-        
-        if (new File(cram_path).exists() && new File(crai_path).exists() &&
-            new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()) {
+
+        def has_cram = new File(cram_path).exists() && new File(crai_path).exists()
+        def has_bedgraph = new File(bedgraph_path).exists() && new File(bedgraph_tbi_path).exists()
+
+        if (has_cram) {
+            // The CRAM is usable, so every downstream step can consume it
             plan.alignment.existing.add(barcode)
+            if (!has_bedgraph) {
+                plan.alignment.need_bedgraph.add(barcode)
+            }
         } else {
             // Only need alignment if the individual needs DeepVariant
             if (barcode in plan.deepvariant_sample.needed) {
                 plan.alignment.needed.add(barcode)
+            } else {
+                log.warn "Individual ${barcode} has no ${params.ref_name} CRAM but is not scheduled for alignment (its family already has downstream outputs) - it will be skipped"
             }
         }
     }
@@ -627,7 +646,7 @@ def displayAnalysisSummary(analysis_plan) {
     ========================================================================================
                                     ANALYSIS SUMMARY
     ========================================================================================
-    ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done and ${analysis_plan.alignment.needed.size()} to do
+    ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done, ${analysis_plan.alignment.needed.size()} to align, ${analysis_plan.alignment.need_bedgraph.size()} needing bedgraph only
     == SNVs/INDELs Calling ==
     DEEPVARIANT_SAMPLE: ${analysis_plan.deepvariant_sample.existing.size()} individuals done and ${analysis_plan.deepvariant_sample.needed.size()} to do
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
@@ -644,6 +663,9 @@ def displayAnalysisSummary(analysis_plan) {
     
     if (analysis_plan.alignment.needed) {
         log.info "Individuals needing alignment: ${analysis_plan.alignment.needed.join(', ')}"
+    }
+    if (analysis_plan.alignment.need_bedgraph) {
+        log.info "Individuals needing coverage bedgraph only: ${analysis_plan.alignment.need_bedgraph.join(', ')}"
     }
     if (analysis_plan.deepvariant_sample.needed) {
         log.info "Individuals needing variant calling: ${analysis_plan.deepvariant_sample.needed.join(', ')}"
@@ -666,7 +688,13 @@ def validateStepsAvailability(analysis_plan) {
     if (analysis_plan.alignment.needed.size() > 0 && !('alignment' in params.steps)) {
         errors.add("Alignment step is required for ${analysis_plan.alignment.needed.size()} individuals but not included in steps parameter")
     }
-    
+
+    // Check that individuals needing alignment actually have an input to align from, otherwise the
+    // ALIGNMENT workflow receives empty channels and the run silently does nothing
+    if (analysis_plan.alignment.needed.size() > 0 && !params.fastq_pattern && !params.old_cram_37 && !params.old_cram_38) {
+        errors.add("Alignment is required for ${analysis_plan.alignment.needed.size()} individuals (${analysis_plan.alignment.needed.join(', ')}) but no input source is configured - set one of fastq_pattern, old_cram_37 or old_cram_38")
+    }
+
     // Check if deepvariant_sample is needed but not available  
     if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in params.steps)) {
         errors.add("DeepVariant sample step is required for ${analysis_plan.deepvariant_sample.needed.size()} individuals but not included in steps parameter")
@@ -768,13 +796,28 @@ def createChannels(analysis_plan) {
             def crai_path = "${cram}.crai"
             [barcode, cram, crai_path]
         }
-        .filter { barcode, cram, crai_path -> 
+        .filter { barcode, cram, crai_path ->
             barcode in analysis_plan.alignment.existing && new File(crai_path).exists()
         }
         .map { barcode, cram, crai_path ->
             [barcode, cram, file(crai_path)]
         }
-    
+
+    // Create channel for existing CRAMs that only need a coverage bedgraph (no realignment)
+    channels.bedgraph_only_crams = Channel
+        .fromPath("${params.data}/samples/*/*/*/sequences/*.${params.ref_name}.cram")
+        .map { cram ->
+            def barcode = cram.name.tokenize('.')[0]
+            def crai_path = "${cram}.crai"
+            [barcode, cram, crai_path]
+        }
+        .filter { barcode, _cram, crai_path ->
+            barcode in analysis_plan.alignment.need_bedgraph && new File(crai_path).exists()
+        }
+        .map { barcode, cram, crai_path ->
+            [barcode, cram, file(crai_path)]
+        }
+
     // Create channel for existing gVCF files
     channels.existing_gvcfs = Channel
         .fromPath("${params.data}/samples/*/*/*/deepvariant/*.g.vcf.gz")

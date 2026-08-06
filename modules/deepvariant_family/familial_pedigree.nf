@@ -8,6 +8,8 @@
 nextflow.enable.dsl=2
 
 process FAMILIAL_PEDIGREE {
+
+  label 'fast'
   /*
   Extract family-specific pedigree subset from cohort pedigree file
 

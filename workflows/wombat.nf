@@ -44,7 +44,7 @@ workflow WOMBAT {
             need_bcf2parquet[fid] == false
         }
         .map { fid, bcf, csi ->
-            def parquet_path = file("${params.data}/families/${fid}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet")
+            def parquet_path = file("${Sharding.getFamilyDir(params.data, fid)}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet")
             tuple(fid, parquet_path)
         }
 

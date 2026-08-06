@@ -25,6 +25,7 @@ workflow WISECONDORX {
     need_family_merge  // map: [fid: boolean] - whether family merge is needed
     need_family_annotate // map: [fid: boolean] - whether family annotation is needed
     need_cohort_merge  // boolean: whether cohort merge is needed
+    families           // collection: family IDs in the current pedigree - scopes the cohort merge
 
     main:
     
@@ -47,9 +48,10 @@ workflow WISECONDORX {
             barcode in need_predict
         }
         .map { barcode, npz ->
-            def predict_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.bed")
-            def chr_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
-            
+            def smp_dir = Sharding.getSampleDir(params.data, barcode)
+            def predict_bed = file("${smp_dir}/svs/wisecondorx/${barcode}_aberrations.bed")
+            def chr_bed = file("${smp_dir}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
+
             def has_predict = predict_bed.exists()
             def has_chr = chr_bed.exists()
             
@@ -83,7 +85,7 @@ workflow WISECONDORX {
     // Check which samples need chr reformat
     aberrations_with_chr_status = all_aberrations_beds
         .map { barcode, bed ->
-            def chr_bed = file("${params.data}/samples/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
+            def chr_bed = file("${Sharding.getSampleDir(params.data, barcode)}/svs/wisecondorx/${barcode}_aberrations.chr.bed")
             def has_chr = chr_bed.exists()
             [barcode: barcode, bed: bed, chr_bed: chr_bed, has_chr: has_chr]
         }
@@ -114,9 +116,13 @@ workflow WISECONDORX {
                 tuple(barcode, bed)
             }
         
-        // Mix ALL existing (from disk) with newly created chr-prefixed aberrations
-        combined_chr_aberrations = all_existing_chr_aberrations.mix(REFORMAT_CHR.out.chr_aberrations)
-        
+        // Mix ALL existing (from disk) with newly created chr-prefixed aberrations.
+        // A sample reformatted in this run also matches the disk glob once published, so dedupe by
+        // barcode - staging both copies would make merge_family's `ls` miss the renamed duplicate.
+        combined_chr_aberrations = REFORMAT_CHR.out.chr_aberrations
+            .mix(all_existing_chr_aberrations)
+            .unique { barcode, _bed -> barcode }
+
         // Group by family ID
         family_aberrations = combined_chr_aberrations
             .map { barcode, bed ->
@@ -168,25 +174,39 @@ workflow WISECONDORX {
     
     // Merge cohort aberrations if needed
     if (need_cohort_merge) {
-        // Create channel for existing annotated family aberrations
+        // Existing annotated family aberrations, restricted to the families in the current pedigree.
+        // Without this filter the glob picks up every family ever processed under params.data and
+        // merges unrelated families into this cohort.
         existing_annotated_family_aberrations = channel
             .fromPath("${params.data}/families/*/*/*/svs/wisecondorx/*_aberrations.annotated.bed")
+            .filter { bed ->
+                bed.name.replaceAll(/_aberrations\.annotated\.bed$/, '') in families
+            }
+
+        // Concat rather than collect-then-mix so the barrier genuinely waits for this run's own
+        // ANNOTATE_ABERRATIONS output before the cohort is merged. Dedupe by family in case a
+        // freshly annotated family has already been published to disk.
+        cohort_input = annotated_output
+            .map { _fid, bed -> bed }
+            .concat(existing_annotated_family_aberrations)
+            .unique { bed -> bed.name }
             .collect()
-        
-        // Mix with newly annotated family aberrations if any
-        if (need_family_annotate && !need_family_annotate.isEmpty()) {
-            all_annotated_family_aberrations = existing_annotated_family_aberrations
-                .mix(annotated_output.map { _fid, bed -> bed }.collect())
-                .flatten()
-                .collect()
-        } else {
-            all_annotated_family_aberrations = existing_annotated_family_aberrations
-        }
-        
-        // Create cohort merge input
-        cohort_input = all_annotated_family_aberrations
+            .filter { bed_files ->
+                // Never publish a cohort built from an incomplete set of families
+                def expected = families.findAll { fid ->
+                    need_family_annotate[fid] == true ||
+                    file("${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.annotated.bed").exists()
+                }
+                def found = bed_files.collect { bed -> bed.name.replaceAll(/_aberrations\.annotated\.bed$/, '') }
+                def missing = expected - found
+                if (missing) {
+                    log.warn "Skipping cohort aberrations merge: annotated aberrations missing for ${missing.join(', ')}"
+                    return false
+                }
+                return true
+            }
             .map { bed_files -> tuple(params.cohort_name, bed_files) }
-        
+
         MERGE_COHORT_ABERRATIONS(cohort_input)
         cohort_output = MERGE_COHORT_ABERRATIONS.out.cohort_aberrations_bed
     } else {

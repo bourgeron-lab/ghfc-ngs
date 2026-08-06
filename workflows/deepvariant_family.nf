@@ -22,9 +22,10 @@ workflow DEEPVARIANT_FAMILY {
     // Check existing outputs for each family
     family_with_status = family_gvcfs
         .map { fid, barcodes, gvcfs, tbis ->
-            def norm_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.norm.bcf")
-            def norm_csi = file("${params.data}/families/${fid}/vcfs/${fid}.norm.bcf.csi")
-            def pedigree = file("${params.data}/families/${fid}/${fid}.pedigree.tsv")
+            def fam_dir = Sharding.getFamilyDir(params.data, fid)
+            def norm_bcf = file("${fam_dir}/vcfs/${fid}.norm.bcf")
+            def norm_csi = file("${fam_dir}/vcfs/${fid}.norm.bcf.csi")
+            def pedigree = file("${fam_dir}/${fid}.pedigree.tsv")
             
             def has_norm_bcf = norm_bcf.exists() && norm_csi.exists()
             def has_pedigree = pedigree.exists()
@@ -65,7 +66,7 @@ workflow DEEPVARIANT_FAMILY {
     families_needing_pedigree_from_glnexus = GLNEXUS_FAMILY.out.family_vcf
         .map { fid, _vcf, _tbi ->
             // Check if pedigree already exists for this family
-            def pedigree = file("${params.data}/families/${fid}/${fid}.pedigree.tsv")
+            def pedigree = file("${Sharding.getFamilyDir(params.data, fid)}/${fid}.pedigree.tsv")
             [fid, pedigree.exists()]
         }
         .filter { _fid, has_pedigree -> !has_pedigree }

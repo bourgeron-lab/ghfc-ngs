@@ -7,7 +7,8 @@
 nextflow.enable.dsl=2
 
 process GLNEXUS_FAMILY {
-    
+
+    label 'slow'
     tag "$fid"
     
     // No publishDir - this is an intermediate file kept only in work directory

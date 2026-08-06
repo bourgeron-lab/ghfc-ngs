@@ -1,5 +1,6 @@
 process CALL_VARIANTS {
-    
+
+    label 'slow'
     tag "$barcode"
     
     input:

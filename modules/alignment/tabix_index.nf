@@ -1,5 +1,6 @@
 process TABIX_INDEX {
 
+    label 'fast'
     tag "$barcode"
     
     publishDir {

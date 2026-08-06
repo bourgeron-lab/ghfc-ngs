@@ -28,16 +28,17 @@ workflow ANNOTATION {
     // Check existing outputs for each family to determine what needs to run
     bcfs_with_status = normalized_bcfs
         .map { fid, bcf, csi ->
-            def rare_vcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz")
-            def rare_tbi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.vcf.gz.tbi")
-            def common_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.common.bcf")
-            def common_csi = file("${params.data}/families/${fid}/vcfs/${fid}.common.bcf.csi")
-            def common_gt_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf")
-            def common_gt_csi = file("${params.data}/families/${fid}/vcfs/${fid}.common_gt.bcf.csi")
-            def vep_vcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz")
-            def vep_tbi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi")
-            def annotated_bcf = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf")
-            def annotated_csi = file("${params.data}/families/${fid}/vcfs/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi")
+            def vcfs_dir = "${Sharding.getFamilyDir(params.data, fid)}/vcfs"
+            def rare_vcf = file("${vcfs_dir}/${fid}.rare.vcf.gz")
+            def rare_tbi = file("${vcfs_dir}/${fid}.rare.vcf.gz.tbi")
+            def common_bcf = file("${vcfs_dir}/${fid}.common.bcf")
+            def common_csi = file("${vcfs_dir}/${fid}.common.bcf.csi")
+            def common_gt_bcf = file("${vcfs_dir}/${fid}.common_gt.bcf")
+            def common_gt_csi = file("${vcfs_dir}/${fid}.common_gt.bcf.csi")
+            def vep_vcf = file("${vcfs_dir}/${fid}.rare.${params.vep_config_name}.vcf.gz")
+            def vep_tbi = file("${vcfs_dir}/${fid}.rare.${params.vep_config_name}.vcf.gz.tbi")
+            def annotated_bcf = file("${vcfs_dir}/${fid}.rare.${params.vep_config_name}.annotated.bcf")
+            def annotated_csi = file("${vcfs_dir}/${fid}.rare.${params.vep_config_name}.annotated.bcf.csi")
             
             def has_rare_common = rare_vcf.exists() && rare_tbi.exists() && 
                                   common_bcf.exists() && common_csi.exists()

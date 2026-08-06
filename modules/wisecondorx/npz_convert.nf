@@ -1,4 +1,6 @@
 process NPZ_CONVERT {
+
+    label 'slow'
     tag "${barcode}"
     
     publishDir {

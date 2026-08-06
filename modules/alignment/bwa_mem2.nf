@@ -1,5 +1,6 @@
 process BWA_MEM2_ALIGN {
-    
+
+    label 'slow'
     tag "$barcode:$unit"
     
     publishDir "${params.scratch}/cram", mode: 'copy'

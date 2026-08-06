@@ -1,5 +1,6 @@
 process BAZAM_BWA_MEM2_REALIGN {
 
+    label 'slow'
     tag "$barcode"
     
     publishDir {

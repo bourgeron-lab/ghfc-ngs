@@ -17,10 +17,11 @@ include { TABIX_INDEX } from '../modules/alignment/tabix_index'
 workflow ALIGNMENT {
     
     take:
-    fastq_files     // channel: [barcode, unit, fastq1, fastq2, project, flowcell, dual, lane]
-    cram_37_files   // channel: [barcode, cram, crai]
-    cram_38_files   // channel: [barcode, cram, crai]
-    
+    fastq_files          // channel: [barcode, unit, fastq1, fastq2, project, flowcell, dual, lane]
+    cram_37_files        // channel: [barcode, cram, crai]
+    cram_38_files        // channel: [barcode, cram, crai]
+    bedgraph_only_crams  // channel: [barcode, cram, crai] - existing CRAMs needing only coverage
+
     main:
     
     // BWA-MEM2 alignment from FASTQ files
@@ -96,9 +97,9 @@ workflow ALIGNMENT {
         .mix(BAZAM_BWA_MEM2_REALIGN_37.out.cram)
         .mix(BAZAM_BWA_MEM2_REALIGN_38.out.cram)
 
-    // Generate bedgraphs from final CRAM files
+    // Generate bedgraphs from final CRAM files, plus any pre-existing CRAM whose bedgraph is missing
     MOSDEPTH(
-        all_crams,
+        all_crams.mix(bedgraph_only_crams),
         params.ref,
         params.bin,
         params.data
