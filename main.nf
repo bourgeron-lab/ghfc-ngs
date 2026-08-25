@@ -413,9 +413,15 @@ def createAnalysisPlan(families, individuals, family_members) {
         def norm_bcf_path = "${fam_dir}/vcfs/${fid}.norm.bcf"
         def norm_csi_path = "${fam_dir}/vcfs/${fid}.norm.bcf.csi"
         def pedigree_path = "${fam_dir}/${fid}.pedigree.tsv"
-        
-        if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() &&
-            new File(pedigree_path).exists()) {
+
+        // length() > 0 covers both "missing" and "present but empty": a 0-byte pedigree must not
+        // count as done, otherwise FAMILIAL_PEDIGREE is skipped forever and it never self-heals
+        def pedigree_ok = new File(pedigree_path).length() > 0
+        if (new File(pedigree_path).exists() && !pedigree_ok) {
+            log.warn "Family ${fid} has an empty pedigree at ${pedigree_path} - it will be regenerated"
+        }
+
+        if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() && pedigree_ok) {
             plan.deepvariant_family.existing.add(fid)
         } else {
             plan.deepvariant_family.needed.add(fid)

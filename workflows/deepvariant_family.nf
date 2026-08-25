@@ -28,7 +28,8 @@ workflow DEEPVARIANT_FAMILY {
             def pedigree = file("${fam_dir}/${fid}.pedigree.tsv")
             
             def has_norm_bcf = norm_bcf.exists() && norm_csi.exists()
-            def has_pedigree = pedigree.exists()
+            // An empty pedigree must not count as present, or it is passed through unchanged forever
+            def has_pedigree = pedigree.exists() && pedigree.size() > 0
             
             [fid: fid, barcodes: barcodes, gvcfs: gvcfs, tbis: tbis,
              norm_bcf: norm_bcf, norm_csi: norm_csi, pedigree: pedigree,
@@ -67,7 +68,7 @@ workflow DEEPVARIANT_FAMILY {
         .map { fid, _vcf, _tbi ->
             // Check if pedigree already exists for this family
             def pedigree = file("${Sharding.getFamilyDir(params.data, fid)}/${fid}.pedigree.tsv")
-            [fid, pedigree.exists()]
+            [fid, pedigree.exists() && pedigree.size() > 0]
         }
         .filter { _fid, has_pedigree -> !has_pedigree }
         .map { fid, _has_pedigree ->
