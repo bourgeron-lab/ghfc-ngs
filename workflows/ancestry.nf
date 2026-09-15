@@ -36,6 +36,11 @@ workflow ANCESTRY {
     // merge module's glob relies on.
     def table_kinds = ['pcs', 'ancestry', 'Q', 'pgs_raw', 'pgs_adjusted', 'pgs_zscore']
 
+    // Staged as a process input rather than referenced through projectDir: the
+    // pipeline directory is not mounted inside the task container, so a
+    // projectDir path resolves to nothing there.
+    def panel_genotype = file("${projectDir}/modules/ancestry/scripts/panel_genotype", checkIfExists: true)
+
     def panel_name = params.ancestry_panel_name
     def reference = params.ancestry_reference
     def catalog = params.ancestry_catalog
@@ -57,7 +62,8 @@ workflow ANCESTRY {
         .filter { barcode, _gvcf, _tbi -> barcode in need_extract }
         .combine(panel_sites)
         .map { barcode, gvcf, tbi, _pname, sites_file, regions_file ->
-            tuple(barcode, gvcf, tbi, sites_file, regions_file, reference, panel_name)
+            tuple(barcode, gvcf, tbi, sites_file, regions_file, panel_genotype,
+                  reference, panel_name)
         }
 
     PANEL_EXTRACT(extract_input)
