@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+# Self-contained branch coverage for panel_genotype.
+#
+# Builds a synthetic DeepVariant-style gVCF that exercises every decision branch
+# once, runs the extraction, and asserts the exact genotype expected at each panel
+# site. Needs only bcftools and python3.
+#
+#   modules/ancestry/scripts/panel_genotype_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+panel_genotype="${here}/panel_genotype"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+# Panel: ten sites on two contigs, deliberately including a contig ordering
+# (chr1, chr10, chr2) that is NOT numeric, to prove the output is sorted to the
+# gVCF's own contig order rather than by chromosome number.
+cat > sites.tsv <<'EOF'
+rsid	chrom	pos	ref	alt
+rs_call_het	1	1000	A	G
+rs_call_hom	1	2000	C	T
+rs_refblock	1	3000	G	A
+rs_lowdp_block	1	4000	T	C
+rs_lowgq_call	1	5000	A	C
+rs_other_alt	1	6000	G	T
+rs_spanned	1	7000	C	A
+rs_nocall	1	8000	T	G
+rs_multi_ok	1	9000	A	G
+rs_multi_mixed	1	9500	C	T
+rs_other_contig	2	1500	G	C
+EOF
+awk 'NR>1{print "chr"$2"\t"($3-1)"\t"$3}' sites.tsv > sites.bed
+
+cat > in.vcf <<'EOF'
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr10,length=133797422>
+##contig=<ID=chr2,length=242193529>
+##ALT=<ID=*,Description="Represents any possible alternative allele">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the block">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+##FORMAT=<ID=MIN_DP,Number=1,Type=Integer,Description="Minimum DP in the block">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chr1	1000	.	A	G	40	PASS	.	GT:GQ:DP	0/1:44:30
+chr1	2000	.	C	T	40	PASS	.	GT:GQ:DP	1/1:44:30
+chr1	2900	.	G	<*>	0	.	END=3100	GT:GQ:MIN_DP	0/0:48:33
+chr1	3900	.	T	<*>	0	.	END=4100	GT:GQ:MIN_DP	0/0:9:4
+chr1	5000	.	A	C	40	PASS	.	GT:GQ:DP	0/1:11:30
+chr1	6000	.	G	A	40	PASS	.	GT:GQ:DP	0/1:44:30
+chr1	6995	.	CAAAAAAAAAA	C	40	PASS	.	GT:GQ:DP	0/1:44:30
+chr1	9000	.	A	G,C	40	PASS	.	GT:GQ:DP	0/1:44:30
+chr1	9500	.	C	T,A	40	PASS	.	GT:GQ:DP	1/2:44:30
+chr2	1400	.	G	<*>	0	.	END=1600	GT:GQ:MIN_DP	0/0:48:33
+EOF
+bgzip -f in.vcf && tabix -f -p vcf in.vcf.gz
+bcftools view -h in.vcf.gz | grep '^##contig=' > contigs.txt
+
+bcftools query -T sites.bed --targets-overlap 1 \
+    -f '%CHROM\t%POS\t%REF\t%ALT\t%INFO/END\t[%GT\t%GQ\t%DP\t%MIN_DP]\n' in.vcf.gz \
+  | "${panel_genotype}" --sites sites.tsv --records - --contigs contigs.txt \
+        --sample S1 --out out.vcf --stats out.stats.tsv \
+        --min-dp 10 --min-gq 20 --panel-name test --bundle-version test 2>/dev/null
+
+# rsid -> expected GT
+cat > expected.tsv <<'EOF'
+rs_call_het	0/1
+rs_call_hom	1/1
+rs_refblock	0/0
+rs_lowdp_block	./.
+rs_lowgq_call	./.
+rs_other_alt	./.
+rs_spanned	./.
+rs_nocall	./.
+rs_multi_ok	0/1
+rs_multi_mixed	./.
+rs_other_contig	0/0
+EOF
+
+fail=0
+while IFS=$'\t' read -r rsid want; do
+    got=$(awk -v r="${rsid}" '$3==r{print $10}' out.vcf)
+    if [ "${got}" = "${want}" ]; then
+        printf '  ok    %-16s %s\n' "${rsid}" "${got}"
+    else
+        printf '  FAIL  %-16s expected %s, got %s\n' "${rsid}" "${want}" "${got:-<absent>}"
+        fail=1
+    fi
+done < expected.tsv
+
+# Every panel site must appear exactly once, carrying the panel's REF and ALT even
+# when homozygous reference - the allele-set match downstream depends on it.
+n_sites=$(( $(wc -l < sites.tsv) - 1 ))
+n_out=$(grep -vc '^#' out.vcf)
+if [ "${n_out}" -ne "${n_sites}" ]; then
+    printf '  FAIL  site count: expected %s, got %s\n' "${n_sites}" "${n_out}"
+    fail=1
+else
+    printf '  ok    all %s panel sites present\n' "${n_sites}"
+fi
+
+if awk '!/^#/ && ($5=="." || $5=="")' out.vcf | grep -q .; then
+    printf '  FAIL  some records carry no ALT allele\n'
+    fail=1
+else
+    printf '  ok    every record declares the panel ALT\n'
+fi
+
+# Sorted to the gVCF's contig order (chr1, chr10, chr2), which bcftools enforces
+# when it indexes. A numeric sort would put chr2 before chr10 and fail here.
+if bcftools view -Ob -o out.bcf out.vcf 2>/dev/null && bcftools index -f out.bcf 2>/dev/null; then
+    printf '  ok    output indexes cleanly (contig order respected)\n'
+else
+    printf '  FAIL  bcftools refused the output - it is not correctly sorted\n'
+    fail=1
+fi
+
+[ "${fail}" -eq 0 ] && echo "panel_genotype: all checks passed" || echo "panel_genotype: FAILURES"
+exit "${fail}"

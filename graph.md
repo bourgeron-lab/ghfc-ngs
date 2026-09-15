@@ -87,6 +87,26 @@ flowchart TB
         snps_merge --> snps_bcf
     end
 
+    subgraph ancestry [**Ancestry and PGS**]
+        direction TB
+        anc_extract["panel genotypes from gVCF (bcftools + panel_genotype)"]
+        anc_sample["samples/**{barcode}**/ancestry/**{barcode}**.panel_gt.**{panel}**.bcf"]:::os
+        anc_merge["bcftools merge (no --missing-to-ref)"]
+        anc_family_bcf["families/**{FID}**/ancestry/**{FID}**.panel_gt.**{panel}**.bcf"]:::of
+        anc_score["ancestry-pgs pcs / admixture / pgs-raw"]
+        anc_apply["ancestry-pgs pgs-adjusted / pgs-zscore"]
+        anc_family_tsv["families/**{FID}**/ancestry/**{FID}**.**{panel}**.{pcs,ancestry,Q,pgs_raw}.tsv"]:::of
+        anc_family_z["families/**{FID}**/ancestry/**{FID}**.**{panel}**.{pgs_adjusted,pgs_zscore}.tsv"]:::of
+        anc_concat["concatenate family tables (+ family_id)"]
+        anc_cohort["cohorts/**{cohort}**/ancestry/**{cohort}**.**{panel}**.*.tsv"]:::oc
+
+        anc_extract --> anc_sample --> anc_merge --> anc_family_bcf --> anc_score
+        anc_score --> anc_family_tsv --> anc_apply --> anc_family_z
+        anc_family_tsv --> anc_concat
+        anc_family_z --> anc_concat
+        anc_concat --> anc_cohort
+    end
+
     subgraph expansionhunter [**Expansion Hunter**]
         direction TB
         ehr_call["expansion hunter call"]
@@ -106,6 +126,7 @@ flowchart TB
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus
+    deepvariant ==> ancestry
     glnexus ==> annotation
     annotation_common_gt ==> snps
 

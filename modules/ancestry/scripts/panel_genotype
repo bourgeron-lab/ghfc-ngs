@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+
+"""Genotype a fixed panel site list from a DeepVariant gVCF.
+
+Reads the streamed output of
+
+    bcftools query -T <sites.bed> --targets-overlap 1 \
+        -f '%CHROM\t%POS\t%REF\t%ALT\t%INFO/END\t[%GT\t%GQ\t%DP\t%MIN_DP]\n' in.g.vcf.gz
+
+and writes a single-sample VCF carrying the PANEL's CHROM/POS/ID/REF/ALT at every
+panel site, with GT in {0/0, 0/1, 1/1, ./.}.
+
+Two things here are load-bearing and easy to get wrong:
+
+  - Homozygous-reference sites MUST still declare the panel's ALT allele. The
+    downstream projection matches on allele SET, so a monomorphic record (no ALT)
+    fails the match and the site is silently dropped. That is also why
+    `bcftools convert --gvcf2vcf` cannot be used: it emits REF-only records.
+  - The caller MUST pass --targets-overlap 1 (or use -R, whose default is 1).
+    With the bcftools default for -T, every spanning gVCF reference block is
+    dropped without an error and only variant records survive - which reproduces
+    exactly the coverage problem this extraction exists to fix.
+
+A genotype is decided as:
+
+    biallelic variant at POS, alleles match the panel, DP/GQ pass -> the call
+    inside a reference block, MIN_DP/GQ pass                      -> 0/0
+    reference block below threshold                               -> ./.
+    variant at POS whose alleles differ from the panel's           -> ./.
+    spanned by a deletion                                          -> ./.
+    no record at all                                               -> ./.
+"""
+
+import argparse
+import gzip
+import sys
+
+# Resolution order when more than one record touches a site. A DeepVariant gVCF
+# covers the callable genome exactly once, so this only arbitrates the pathological
+# cases (split multiallelics, an indel abutting a block).
+CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL = (
+    "variant", "refblock", "lowqual", "allele_mismatch", "spanned", "nocall")
+REASONS = [CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL]
+
+
+def _open(path):
+    """Transparently read a plain or gzipped text file."""
+    if str(path).endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--sites", required=True, metavar="FILE",
+                   help="panel site list: rsid, chrom, pos, ref, alt (with header)")
+    p.add_argument("--records", default="-", metavar="FILE",
+                   help="bcftools query output, or - for stdin")
+    p.add_argument("--contigs", required=True, metavar="FILE",
+                   help="##contig= header lines taken from the source gVCF")
+    p.add_argument("--sample", required=True, metavar="NAME")
+    p.add_argument("--out", required=True, metavar="FILE", help="output VCF")
+    p.add_argument("--stats", required=True, metavar="FILE", help="output stats TSV")
+    p.add_argument("--min-dp", type=int, default=10)
+    p.add_argument("--min-gq", type=int, default=20)
+    p.add_argument("--panel-name", default="", metavar="LABEL")
+    p.add_argument("--bundle-version", default="", metavar="VERSION")
+    return p.parse_args()
+
+
+def read_contigs(path):
+    """Return (ordered contig names, the raw header lines, chr-prefixed?)."""
+    names, lines = [], []
+    with _open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.startswith("##contig="):
+                continue
+            lines.append(line)
+            body = line[len("##contig=<"):].rstrip(">")
+            for field in body.split(","):
+                if field.startswith("ID="):
+                    names.append(field[3:])
+                    break
+    if not names:
+        sys.exit("ERROR: no ##contig= lines found in the gVCF header; the assembly "
+                 "check downstream needs contig lengths")
+    return names, lines, any(n.startswith("chr") for n in names)
+
+
+def read_sites(path, contig_order, chr_prefix):
+    """Load the panel, ordered by the gVCF's own contig order.
+
+    Sorting to the source's contig order rather than numerically matters: a
+    reference whose header runs chr1, chr10, chr11 ... would otherwise yield an
+    unsorted VCF, which bcftools rejects on indexing.
+    """
+    rank = {name: i for i, name in enumerate(contig_order)}
+    rows = []
+    with _open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        if header[:5] != ["rsid", "chrom", "pos", "ref", "alt"]:
+            sys.exit(f"ERROR: unexpected site-list header in {path}: {header[:5]}")
+        for line in fh:
+            rsid, chrom, pos, ref, alt = line.rstrip("\n").split("\t")[:5]
+            name = f"chr{chrom}" if chr_prefix and not chrom.startswith("chr") else chrom
+            if name not in rank:
+                sys.exit(f"ERROR: panel contig {name} is absent from the gVCF header")
+            rows.append((rank[name], int(pos), name, rsid, ref, alt))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return rows
+
+
+def as_int(text):
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def recode_gt(gt, alts, panel_alt):
+    """Express a called GT against the panel's single ALT, or None if it cannot be.
+
+    A multiallelic call that carries the panel allele alongside a different one
+    (1/2) has no honest biallelic representation, so it becomes a no-call rather
+    than being rounded toward either allele.
+    """
+    try:
+        wanted = alts.index(panel_alt) + 1
+    except ValueError:
+        return None
+    out = []
+    for allele in gt.replace("|", "/").split("/"):
+        if allele == ".":
+            return None
+        idx = as_int(allele)
+        if idx is None:
+            return None
+        if idx == 0:
+            out.append("0")
+        elif idx == wanted:
+            out.append("1")
+        else:
+            return None
+    return "/".join(out)
+
+
+def genotype(sites, records, min_dp, min_gq):
+    """Assign a GT to every panel site from the streamed gVCF records."""
+    n = len(sites)
+    gts = [None] * n
+    reasons = [None] * n
+
+    # One monotone cursor per contig: records are sorted within a contig, but the
+    # contigs may arrive in any order, so a single global cursor is not safe.
+    spans, cursor = {}, {}
+    for i, row in enumerate(sites):
+        spans.setdefault(row[2], [i, i])[1] = i
+    for name, (lo, _hi) in spans.items():
+        cursor[name] = lo
+
+    def assign(i, gt, reason, force=False):
+        if gts[i] is None or force:
+            gts[i] = gt
+            reasons[i] = reason
+
+    for line in records:
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) < 9:
+            continue
+        chrom, pos, ref, alt, end, gt, gq, dp, min_dp_val = fields[:9]
+        if chrom not in spans:
+            continue
+        start = int(pos)
+        is_block = alt == "<*>"
+        end_pos = as_int(end)
+        if end_pos is None:
+            end_pos = start + len(ref) - 1
+
+        lo, hi = spans[chrom]
+        j = cursor[chrom]
+        while j <= hi and sites[j][1] < start:
+            j += 1
+        cursor[chrom] = j
+
+        gq_val = as_int(gq)
+        depth = as_int(min_dp_val if is_block else dp)
+        passes = (depth is not None and depth >= min_dp
+                  and gq_val is not None and gq_val >= min_gq)
+
+        while j <= hi and sites[j][1] <= end_pos:
+            site_pos, panel_ref, panel_alt = sites[j][1], sites[j][4], sites[j][5]
+            if is_block:
+                assign(j, "0/0" if passes else "./.",
+                       REFBLOCK if passes else LOWQUAL)
+            elif site_pos == start:
+                alts = alt.split(",")
+                recoded = recode_gt(gt, alts, panel_alt) if ref == panel_ref else None
+                if recoded is None:
+                    assign(j, "./.", MISMATCH, force=True)
+                elif passes:
+                    assign(j, recoded, CALLED, force=True)
+                else:
+                    assign(j, "./.", LOWQUAL, force=True)
+            else:
+                # the site falls inside an indel's reference span
+                assign(j, "./.", SPANNED)
+            j += 1
+
+    for i in range(n):
+        if gts[i] is None:
+            gts[i] = "./."
+            reasons[i] = NOCALL
+    return gts, reasons
+
+
+def main():
+    args = parse_args()
+    contig_order, contig_lines, chr_prefix = read_contigs(args.contigs)
+    sites = read_sites(args.sites, contig_order, chr_prefix)
+
+    stream = sys.stdin if args.records == "-" else _open(args.records)
+    try:
+        gts, reasons = genotype(sites, stream, args.min_dp, args.min_gq)
+    finally:
+        if stream is not sys.stdin:
+            stream.close()
+
+    with open(args.out, "w") as out:
+        out.write("##fileformat=VCFv4.2\n")
+        out.write(f"##source=ghfc-ngs panel_genotype panel={args.panel_name} "
+                  f"min_dp={args.min_dp} min_gq={args.min_gq} "
+                  f"bundle={args.bundle_version}\n")
+        for line in contig_lines:
+            out.write(line + "\n")
+        out.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        out.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+                  f"{args.sample}\n")
+        for (_rank, pos, chrom, rsid, ref, alt), gt in zip(sites, gts):
+            out.write(f"{chrom}\t{pos}\t{rsid}\t{ref}\t{alt}\t.\t.\t.\tGT\t{gt}\n")
+
+    counts = {reason: 0 for reason in REASONS}
+    for reason in reasons:
+        counts[reason] += 1
+    called = counts[CALLED] + counts[REFBLOCK]
+    total = len(sites)
+    with open(args.stats, "w") as fh:
+        fh.write("sample\tpanel_name\tbundle_version\tmin_dp\tmin_gq\tn_panel_sites\t"
+                 "n_called\tcall_rate\t" + "\t".join(f"n_{r}" for r in REASONS) + "\n")
+        fh.write(f"{args.sample}\t{args.panel_name}\t{args.bundle_version}\t"
+                 f"{args.min_dp}\t{args.min_gq}\t{total}\t{called}\t"
+                 f"{called / total:.6f}\t"
+                 + "\t".join(str(counts[r]) for r in REASONS) + "\n")
+
+    sys.stderr.write(f"{args.sample}: {called}/{total} panel sites called "
+                     f"({called / total:.1%})\n")
+    for reason in REASONS:
+        sys.stderr.write(f"  {reason}: {counts[reason]}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

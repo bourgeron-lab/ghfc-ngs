@@ -1,6 +1,9 @@
 # Example parameters file for GHFC WGS Alignment Pipeline
 # Copy this file and modify the paths according to your setup
 
+# Cohort name for the project. Used for merged files.
+cohort_name: "dataset_paper_20251010"
+
 # Pipeline steps control - ALL REQUIRED STEPS MUST BE LISTED
 steps: [
     "alignment",
@@ -10,68 +13,98 @@ steps: [
     "snvs_cohort",
     "wisecondorx",
     "wombat",
+    # "extractor",
     # "ancestry",
   ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry
 
 # Input/Output paths
-data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
-scratch: "/pasteur/appa/scratch/fcliquet"
-
-# Cohort name for merged files
-cohort_name: "test_cohort"
+data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
+scratch: "/pasteur/appa/scratch/ghfc"
+work_dir: "/pasteur/appa/scratch/ghfc/work-ghfc-grch38"
 
 # Pedigree file (optional - defaults to {data}/pedigree.tsv)
-pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/pedigree.tsv"
+pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/dataset_paper_20251010/dataset_paper_20251010.pedigree.tsv"
 
-# Reference genomes
+# reference genome used by all steps when needed
 ref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/GRCh38.fasta"
+# reference name identifier used in output file names
 ref_name: "GRCh38_GIABv3"
-oldref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/hs38DH.fa"
-wisecondorx_reference: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/WisecondorX/reference_wisecondorX_hg38_{binsize}.npz"
-wisecondorx_binsize: 5000
+# WisecondorX reference for CNV analysis
+wisecondorx_reference: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/WisecondorX/reference_wisecondorX_hg38_{binsize}_refsize100.npz"
+wisecondorx_binsize: 1000
 wisecondorx_predict_args: "--zscore 5 --minrefbins 50 --resegment-all --fix-zero-bins"
+# Pseudo-autosomal regions (PAR) coordinates for our reference genome
+ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
+ref_par1_end: "2781479" # PAR1 end position on chrX (GRCh38)
+ref_par2_start: "155701383" # PAR2 start position on chrX (GRCh38)
+ref_par2_end: "156030895" # PAR2 end position on chrX (GRCh38)
 
+## Realignment of old CRAMs parameters
+# old hg38 reference genome used for old CRAMs realignment
+old_ref_38: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/hs38DH.fa"
+# path to old hg38 CRAMs for realignment
+old_cram_38: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/old_cram_38/"
+# old hg37 reference genome used for old CRAMs realignment
+old_ref_37: "/pasteur/helix/projects/ghfc_wgs/references/GRCh37/chr/hs37d5.fa"
+# path to old hg37 CRAMs for realignment
+old_cram_37: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/old_cram_37/"
 # File patterns (adjust according to your naming convention)
 fastq_pattern: ""
-cram4realignment_pattern: "*.cram"
 
-# Tool paths (when not using containers)
-bwa_mem2: "bwa-mem2"
-samblaster: "samblaster"
-sambamba: "sambamba"
-samtools: "samtools"
-bazam: "/pasteur/helix/projects/ghfc_wgs/tools/bazam-1.0.1/bazam.jar"
-
-# GLnexus configuration
-glnexus_config: "DeepVariant_unfiltered"
-
+## Sample calling - SNVs cohort parameters
 # DeepVariant configuration
 # WARNING: Update DeepVariant process settings accordingly to the number of threads
+# WARNING: This overrides the slurm max_cpus setting for DeepVariant processes but not the slurm allocation itself
+# NOTE: this exist because DV performances can be suboptimal on some hardware: i.e. library made for Intel CPU, not AMD
 deepvariant_threads: 96 # Number of parallel tasks for DeepVariant make_examples
 
+## Family calling - SNVs cohort parameters
+# GLnexus configuration used for joint genotyping
+glnexus_config: "DeepVariant_unfiltered"
+
+## Annotation - Wombat parameters
 # gnomAD frequency annotation configuration
-gnomad_file: "/pasteur/helix/projects/ghfc_wgs/refs/gnomad_v4.1_allChroms.bcf" # Path to gnomAD annotation file
-gnomad_filter_field: "AF" # gnomAD field to filter on (e.g., AF, AF_popmax)
+gnomad_file: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/gnomad_v4.1_allChroms.bcf"
+gnomad_filter_field: "AF_genomes" # gnomAD field to filter on (e.g., AF, AF_popmax)
 gnomad_filter_threshold: "0.01" # Frequency threshold for filtering (e.g., 0.01 for 1%)
 
 # VEP annotation configuration
-vep_config: "/pasteur/helix/projects/ghfc_wgs/configs/vep_config.ini" # Path to VEP config INI file
-vep_config_name: "ensembl_vep_115" # Name suffix for output files
+vep_config: "/pasteur/appa/scratch/ghfc/scratch-cache/GRCh38_112_standard.ini" # Path to VEP config INI file
+vep_config_name: "VEP_GRCh38_112_standard" # Name suffix for output files
+bin_size: 10000 # Number of variants per VCF chunk for parallel VEP processing
 
-# Annotation additional annotation configuration
-annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/" # Directory containing annotation BCF files
-annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf", "LCR.grch38.bed.gz"] # List of BCF files for additional annotation
+# Wombat additional annotation configuration
+annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/annotations" # Directory containing annotation BCF files
+annotation_annotation_list: [
+    "AlphaMissense_hg38.bcf",
+    "cadd_v1.7.indels.grch38.chr.bcf",
+    "cadd_v1.7.snvs.grch38.chr.bcf",
+    "MPC_v2.GRCh38.bcf",
+    "revel.grch38.bcf",
+    "spliceai.indels.grch38.chr.bcf",
+    "spliceai.snvs.ensembl_mane.grch38.110.chr.bcf",
+    "popEVE.GRCh38.bcf",
+    "MISTIC_GRCh38.bcf",
+    "LCR.grch38.bed.gz",
+  ] # List of BCF files for additional annotation
 annotation_gencode: "gencode.v47.basic" # Gencode version for WisecondorX aberrations annotation
 
-# Annotation de novo mutation extraction configuration
+# Wombat de novo mutation extraction configuration
 annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
 annotation_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
-annotation_dnm_min_GQ: "19" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
+annotation_dnm_min_GQ: "18" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
 annotation_dnm_min_VAF: "0.25" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
 
 # Wombat configuration
 wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat" # Directory containing Wombat YAML configuration files
-wombat_config_list: ["rare_variants_high_impact.yml", "de_novo_mutations.yml"] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
+wombat_config_list: [
+    "rare_high_impact.yml",
+    "de_novo_mutations.yml",
+    "rare_coding_mnvs.yml",
+    "rare_homalt.yml",
+    "rare_missense_plp.yml",
+    "rare_spliceai.yml",
+  ] # List of Wombat config files (e.g., ["config1.yml", "config2.yml"])
 
 ## Ancestry and PGS parameters
 # These three have no usable default; the pipeline refuses to start the "ancestry"
@@ -114,14 +147,10 @@ ancestry_min_coverage: "" # Empty uses the tool default of 0.90
 ancestry_model: "" # Empty uses the model shipped inside the reference bundle
 
 # Extractor configuration
-extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
+extractor_tsvs_list: [
+    "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/dataset_paper_20251010/extractor/ZM_variants.tsv",
+  ] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
 liftover_chain: "/pasteur/helix/projects/ghfc_wgs/references/liftover/hg19ToHg38.over.chain.gz" # Chain file for GRCh37 to GRCh38 liftover
-
-# Pseudo-autosomal regions (PAR) coordinates for GRCh38
-ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
-ref_par1_end: "2781479" # PAR1 end position on chrX (GRCh38)
-ref_par2_start: "155701383" # PAR2 start position on chrX (GRCh38)
-ref_par2_end: "156030895" # PAR2 end position on chrX (GRCh38)
 
 # SLURM account and partition settings
 slurm_account: "your_account"
