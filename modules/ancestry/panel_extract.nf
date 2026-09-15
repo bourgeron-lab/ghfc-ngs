@@ -30,6 +30,8 @@ process PANEL_EXTRACT {
     Union site list from PANEL_SITES
   regions_file : path
     bcftools targets file from PANEL_SITES
+  panel_genotype : path
+    The extraction script, staged in so it is reachable inside the container
   reference : val
     Path to the mounted ancestry-pgs reference bundle
   panel_name : val
@@ -52,7 +54,7 @@ process PANEL_EXTRACT {
   label 'panel_extract'
 
   input:
-  tuple val(barcode), path(gvcf), path(gvcf_index), path(sites_file), path(regions_file), val(reference), val(panel_name)
+  tuple val(barcode), path(gvcf), path(gvcf_index), path(sites_file), path(regions_file), path(panel_genotype), val(reference), val(panel_name)
 
   output:
   tuple val(barcode), path("${output_bcf}"), path("${output_bcf}.csi"), emit: panel_gt
@@ -61,7 +63,6 @@ process PANEL_EXTRACT {
   script:
   output_bcf = "${barcode}.panel_gt.${panel_name}.bcf"
   output_stats = "${barcode}.panel_gt.${panel_name}.stats.tsv"
-  panel_genotype = "${projectDir}/modules/ancestry/scripts/panel_genotype"
 
   """
   set -euo pipefail
@@ -89,7 +90,7 @@ process PANEL_EXTRACT {
       --targets-overlap 1 \\
       -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t%INFO/END\\t[%GT\\t%GQ\\t%DP\\t%MIN_DP]\\n' \\
       ${gvcf} \\
-  | ${panel_genotype} \\
+  | ./${panel_genotype} \\
       --sites ${sites_file} \\
       --records - \\
       --contigs contigs.txt \\
