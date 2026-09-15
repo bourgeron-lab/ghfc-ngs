@@ -19,6 +19,7 @@ include { SNVS_COHORT } from './workflows/snvs_cohort'
 include { WISECONDORX } from './workflows/wisecondorx'
 include { WOMBAT } from './workflows/wombat'
 include { EXTRACTOR } from './workflows/extractor'
+include { ANCESTRY } from './workflows/ancestry'
 
 /*
 ========================================================================================
@@ -34,14 +35,24 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, snvs_freq_annot, snvs_freq_filter, bedgraphs, vep_annotation"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor', 'ancestry']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
+}
+
+// The ancestry step reads its panel and weights from paths that have no sensible
+// default, and every one of its processes would fail on an empty string.
+if ('ancestry' in params.steps) {
+    def missing_ancestry_params = ['ancestry_reference', 'ancestry_catalog', 'ancestry_panel_name']
+        .findAll { key -> !params[key] }
+    if (missing_ancestry_params) {
+        exit 1, "ERROR: the 'ancestry' step requires ${missing_ancestry_params.join(', ')} to be set"
+    }
 }
 
 /*
@@ -342,6 +353,44 @@ workflow {
             gvcfs_for_extractor
         )
     }
+
+    // Run ancestry and PGS if needed and allowed.
+    //
+    // This reads gVCFs directly rather than any merged call set: the panel sites are
+    // genotyped per sample from the gVCF's reference blocks, so a site with coverage
+    // and no variant is 0/0 rather than absent. A family's own common_gt.bcf carries
+    // only its variant sites - around 57% of the panel for a trio - which is below
+    // what admixture accepts and enough to distort the projected PCs.
+    if ((analysis_plan.ancestry.needed.size() > 0 ||
+         analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in params.steps) {
+
+        def ancestry_tasks = []
+        if (analysis_plan.ancestry.need_extract.size() > 0) {
+            ancestry_tasks.add("panel extraction for ${analysis_plan.ancestry.need_extract.size()} samples")
+        }
+        def ancestry_merge_count = analysis_plan.ancestry.need_family_merge.count { _fid, needed -> needed == true } ?: 0
+        if (ancestry_merge_count > 0) {
+            ancestry_tasks.add("family panel merge for ${ancestry_merge_count} families")
+        }
+        def ancestry_score_count = analysis_plan.ancestry.need_family_score.count { _fid, needed -> needed == true } ?: 0
+        if (ancestry_score_count > 0) {
+            ancestry_tasks.add("scoring for ${ancestry_score_count} families")
+        }
+        if (analysis_plan.ancestry.need_cohort_merge) {
+            ancestry_tasks.add("cohort table merge")
+        }
+        log.info "Running ancestry/PGS: ${ancestry_tasks.join(', ')}..."
+
+        ANCESTRY(
+            all_available_gvcfs,
+            pedigree_data.family_members,
+            pedigree_data.families,
+            analysis_plan.ancestry.need_extract,
+            analysis_plan.ancestry.need_family_merge,
+            analysis_plan.ancestry.need_family_score,
+            analysis_plan.ancestry.need_cohort_merge
+        )
+    }
 }
 
 /*
@@ -395,7 +444,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         snvs_cohort: [needed: [], existing: []],
         wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
         wombat: [needed: [], existing: [], need_bcf2parquet: [:]],
-        extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set]
+        extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
+        ancestry: [needed: [], existing: [], need_extract: [], need_family_merge: [:], need_family_score: [:], need_cohort_merge: false]
     ]
     
     // Check extractor TSV list
@@ -485,6 +535,58 @@ def createAnalysisPlan(families, individuals, family_members) {
         }
     }
     
+    // Check existing ancestry outputs (per-sample panel genotypes, family panel
+    // genotypes, family tables, cohort tables - all part of ancestry)
+    //
+    // The panel label is part of every file name on purpose: the depth/quality
+    // thresholds and the reference bundle are not recorded anywhere this check can
+    // see, so bumping ancestry_panel_name is what invalidates the old extractions.
+    if ('ancestry' in params.steps) {
+        def panel_name = params.ancestry_panel_name
+        def table_kinds = ['pcs', 'ancestry', 'Q', 'pgs_raw', 'pgs_adjusted', 'pgs_zscore']
+
+        individuals.each { barcode ->
+            def smp_dir = Sharding.getSampleDir(params.data, barcode)
+            def panel_bcf_path = "${smp_dir}/ancestry/${barcode}.panel_gt.${panel_name}.bcf"
+            def panel_csi_path = "${panel_bcf_path}.csi"
+
+            if (!(new File(panel_bcf_path).exists() && new File(panel_csi_path).exists())) {
+                plan.ancestry.need_extract.add(barcode)
+            }
+        }
+
+        families.each { fid ->
+            def fam_dir = Sharding.getFamilyDir(params.data, fid)
+            def fam_bcf_path = "${fam_dir}/ancestry/${fid}.panel_gt.${panel_name}.bcf"
+            def fam_csi_path = "${fam_bcf_path}.csi"
+            def fam_panel_exists = new File(fam_bcf_path).exists() && new File(fam_csi_path).exists()
+
+            // A family whose panel BCF predates one of its samples' extractions must
+            // be rebuilt, or it would keep a sample that is no longer current
+            def members = family_members.findAll { _barcode, member_fid -> member_fid == fid }.keySet()
+            def member_needs_extract = members.any { barcode -> barcode in plan.ancestry.need_extract }
+
+            plan.ancestry.need_family_merge[fid] = !fam_panel_exists || member_needs_extract
+
+            def tables_exist = table_kinds.every { kind ->
+                new File("${fam_dir}/ancestry/${fid}.${panel_name}.${kind}.tsv").exists()
+            }
+            plan.ancestry.need_family_score[fid] = !tables_exist || plan.ancestry.need_family_merge[fid]
+
+            if (plan.ancestry.need_family_merge[fid] || plan.ancestry.need_family_score[fid]) {
+                plan.ancestry.needed.add(fid)
+            } else {
+                plan.ancestry.existing.add(fid)
+            }
+        }
+
+        def cohort_tables_exist = table_kinds.every { kind ->
+            new File("${params.data}/cohorts/${params.cohort_name}/ancestry/${params.cohort_name}.${panel_name}.${kind}.tsv").exists()
+        }
+        plan.ancestry.need_cohort_merge = !cohort_tables_exist ||
+            plan.ancestry.need_family_score.any { _fid, needed -> needed == true }
+    }
+
     // Check existing individual gVCF files and VAF bedgraphs (both outputs of deepvariant_sample)
     individuals.each { barcode ->
         def smp_dir = Sharding.getSampleDir(params.data, barcode)
@@ -662,6 +764,8 @@ def displayAnalysisSummary(analysis_plan) {
     SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
     == SVs Calling ==
     WISECONDORX PREDICT: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
+    == Ancestry / PGS ==
+    ANCESTRY: ${'ancestry' in params.steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     == Other ==
     EXTRACTOR: ${analysis_plan.extractor.tsv_count > 0 ? "${analysis_plan.extractor.tsv_count} TSV files to process on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples" : 'Skipped (no TSV files provided)'}
     ========================================================================================
@@ -685,6 +789,9 @@ def displayAnalysisSummary(analysis_plan) {
     if (analysis_plan.snvs_cohort.needed) {
         log.info "Cohort needing common variant merge: Yes"
     }
+    if (analysis_plan.ancestry.needed) {
+        log.info "Families needing ancestry/PGS: ${analysis_plan.ancestry.needed.join(', ')}"
+    }
 }
 
 def validateStepsAvailability(analysis_plan) {
@@ -706,13 +813,23 @@ def validateStepsAvailability(analysis_plan) {
         errors.add("DeepVariant sample step is required for ${analysis_plan.deepvariant_sample.needed.size()} individuals but not included in steps parameter")
     }
     
+    // A missing prerequisite is only an error when something in this run would
+    // consume it. The ancestry step reads gVCFs straight from deepvariant_sample and
+    // never touches the normalized or annotated call sets, so `steps: ["ancestry"]`
+    // must not be blocked by families that have no norm.bcf yet. Every steps list
+    // that includes one of the consumers below behaves exactly as before.
+    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'snvs_cohort', 'extractor']
+    def annotation_consumers = ['annotation', 'wombat', 'snvs_cohort']
+
     // Check if deepvariant_family is needed but not available
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in params.steps)) {
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in params.steps) &&
+        family_consumers.any { step -> step in params.steps }) {
         errors.add("DeepVariant family step is required for ${analysis_plan.deepvariant_family.needed.size()} families but not included in steps parameter")
     }
     
     // Check if annotation is needed but not available
-    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in params.steps)) {
+    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in params.steps) &&
+        annotation_consumers.any { step -> step in params.steps }) {
         errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
     
@@ -724,7 +841,7 @@ def validateStepsAvailability(analysis_plan) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry
         ========================================================================================
         """
         exit 1, "Pipeline stopped due to missing required steps"

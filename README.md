@@ -16,6 +16,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 - **PyWombat variant filtering** and prioritization with custom configurations
 - **Cohort-level merging** for common variants and Wombat results
 - **Variant extraction** from custom TSV lists with liftover support
+- **Genetic ancestry and polygenic scores** per family and per cohort, projected onto a global reference panel
 - **Unit merging** for samples with multiple sequencing runs
 - **SLURM integration** with configurable resource allocation
 - **Container support** via Apptainer/Singularity
@@ -188,7 +189,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports eight main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports nine main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -200,6 +201,7 @@ The pipeline supports eight main steps that must be explicitly listed in the `st
 - **`snvs_cohort`**: Cohort-level merging of common variants and Wombat results across all families.
 - **`wisecondorx`**: CNV/SV calling using WisecondorX. Includes NPZ conversion, prediction, family/cohort merging, and gene annotation.
 - **`extractor`**: Extract specific variants from TSV lists across family BCFs, Wombat outputs, or individual gVCFs. Supports GRCh37→GRCh38 liftover.
+- **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
 
 **Step Dependencies:**
 
@@ -210,6 +212,7 @@ The pipeline supports eight main steps that must be explicitly listed in the `st
 - `snvs_cohort` requires common filtered BCFs and/or Wombat outputs (triggers upstream steps if missing)
 - `wisecondorx` requires CRAM files (triggers `alignment` if missing)
 - `extractor` requires normalized BCFs, Wombat outputs, or gVCFs depending on extraction mode
+- `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -299,6 +302,49 @@ Useful for validating specific variants, extracting variants of interest, or com
 
 **Outputs:** Extracted variants TSV, per-family aggregated TSV, cohort-aggregated TSV
 
+#### Ancestry / PGS Workflow
+
+Genetic ancestry and polygenic scores per family, and a cohort-level aggregate:
+1. **Panel sites** - Verify the reference bundle and build the union of the two site lists it carries (once per run)
+2. **Panel extraction** - For each sample, genotype the panel sites straight from the DeepVariant gVCF
+3. **Family merge** - Join the family's per-sample panel genotypes into one family BCF
+4. **Scoring** - Per family: projected principal components with an ancestry label, admixture proportions, raw polygenic scores, then the ancestry-adjusted scores and z-scores
+5. **Cohort merge** - Concatenate the family tables into cohort tables, with a `family_id` column
+
+**Why the extraction reads gVCFs.** The two site lists are not nested: the LD-pruned
+ancestry panel used for the components and admixture, and the PGS catalog list, overlap
+only partially, so a single extraction covers their union. More importantly, a gVCF
+carries reference blocks, so a panel site with coverage and no variant is reported as
+`0/0` while a site with no coverage stays `./.`. A family's own `common_gt.bcf` holds
+only the sites where the family carries an alt allele — roughly 57% of the panel for a
+trio, less for a duo — which is well below the 90% per-sample coverage that the
+admixture projection requires, and enough to distort the projected components. Reading
+the gVCF recovers the rest.
+
+Two consequences worth knowing:
+
+- **Results do not depend on cohort composition.** Each sample is genotyped against the
+  reference bundle alone, so adding a family never changes another family's components
+  or scores.
+- **Cohort tables are exact concatenations.** Every value is a per-sample projection
+  against the bundle, so a sample's row is identical whether its family was scored alone
+  or as part of a cohort-wide run — there is nothing to recompute at cohort level.
+
+The `ancestry_panel_name` label is part of every output file name, and since the
+pipeline decides what to recompute from what exists on disk, that label is the only
+thing that invalidates earlier results. Bump it whenever the depth/quality thresholds
+or the reference bundle change.
+
+The extraction logic ships with a self-contained branch-coverage test that needs only
+`bcftools` and `python3` — it builds a synthetic gVCF exercising every decision branch
+and asserts the genotype expected at each panel site:
+
+```bash
+modules/ancestry/scripts/panel_genotype_test
+```
+
+**Outputs:** Per-sample panel genotype BCF and call-rate stats, family panel genotype BCF, per-family PCs / ancestry labels / admixture proportions / raw, adjusted and z-scored PGS with a QC JSON per command, and the cohort-level concatenation of each table
+
 ### Parameters File (params.yml)
 
 Key parameters to configure:
@@ -371,6 +417,15 @@ annotation_dnm_min_VAF: "0.25"       # Minimum variant allele frequency (VAF) fo
 wombat_config_path: "/path/to/wombat/configs"                                      # Directory containing Wombat YAML configuration files
 wombat_config_list: ["rare_variants_high_impact.yml", "de_novo_mutations.yml"]   # List of Wombat config files
 
+# Ancestry and PGS configuration (required when the "ancestry" step is listed)
+ancestry_reference: "/path/to/ancestry/reference"        # ancestry-pgs reference bundle directory
+ancestry_catalog: "/path/to/PGS_catalog/catalog.tsv"     # PGS weights, SbayesRC layout
+ancestry_panel_name: "apgs_b1.0.0_dp10gq20"              # label baked into output names; bump to invalidate
+ancestry_min_dp: 10                                       # min DP (variants) / MIN_DP (reference blocks)
+ancestry_min_gq: 20                                       # min GQ to call a panel site
+ancestry_min_coverage: ""                                 # empty uses admixture's 0.90 floor
+ancestry_model: ""                                        # empty uses the bundle's own fitted model
+
 # Extractor configuration (optional - for variant extraction from TSV lists)
 extractor_tsvs_list: []                              # List of TSV files with variants to extract
 liftover_chain: "/path/to/hg19ToHg38.over.chain.gz"  # Chain file for GRCh37 to GRCh38 liftover
@@ -413,6 +468,10 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.npz`
 - **WisecondorX aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
 - **Cohort BCF files**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf` (and `.csi`)
+- **Panel genotype files (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/ancestry/${barcode}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
+- **Panel genotype files (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
+- **Ancestry/PGS tables (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
+- **Ancestry/PGS tables (cohort)**: `${data}/cohorts/${cohort_name}/ancestry/${cohort_name}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -459,11 +518,15 @@ data/
 │               │   ├── BC001.g.vcf.gz.tbi
 │               │   ├── BC001.vcf.gz
 │               │   └── BC001.vcf.gz.tbi
-│               └── svs/           # SV calling outputs
-│                   └── wisecondorx/
-│                       ├── BC001.npz
-│                       ├── BC001_aberrations.bed
-│                       └── BC001_aberrations.chr.bed
+│               ├── svs/           # SV calling outputs
+│               │   └── wisecondorx/
+│               │       ├── BC001.npz
+│               │       ├── BC001_aberrations.bed
+│               │       └── BC001_aberrations.chr.bed
+│               └── ancestry/      # Panel genotypes for ancestry/PGS
+│                   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf
+│                   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf.csi
+│                   └── BC001.panel_gt.apgs_b1.0.0_dp10gq20.stats.tsv   # Per-sample call rate
 ├── families/                      # Family-specific output directories (sharded)
 │   └── {S1}/                      # Shard level 1 (single character)
 │       └── {S2}/                  # Shard level 2 (single character)
@@ -486,10 +549,20 @@ data/
 │               │   ├── FID001.rare.ensembl_vep_115.annotated.tsv.gz                        # BCF to TSV
 │               │   ├── FID001.rare.ensembl_vep_115.annotated.de_novo_mutations.tsv         # Wombat filtered
 │               │   └── FID001.rare.ensembl_vep_115.annotated.rare_variants_high_impact.tsv
-│               └── svs/
-│                   └── wisecondorx/
-│                       ├── FID001_aberrations.bed           # Family merged
-│                       └── FID001_aberrations.annotated.bed # Gene annotated
+│               ├── svs/
+│               │   └── wisecondorx/
+│               │       ├── FID001_aberrations.bed           # Family merged
+│               │       └── FID001_aberrations.annotated.bed # Gene annotated
+│               └── ancestry/
+│                   ├── FID001.panel_gt.apgs_b1.0.0_dp10gq20.bcf        # Family panel genotypes
+│                   ├── FID001.panel_gt.apgs_b1.0.0_dp10gq20.bcf.csi
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.pcs.tsv             # Projected components
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.ancestry.tsv        # Region/population label
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.Q.tsv               # Admixture proportions
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_raw.tsv         # Raw scores
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_adjusted.tsv    # Ancestry-adjusted
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_zscore.tsv      # Z-scored
+│                   └── FID001.apgs_b1.0.0_dp10gq20.*.qc.json           # One QC report per command
 ├── cohorts/                       # Cohort-specific output directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── vcfs/
@@ -498,9 +571,14 @@ data/
 │       ├── wombat/
 │       │   ├── COHORT_NAME.rare.ensembl_vep_115.annotated.de_novo_mutations.results.tsv
 │       │   └── COHORT_NAME.rare.ensembl_vep_115.annotated.rare_variants_high_impact.results.tsv
-│       └── svs/
-│           └── wisecondorx/
-│               └── COHORT_NAME_aberrations.bed      # Cohort merged aberrations
+│       ├── svs/
+│       │   └── wisecondorx/
+│       │       └── COHORT_NAME_aberrations.bed      # Cohort merged aberrations
+│       └── ancestry/
+│           ├── apgs_b1.0.0_dp10gq20.sites.tsv.gz    # Union panel site list
+│           ├── apgs_b1.0.0_dp10gq20.regions.tsv.gz  # bcftools targets file
+│           ├── apgs_b1.0.0_dp10gq20.bundle.json     # Reference bundle check
+│           └── COHORT_NAME.apgs_b1.0.0_dp10gq20.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv
 └── extractor/                     # Extractor outputs (if TSV lists provided)
     └── VARIANT_LIST/
         ├── VARIANT_LIST.extracted.tsv               # Extracted variants
@@ -590,6 +668,29 @@ All sample and family output paths include two shard levels (`{S1}/{S2}`) comput
 - **Extracted variants**: `${data}/extractor/${original_filename}/${original_filename}.extracted.tsv`
 - **Aggregated per family**: `${data}/extractor/${original_filename}/families/${FID}.extracted.tsv`
 - **Fully aggregated**: `${data}/extractor/${original_filename}.aggregated.tsv`
+
+### Ancestry / PGS Outputs
+
+Paths use `${P}` as shorthand for `${ancestry_panel_name}`.
+
+- **Panel site list**: `${data}/cohorts/${cohort_name}/ancestry/${P}.sites.tsv.gz` (plus `${P}.regions.tsv.gz` and the `${P}.bundle.json` bundle check)
+- **Per-sample panel genotypes**: `${data}/samples/{S1}/{S2}/${barcode}/ancestry/${barcode}.panel_gt.${P}.bcf` (and `.csi`)
+- **Per-sample call-rate stats**: `${data}/samples/{S1}/{S2}/${barcode}/ancestry/${barcode}.panel_gt.${P}.stats.tsv`
+- **Family panel genotypes**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.panel_gt.${P}.bcf` (and `.csi`)
+- **Family tables**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.${P}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
+- **Family QC reports**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.${P}.{pcs,admixture,pgs-raw,pgs-adjusted,pgs-zscore}.qc.json`
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/ancestry/${cohort_name}.${P}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
+  - Concatenations of the family tables with a `family_id` column appended
+
+**What to check in the QC reports.** These are the fields that catch a quietly degraded
+result:
+
+- `site_coverage` — the fraction of panel sites present; should be at or near 1.0, since the extraction emits a record for every site
+- `min_per_sample_coverage` — the worst per-sample call rate; must clear 0.90 or `admixture` refuses
+- `n_outliers` — samples lying outside the reference panel's coverage in component space, labelled `outlier` rather than assigned a population
+- `median_knn_distance_to_reference` — how much reference data supports these z-scores
+- `distinct_allele_ct` — **expect this to exceed 1, with its warning.** Per-sample missingness genuinely differs between samples, so the raw score sums are not directly comparable between individuals; the adjusted and z-scored tables are what you compare. This is a consequence of recording real coverage instead of assuming every uncalled site is homozygous reference.
+- `n_traits_constant` — catalog columns carrying no non-zero weight at any scored site, emitted as `nan` rather than a number
 
 ### Pipeline Reports
 
