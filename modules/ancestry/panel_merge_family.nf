@@ -76,10 +76,19 @@ process PANEL_MERGE_FAMILY {
   fi
 
   # Every input holds the same sites, so --merge none is a straight column join.
-  # --missing-to-ref is deliberately absent; see the note above.
+  #
+  # --force-single because a family of one person is a normal case here, and
+  # bcftools merge otherwise refuses outright with "Expected two or more files to
+  # merge, got only one" and exit 255. A singleton is in fact the case this whole
+  # extraction exists for: from its own common_gt.bcf one sample carries only
+  # ~28% of the panel, below the 50% at which the projection refuses to run at
+  # all, whereas panel genotypes read from the gVCF give it full coverage.
+  #
+  # --missing-to-ref stays absent; see the note above.
   bcftools merge \\
       --threads ${task.cpus} \\
       --merge none \\
+      --force-single \\
       --file-list bcf_file_list.txt \\
       --output-type b \\
       --output ${output_bcf}
