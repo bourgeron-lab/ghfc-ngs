@@ -97,6 +97,14 @@ workflow {
     // Display analysis summary
     displayAnalysisSummary(analysis_plan)
     
+    // Stale family outputs are wrong results rather than missing ones, so the run can be
+    // stopped on them. Warning is the default deliberately: a cohort whose pedigree has
+    // drifted should not silently become unrunnable without the operator asking for that.
+    if (params.pedigree_strict && analysis_plan.pedigree_drift) {
+        def n = analysis_plan.pedigree_drift.size()
+        exit 1, "ERROR: ${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set - see the STALE FAMILY OUTPUTS summary above"
+    }
+
     // Validate that required steps are available
     validateStepsAvailability(analysis_plan)
     
@@ -445,7 +453,8 @@ def createAnalysisPlan(families, individuals, family_members) {
         wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
         wombat: [needed: [], existing: [], need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
-        ancestry: [needed: [], existing: [], need_extract: [], need_family_merge: [:], need_family_score: [:], need_cohort_merge: false]
+        ancestry: [needed: [], existing: [], need_extract: [], need_family_merge: [:], need_family_score: [:], need_cohort_merge: false],
+        pedigree_drift: [:]
     ]
     
     // Check extractor TSV list
@@ -473,6 +482,23 @@ def createAnalysisPlan(families, individuals, family_members) {
 
         if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() && pedigree_ok) {
             plan.deepvariant_family.existing.add(fid)
+
+            // The family has been called, but the pedigree may have gained members since.
+            // A member with no gVCF cannot possibly be in the joint call, so the family's
+            // outputs are stale - and nothing will fix that on its own, because the very
+            // existence of norm.bcf is what stops the missing members being scheduled.
+            //
+            // Membership is inferred from which members have a gVCF rather than read from
+            // the BCF: bcftools is not on the launching node's PATH, and the family's own
+            // {FID}.pedigree.tsv is no help because it is rewritten from the current
+            // pedigree and so already lists the members the call is missing.
+            def members = family_members.findAll { _barcode, member_fid -> member_fid == fid }.keySet()
+            def without_gvcf = members.findAll { barcode ->
+                !new File("${Sharding.getSampleDir(params.data, barcode)}/deepvariant/${barcode}.g.vcf.gz").exists()
+            }.sort()
+            if (without_gvcf) {
+                plan.pedigree_drift[fid] = [members: members.size(), missing: without_gvcf]
+            }
         } else {
             plan.deepvariant_family.needed.add(fid)
         }
@@ -630,8 +656,17 @@ def createAnalysisPlan(families, individuals, family_members) {
             // Only need alignment if the individual needs DeepVariant
             if (barcode in plan.deepvariant_sample.needed) {
                 plan.alignment.needed.add(barcode)
+            } else if (new File("${smp_dir}/deepvariant/${barcode}.g.vcf.gz").exists()) {
+                // Benign: nothing downstream reads the CRAM. Family calling consumes the
+                // gVCF and the ancestry panel extraction reads it directly, so a missing
+                // CRAM here costs nothing but the ability to regenerate coverage bedgraphs.
+                def bedgraph_note = has_bedgraph ? "" : " (its coverage bedgraph is also absent and cannot be regenerated without the CRAM)"
+                log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
             } else {
-                log.warn "Individual ${barcode} has no ${params.ref_name} CRAM but is not scheduled for alignment (its family already has downstream outputs) - it will be skipped"
+                // Genuinely stuck: no CRAM, no gVCF, and the family is already called, so
+                // the plan will never schedule anything for this individual and the family's
+                // outputs cannot contain it. See the STALE FAMILY OUTPUTS summary.
+                log.warn "Individual ${barcode} has neither a ${params.ref_name} CRAM nor a gVCF, and family ${family_members[barcode]} is already called - nothing will be scheduled for it and the family's outputs cannot include it. Provide input data for it, or remove it from the pedigree"
             }
         }
     }
@@ -791,6 +826,36 @@ def displayAnalysisSummary(analysis_plan) {
     }
     if (analysis_plan.ancestry.needed) {
         log.info "Families needing ancestry/PGS: ${analysis_plan.ancestry.needed.join(', ')}"
+    }
+    if (analysis_plan.pedigree_drift) {
+        def n_drift = analysis_plan.pedigree_drift.size()
+        def drift_noun = n_drift == 1 ? "FAMILY" : "FAMILIES"
+        def drift_lines = analysis_plan.pedigree_drift.collect { fid, drift ->
+            "${fid}: ${drift.missing.size()} of ${drift.members} members have no gVCF (${drift.missing.join(', ')})"
+        }
+        log.warn "STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun.toLowerCase()} with already-called outputs that cannot contain every member the pedigree lists - details below"
+        log.info """
+    ========================================================================================
+                    STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun}
+    ========================================================================================
+    These families have already been called, but the pedigree lists members that have no
+    gVCF - so the existing family outputs cannot contain them. This does not self-heal: the
+    presence of the family's norm.bcf is exactly what stops the missing members from being
+    scheduled for alignment or variant calling.
+
+    ${drift_lines.join('\n    ')}
+
+    Confirm which samples a family actually contains with:
+      bcftools query -l <data>/families/{S1}/{S2}/<FID>/vcfs/<FID>.norm.bcf
+
+    Then either
+      - provide the missing input data and delete that family's norm.bcf, its .csi and the
+        annotation/wombat/ancestry outputs built from it, so it is re-called in full; or
+      - remove the members that have no data from the pedigree, if they were never sequenced.
+
+    Set pedigree_strict: true to stop the run on this instead of warning.
+    ========================================================================================
+    """
     }
 }
 
