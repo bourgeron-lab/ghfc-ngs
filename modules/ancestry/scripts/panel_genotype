@@ -26,9 +26,17 @@ A genotype is decided as:
     biallelic variant at POS, alleles match the panel, DP/GQ pass -> the call
     inside a reference block, MIN_DP/GQ pass                      -> 0/0
     reference block below threshold                               -> ./.
+    a record at POS whose GT is a no-call (DeepVariant declined)   -> ./.
     variant at POS whose alleles differ from the panel's           -> ./.
     spanned by a deletion                                          -> ./.
     no record at all                                               -> ./.
+
+The gvcf_nocall bucket is kept separate from allele_mismatch because the two have
+opposite implications when a sample fails a coverage gate: a mismatch or a
+threshold cut might be recoverable by loosening --min-dp/--min-gq, whereas a
+no-call cannot be recovered at all - DeepVariant emitted a record and refused to
+genotype it. On some samples this is the dominant loss, and counting it as an
+allele mismatch makes it look like a reference or allele problem instead.
 """
 
 import argparse
@@ -38,9 +46,10 @@ import sys
 # Resolution order when more than one record touches a site. A DeepVariant gVCF
 # covers the callable genome exactly once, so this only arbitrates the pathological
 # cases (split multiallelics, an indel abutting a block).
-CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL = (
-    "variant", "refblock", "lowqual", "allele_mismatch", "spanned", "nocall")
-REASONS = [CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL]
+CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL, GVCF_NOCALL = (
+    "variant", "refblock", "lowqual", "allele_mismatch", "spanned", "nocall",
+    "gvcf_nocall")
+REASONS = [CALLED, REFBLOCK, LOWQUAL, MISMATCH, SPANNED, NOCALL, GVCF_NOCALL]
 
 
 def _open(path):
@@ -196,6 +205,12 @@ def genotype(sites, records, min_dp, min_gq):
                        REFBLOCK if passes else LOWQUAL)
             elif site_pos == start:
                 alts = alt.split(",")
+                # An explicit no-call is not a quality cut and not an allele
+                # problem, so it gets its own bucket - no threshold can recover it.
+                if "." in gt.replace("|", "/").split("/"):
+                    assign(j, "./.", GVCF_NOCALL, force=True)
+                    j += 1
+                    continue
                 recoded = recode_gt(gt, alts, panel_alt) if ref == panel_ref else None
                 if recoded is None:
                     assign(j, "./.", MISMATCH, force=True)
