@@ -31,6 +31,7 @@ rs_spanned	1	7000	C	A
 rs_nocall	1	8000	T	G
 rs_multi_ok	1	9000	A	G
 rs_multi_mixed	1	9500	C	T
+rs_gvcf_nocall	1	9800	A	G
 rs_other_contig	2	1500	G	C
 EOF
 awk 'NR>1{print "chr"$2"\t"($3-1)"\t"$3}' sites.tsv > sites.bed
@@ -56,6 +57,7 @@ chr1	6000	.	G	A	40	PASS	.	GT:GQ:DP	0/1:44:30
 chr1	6995	.	CAAAAAAAAAA	C	40	PASS	.	GT:GQ:DP	0/1:44:30
 chr1	9000	.	A	G,C	40	PASS	.	GT:GQ:DP	0/1:44:30
 chr1	9500	.	C	T,A	40	PASS	.	GT:GQ:DP	1/2:44:30
+chr1	9800	.	A	G,<*>	40	PASS	.	GT:GQ:DP	./.:44:30
 chr2	1400	.	G	<*>	0	.	END=1600	GT:GQ:MIN_DP	0/0:48:33
 EOF
 bgzip -f in.vcf && tabix -f -p vcf in.vcf.gz
@@ -79,6 +81,7 @@ rs_spanned	./.
 rs_nocall	./.
 rs_multi_ok	0/1
 rs_multi_mixed	./.
+rs_gvcf_nocall	./.
 rs_other_contig	0/0
 EOF
 
@@ -95,6 +98,19 @@ done < expected.tsv
 
 # Every panel site must appear exactly once, carrying the panel's REF and ALT even
 # when homozygous reference - the allele-set match downstream depends on it.
+# A DeepVariant no-call must land in its own bucket: counting it as an allele
+# mismatch hides the fact that no threshold change can ever recover it.
+nocall_col=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="n_gvcf_nocall") print i}' out.stats.tsv)
+mism_col=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="n_allele_mismatch") print i}' out.stats.tsv)
+n_nocall=$(awk -F'\t' -v c="${nocall_col}" 'NR==2{print $c}' out.stats.tsv)
+n_mism=$(awk -F'\t' -v c="${mism_col}" 'NR==2{print $c}' out.stats.tsv)
+if [ "${n_nocall}" = "1" ] && [ "${n_mism}" = "2" ]; then
+    printf '  ok    gvcf no-call counted separately (nocall=1, mismatch=2)\n'
+else
+    printf '  FAIL  bucketing: expected nocall=1 mismatch=2, got nocall=%s mismatch=%s\n' "${n_nocall}" "${n_mism}"
+    fail=1
+fi
+
 n_sites=$(( $(wc -l < sites.tsv) - 1 ))
 n_out=$(grep -vc '^#' out.vcf)
 if [ "${n_out}" -ne "${n_sites}" ]; then
