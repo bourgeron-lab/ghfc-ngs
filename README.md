@@ -729,22 +729,46 @@ Before running any processes, the pipeline displays:
 ========================================================================================
                                 ANALYSIS SUMMARY
 ========================================================================================
-ALIGNMENT: 2 individuals done and 1 to do
+ALIGNMENT: 2 individuals done, 1 to align, 0 needing bedgraph only
 == SNVs/INDELs Calling ==
 DEEPVARIANT_SAMPLE: 1 individuals done and 2 to do
 DEEPVARIANT_FAMILY: 0 families done and 2 to do
 ANNOTATION: 0 families done and 2 to do
 WOMBAT: 0 families done and 2 to do
 == Common Variants ==
-SNVS_COHORT: common variants cohort bcf is needed: Yes
+SNVS_COHORT: common variants cohort bcf merge: Yes - wombat cohort merges due: 1
 == SVs Calling ==
 WISECONDORX PREDICT: 0 individuals done and 3 to do
+== Ancestry / PGS ==
+ANCESTRY: Skipped (step not requested)
 == Other ==
 EXTRACTOR: Skipped (no TSV files provided)
 ========================================================================================
 ```
 
 This helps you understand what work will be performed.
+
+### Cohort Run State
+
+After every run, the pipeline writes a hidden record of what it did into the cohort directory:
+
+```
+${data}/cohorts/<COHORT_NAME>/.ghfc-ngs.state.json
+```
+
+It holds the last run and the last successful run, each with a timestamp, a completion status,
+SHA-256 checksums of the pedigree and parameters file that produced the outputs, the pipeline
+version and commit, and per-step completion percentages - plus a short history of earlier runs.
+
+```bash
+# Did the last run finish, and how complete is the cohort?
+jq -r '.last_run.status' "$data/cohorts/EAGER/.ghfc-ngs.state.json"
+jq -r '.last_run.completion' "$data/cohorts/EAGER/.ghfc-ngs.state.json"
+```
+
+Stub and preview runs deliberately write nothing, and the file is skipped when `cohort_name` is
+not set. See [COHORT_STATE.md](COHORT_STATE.md) for the schema, the status lifecycle and more
+recipes.
 
 ### Error Checking
 
