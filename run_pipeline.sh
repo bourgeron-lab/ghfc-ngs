@@ -21,12 +21,21 @@ usage() {
 GHFC WGS Family-based Variant Calling Pipeline
 
 USAGE:
-    $0 [OPTIONS]
+    $PROG_NAME COHORT [OPTIONS]
+    $PROG_NAME --params-file FILE [OPTIONS]
+
+ARGUMENTS:
+    COHORT                      Cohort name, shorthand for
+                                --params-file cohorts/COHORT/COHORT.params.yml.
+                                Looked up under ./cohorts first, then under
+                                \$GHFC_NGS_COHORTS
+                                (default: $COHORTS_ROOT)
+                                Must be the first argument.
 
 OPTIONS:
     --profile PROFILE           Nextflow profile(s) to use (default: slurm,apptainer)
     --config CONFIG             Additional Nextflow config file
-    --params-file FILE          Parameters file (YAML format)
+    --params-file FILE          Parameters file (YAML format), overrides COHORT
     --work-dir DIR              Nextflow work directory (default: work)
     --data DIR                  Data directory
     --scratch DIR               Scratch directory  
@@ -41,19 +50,57 @@ OPTIONS:
     -h, --help                  Show this help message
 
 EXAMPLES:
-    # Run full pipeline
-    $0 --params-file params.yml
+    # Run full pipeline for a cohort
+    $PROG_NAME CANDY_mpx
+
+    # Run full pipeline with an explicit parameters file
+    $PROG_NAME --params-file params.yml
 
     # Run migration workflow (one-time, for legacy files)
-    $0 --migrate --params-file params.yml
+    $PROG_NAME --migrate --params-file params.yml
 
     # Run with specific steps
-    $0 --params-file params.yml --steps "deepvariant,family_calling"
+    $PROG_NAME --params-file params.yml --steps "deepvariant,family_calling"
 
     # Resume previous run
-    $0 --params-file params.yml --resume
+    $PROG_NAME --params-file params.yml --resume
 
 EOF
+}
+
+# Function to abort with a message on stderr, before nextflow is launched
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+# Function to resolve a cohort name to its parameters file; sets PARAMS_FILE
+resolve_cohort_params() {
+    local name="$1"
+    local local_dir="$PWD/cohorts/$name"
+    local root_dir="$COHORTS_ROOT/$name"
+
+    [[ -f "$name" ]] && die "'$name' is a file, not a cohort name. Did you mean: --params-file $name"
+    if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        die "invalid cohort name '$name'. Expected letters, digits, '.', '_' or '-' only. To use a parameters file by path: --params-file $name"
+    fi
+    if [[ -f "$local_dir/$name.params.yml" ]]; then
+        PARAMS_FILE="-params-file $local_dir/$name.params.yml"
+        return 0
+    fi
+    if [[ -f "$root_dir/$name.params.yml" ]]; then
+        PARAMS_FILE="-params-file $root_dir/$name.params.yml"
+        return 0
+    fi
+    if [[ -d "$local_dir" || -d "$root_dir" ]]; then
+        die "cohort '$name': directory found but no parameters file in it. Expected one of:
+         $local_dir/$name.params.yml
+         $root_dir/$name.params.yml"
+    fi
+    die "cohort '$name': not found. No cohort directory at:
+         $local_dir
+         $root_dir
+       Check the name, set GHFC_NGS_COHORTS, or pass --params-file FILE."
 }
 
 # Default values
@@ -72,6 +119,23 @@ MIGRATE=""
 DRY_RUN=""
 STUB_RUN=""
 EXTRA_ARGS=""
+COHORT=""
+PROG_NAME="ghfc-ngs"
+COHORTS_ROOT="${GHFC_NGS_COHORTS:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts}"
+COHORTS_ROOT="${COHORTS_ROOT%/}"
+
+# No arguments at all: there is nothing to run
+if [[ $# -eq 0 ]]; then
+    usage >&2
+    die "no arguments. Give a cohort name (e.g. $PROG_NAME CANDY_mpx) or --params-file FILE."
+fi
+
+# A bare first argument is a cohort name, shorthand for
+# --params-file cohorts/<NAME>/<NAME>.params.yml (resolved after parsing)
+if [[ "$1" != -* ]]; then
+    COHORT="$1"
+    shift
+fi
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -85,6 +149,8 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --params-file)
+            [[ $# -ge 2 ]] || die "--params-file requires a FILE argument."
+            [[ -f "$2" ]] || die "parameters file not found: $2"
             PARAMS_FILE="-params-file $2"
             shift 2
             ;;
@@ -143,10 +209,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Resolve the cohort shorthand, unless --params-file already gave one explicitly
+if [[ -n "$COHORT" ]]; then
+    if [[ -n "$PARAMS_FILE" ]]; then
+        echo "WARNING: --params-file given; ignoring cohort name '$COHORT'." >&2
+    else
+        resolve_cohort_params "$COHORT"
+    fi
+fi
+
 # Check if Nextflow is available
 if ! command -v nextflow &> /dev/null; then
-    echo "ERROR: Nextflow is not available. Please load the nextflow module."
-    exit 1
+    die "Nextflow is not available. Please load the nextflow module."
 fi
 
 

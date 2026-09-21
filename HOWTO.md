@@ -29,11 +29,47 @@ The ghfc-ngs workflow requires at least a parameter file, and has several option
 If you want to display the usage message:
 `ghfc-ngs -h`
 
+### Running a cohort by name
+
+The simplest way to launch the workflow is to give it a cohort name:
+
+```bash
+ghfc-ngs CANDY_mpx
+```
+
+This is a shorthand for `--params-file cohorts/CANDY_mpx/CANDY_mpx.params.yml`. The cohort name must be the **first** argument, and can be followed by any of the usual options:
+
+```bash
+ghfc-ngs CANDY_mpx --resume
+```
+
+The parameter file is looked up in two places, in this order:
+
+1. `./cohorts/CANDY_mpx/CANDY_mpx.params.yml`, relative to the directory you are in;
+2. `$GHFC_NGS_COHORTS/CANDY_mpx/CANDY_mpx.params.yml`, which defaults to
+   `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts` — the same `cohorts/` directory that holds the pedigree and the cohort outputs.
+
+So a parameter file kept next to you, in a local `cohorts/` directory, wins over the shared one. Set `GHFC_NGS_COHORTS` in your `~/.bashrc` to point the fallback at another data root.
+
+If neither file exists, the runner stops before launching Nextflow and tells you which two paths it tried, distinguishing a cohort directory that does not exist at all from one that exists but has no parameter file in it.
+
+### Running with an explicit parameter file
+
+The `--params-file` option is still available, and takes precedence over a cohort name given on the same command line. Use it for parameter files that do not follow the `cohorts/<NAME>/<NAME>.params.yml` layout:
+
+```bash
+ghfc-ngs --params-file my_params.yml
+```
+
 To create a parameter files, the easiest way is to copy the one from this repository ([available here](params.yml)) and then edit it with your favorite code editor.
 
 ```bash
 curl xxxxx
 ```
+
+> **Note**
+>
+> The `ghfc-ngs` wrapper passes `$@` unquoted, so arguments containing spaces never reach the runner intact. Keep cohort names and paths free of spaces.
 
 ## Tuning
 

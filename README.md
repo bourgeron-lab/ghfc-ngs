@@ -125,6 +125,26 @@ cp params.yml my_params.yml
 
 ### 4. Run the Pipeline
 
+#### Cohort Shorthand
+
+A cohort name given as the **first** argument stands in for its parameters file:
+
+```bash
+# Equivalent to --params-file cohorts/CANDY_mpx/CANDY_mpx.params.yml
+./run_pipeline.sh CANDY_mpx
+
+# Composes with any other option
+./run_pipeline.sh CANDY_mpx --resume
+```
+
+The file is looked up under `./cohorts/` in the current directory first, then under
+`$GHFC_NGS_COHORTS` (default `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts`, the same
+per-cohort directory described in [Input Data Structure](#input-data-structure)). If neither holds
+`<NAME>.params.yml`, the runner reports both paths it tried and exits without launching Nextflow.
+
+`--params-file` remains available for parameters files outside that layout, and takes precedence
+over a cohort name on the same command line.
+
 #### Full Pipeline (Default)
 
 ```bash
