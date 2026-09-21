@@ -50,7 +50,10 @@ process MERGE_WOMBAT {
   tuple val(cohort_name), val(wombat_config_name), val(output_name), path("${output_tsv}"), emit: cohort_wombat_tsv
 
   script:
-  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv"
+  // The .annotated. segment matches the path createAnalysisPlan checks for and the
+  // per-family naming; without it the plan never finds this file and the cohort is
+  // re-merged on every single run
+  output_tsv = "${cohort_name}.rare.${vep_config_name}.annotated.${wombat_config_name}.${output_name}.tsv"
 
   """
   # List all matching TSV files (sorted for consistency)
@@ -70,7 +73,7 @@ process MERGE_WOMBAT {
   """
 
   stub:
-  output_tsv = "${cohort_name}.rare.${vep_config_name}.${wombat_config_name}.${output_name}.tsv"
+  output_tsv = "${cohort_name}.rare.${vep_config_name}.annotated.${wombat_config_name}.${output_name}.tsv"
   """
   echo "header" > ${output_tsv}
   """
