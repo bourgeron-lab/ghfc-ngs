@@ -105,11 +105,15 @@ workflow {
         exit 1, "ERROR: ${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set - see the STALE FAMILY OUTPUTS summary above"
     }
 
+    // Resolve the input files behind everything the plan wants to align, once, so that the
+    // guard below and the channels built afterwards agree on what work is actually possible
+    def resolved_inputs = resolveAlignmentInputs(analysis_plan)
+
     // Validate that required steps are available
-    validateStepsAvailability(analysis_plan)
+    validateStepsAvailability(analysis_plan, resolved_inputs, family_members)
     
     // Create channels for different steps
-    def channels = createChannels(analysis_plan)
+    def channels = createChannels(analysis_plan, resolved_inputs)
     
     // Run alignment if needed and allowed
     // Also entered when CRAMs exist but their coverage bedgraphs are missing, in which case only
@@ -272,7 +276,10 @@ workflow {
         
         SNVS_COHORT(all_available_common_bcfs, all_available_wombat_files,
                     analysis_plan.snvs_cohort.need_bcf_merge, 
-                    analysis_plan.snvs_cohort.need_wombat_merges)
+                    analysis_plan.snvs_cohort.need_wombat_merges,
+                    families,
+                    analysis_plan.annotation.needed,
+                    analysis_plan.wombat.needed)
     }
     
     // Run WisecondorX predict if needed and allowed
@@ -449,7 +456,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
-        snvs_cohort: [needed: [], existing: []],
+        snvs_cohort: [needed: [], existing: [], need_bcf_merge: false, need_wombat_merges: [:]],
         wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
         wombat: [needed: [], existing: [], need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
@@ -796,7 +803,7 @@ def displayAnalysisSummary(analysis_plan) {
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
     == Common Variants ==
-    SNVS_COHORT: common variants cohort bcf is needed: ${analysis_plan.snvs_cohort.needed.size() > 0 ? 'Yes' : 'No'}
+    SNVS_COHORT: common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'} - wombat cohort merges due: ${analysis_plan.snvs_cohort.need_wombat_merges?.count { _k, v -> v == true } ?: 0}
     == SVs Calling ==
     WISECONDORX PREDICT: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
     == Ancestry / PGS ==
@@ -821,8 +828,12 @@ def displayAnalysisSummary(analysis_plan) {
     if (analysis_plan.annotation.needed) {
         log.info "Families needing annotation (gnomAD annotation, filtering, and VEP): ${analysis_plan.annotation.needed.join(', ')}"
     }
-    if (analysis_plan.snvs_cohort.needed) {
+    if (analysis_plan.snvs_cohort.need_bcf_merge) {
         log.info "Cohort needing common variant merge: Yes"
+    }
+    def due_wombat_merges = analysis_plan.snvs_cohort.need_wombat_merges?.findAll { _k, v -> v == true }?.keySet()
+    if (due_wombat_merges) {
+        log.info "Cohort wombat merges needed for: ${due_wombat_merges.join(', ')}"
     }
     if (analysis_plan.ancestry.needed) {
         log.info "Families needing ancestry/PGS: ${analysis_plan.ancestry.needed.join(', ')}"
@@ -859,7 +870,7 @@ def displayAnalysisSummary(analysis_plan) {
     }
 }
 
-def validateStepsAvailability(analysis_plan) {
+def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     def errors = []
     
     // Check if alignment is needed but not available
@@ -871,6 +882,9 @@ def validateStepsAvailability(analysis_plan) {
     // ALIGNMENT workflow receives empty channels and the run silently does nothing
     if (analysis_plan.alignment.needed.size() > 0 && !params.fastq_pattern && !params.old_cram_37 && !params.old_cram_38) {
         errors.add("Alignment is required for ${analysis_plan.alignment.needed.size()} individuals (${analysis_plan.alignment.needed.join(', ')}) but no input source is configured - set one of fastq_pattern, old_cram_37 or old_cram_38")
+    } else {
+        // Configured is not the same as present: check that each individual resolves to a file
+        errors.addAll(reconcilePlanWithInputs(analysis_plan, resolved_inputs, family_members))
     }
 
     // Check if deepvariant_sample is needed but not available  
@@ -913,74 +927,246 @@ def validateStepsAvailability(analysis_plan) {
     }
 }
 
-def createChannels(analysis_plan) {
+// Barcode derivation lives in one place so the input scan and the channels can never
+// disagree about which file belongs to which individual. That drift is the whole bug:
+// createAnalysisPlan asks whether an OUTPUT cram is absent, the channels glob INPUT
+// directories, and nothing used to compare the two.
+def barcodeFromCramName(cram_name) {
+    return cram_name.tokenize('.')[0]
+}
+
+def barcodeFromFastqName(fastq_name) {
+    return fastq_name.tokenize('_')[4]
+}
+
+def unitFromFastqName(fastq_name) {
+    def parts = fastq_name.tokenize('_')
+    def flowcell = fastq_name.tokenize('.')[0].tokenize('_')[-1]
+    return "${parts[4]}_${flowcell}_${parts[5]}"
+}
+
+// Resolve the actual input files behind every individual the plan wants to align.
+//
+// alignment.needed means "the output CRAM is missing and something downstream wants it" -
+// it says nothing about an input existing. Resolving inputs here, eagerly and once, gives
+// validateStepsAvailability something real to check and gives createChannels its rows, so
+// the plan and the channels describe the same set of work.
+def resolveAlignmentInputs(analysis_plan) {
+    def resolved = [
+        cram_37       : [],
+        cram_38       : [],
+        resolvable    : [] as Set,
+        fastq_barcodes: [] as Set,
+        index_missing : [:],
+        unpaired_fastq: [:],
+        searched      : []
+    ]
+
+    if (analysis_plan.alignment.needed.size() == 0) {
+        return resolved
+    }
+
+    def needed = analysis_plan.alignment.needed as Set
+
+    // Old CRAMs: flat directories, one file per individual
+    [['cram_37', params.old_cram_37], ['cram_38', params.old_cram_38]].each { key, dir ->
+        if (!dir) {
+            return
+        }
+        def pattern = "${dir}/*.cram"
+        resolved.searched.add(pattern)
+        def matches = file(pattern)
+        if (!(matches instanceof List)) {
+            matches = matches ? [matches] : []
+        }
+        matches.each { cram ->
+            def barcode = barcodeFromCramName(cram.name)
+            if (!(barcode in needed)) {
+                return
+            }
+            def crai_path = "${cram}.crai"
+            if (new File(crai_path).exists()) {
+                resolved[key].add([barcode, cram, file(crai_path)])
+                resolved.resolvable.add(barcode)
+            } else {
+                // Recorded rather than dropped: the data is there, only the index is not,
+                // and that needs a different fix than missing input
+                resolved.index_missing[barcode] = cram.toString()
+            }
+        }
+    }
+
+    // FASTQ: the channel still uses fromFilePairs for the pairing itself, so this scan
+    // mirrors it - a barcode is resolvable once some unit of it has both mates on disk,
+    // which is the condition for fromFilePairs(size: 2) to emit that unit. createChannels
+    // re-checks what was actually emitted, so an approximation here cannot go unnoticed.
+    if (params.fastq_pattern) {
+        def pattern = "${params.data}/fastq/${params.fastq_pattern}"
+        resolved.searched.add(pattern)
+        def matches = file(pattern)
+        if (!(matches instanceof List)) {
+            matches = matches ? [matches] : []
+        }
+        def unit_count = [:]
+        def unit_barcode = [:]
+        matches.each { fq ->
+            def barcode
+            def unit
+            try {
+                barcode = barcodeFromFastqName(fq.name)
+                unit = unitFromFastqName(fq.name)
+            } catch (Exception _e) {
+                log.warn "Ignoring FASTQ ${fq.name}: its name does not follow the expected underscore-separated layout, so no barcode could be read from it"
+                return
+            }
+            if (!(barcode in needed)) {
+                return
+            }
+            unit_count[unit] = (unit_count[unit] ?: 0) + 1
+            unit_barcode[unit] = barcode
+        }
+        unit_count.each { unit, n ->
+            if (n == 2) {
+                resolved.resolvable.add(unit_barcode[unit])
+                resolved.fastq_barcodes.add(unit_barcode[unit])
+            } else {
+                resolved.unpaired_fastq[unit] = n
+            }
+        }
+        resolved.unpaired_fastq.each { unit, n ->
+            log.warn "FASTQ unit ${unit} has ${n} read file(s) instead of 2 and will be ignored by fromFilePairs"
+        }
+    }
+
+    return resolved
+}
+
+// Walk the plan the way the channels will, so an individual with no usable input is named
+// instead of vanishing. Nothing downstream can rescue it: an individual that needs
+// alignment is by construction absent from alignment.existing, so it never enters
+// all_available_crams and every later stage collapses with it, silently and with exit 0.
+def reconcilePlanWithInputs(analysis_plan, resolved_inputs, family_members) {
+    def errors = []
+
+    if (analysis_plan.alignment.needed.size() == 0) {
+        return errors
+    }
+
+    def unresolved = analysis_plan.alignment.needed.findAll { barcode -> !(barcode in resolved_inputs.resolvable) }
+    if (!unresolved) {
+        return errors
+    }
+
+    def searched = resolved_inputs.searched ?: ['nothing - no input source is configured']
+    // Only hint at the naming rule of the sources actually searched
+    def hints = []
+    if (params.old_cram_37 || params.old_cram_38) {
+        hints.add("A CRAM is matched to an individual by the part of its name before the first '.', so C0XYVSO.cram matches but C0XYVSO_hs38DH.cram does not, and its index must be <file>.cram.crai.")
+    }
+    if (params.fastq_pattern) {
+        hints.add("A FASTQ is matched to an individual by the 5th underscore-separated field of its name, and both mates of a unit must be present.")
+    }
+    errors.add("No input data found for ${unresolved.size()} of the ${analysis_plan.alignment.needed.size()} individuals that need alignment: ${unresolved.join(', ')}\n" +
+               "        Searched: ${searched.join(', ')}" +
+               (hints ? "\n        " + hints.join("\n        ") : ""))
+
+    // A CRAM that is present but unindexed is a different problem with a different fix
+    def index_missing = resolved_inputs.index_missing.findAll { barcode, _cram -> barcode in unresolved }
+    if (index_missing) {
+        errors.add("Input CRAM found but unusable for ${index_missing.size()} individual(s) - the index must exist and be named <file>.cram.crai, run 'samtools index' on each:\n        " +
+                   index_missing.collect { barcode, cram -> "${barcode}: ${cram}" }.join("\n        "))
+    }
+
+    // Name the downstream work that cannot happen either, so this report covers everything
+    // the ANALYSIS SUMMARY above promised
+    def blocked = unresolved as Set
+
+    def blocked_samples = analysis_plan.deepvariant_sample.needed.findAll { barcode -> barcode in blocked }
+    if (blocked_samples) {
+        errors.add("Blocked by the above - variant calling for ${blocked_samples.size()} individual(s): ${blocked_samples.join(', ')}")
+    }
+
+    def members_by_family = [:]
+    family_members.each { barcode, fid ->
+        members_by_family[fid] = (members_by_family[fid] ?: []) + [barcode]
+    }
+
+    def fully_blocked = []
+    def partly_blocked = []
+    analysis_plan.deepvariant_family.needed.each { fid ->
+        def members = members_by_family[fid] ?: []
+        def blocked_members = members.findAll { barcode -> barcode in blocked }
+        if (!blocked_members) {
+            return
+        }
+        if (blocked_members.size() == members.size()) {
+            fully_blocked.add(fid)
+        } else {
+            partly_blocked.add("${fid} (no data for ${blocked_members.join(', ')} of ${members.size()} members)")
+        }
+    }
+    if (fully_blocked) {
+        errors.add("Blocked by the above - family calling, annotation and wombat for ${fully_blocked.size()} family/families with no usable member: ${fully_blocked.join(', ')}")
+    }
+    if (partly_blocked) {
+        // Worth its own line: this is the set that would otherwise be joint-called from an
+        // incomplete pedigree rather than not called at all
+        errors.add("Blocked by the above - ${partly_blocked.size()} family/families would be joint-called from an incomplete set of members: ${partly_blocked.join('; ')}")
+    }
+
+    return errors
+}
+
+def createChannels(analysis_plan, resolved_inputs) {
     def channels = [:]
     
     // Create FASTQ channel for alignment
+    //
+    // fromFilePairs owns the pairing, so this cannot be built from the eager scan the way
+    // the CRAM channels are. Instead the scan's verdict is re-checked against what the
+    // channel actually emitted: toList/flatMap keeps that to a single consumption and
+    // still aborts before any alignment task is submitted.
     if (params.fastq_pattern && analysis_plan.alignment.needed.size() > 0) {
+        def fastq_expected = resolved_inputs.fastq_barcodes
         channels.fastq_files = Channel
             .fromFilePairs("${params.data}/fastq/${params.fastq_pattern}", size: 2)
             .map { sample_id, reads ->
                 def parts = reads[0].name.tokenize('_')
-                def barcode = parts[4]
+                def barcode = barcodeFromFastqName(reads[0].name)
                 def project = parts[2][-3..-1]
                 def flowcell = reads[0].name.tokenize('.')[0].tokenize('_')[-1]
                 def dual = reads[0].name.tokenize('.')[1]
                 def lane = parts[5]
-                def unit = "${barcode}_${flowcell}_${lane}"
+                def unit = unitFromFastqName(reads[0].name)
                 
                 [barcode, unit, reads[0], reads[1], project, flowcell, dual, lane]
             }
             .filter { barcode, unit, r1, r2, project, flowcell, dual, lane -> 
                 barcode in analysis_plan.alignment.needed 
             }
+            .toList()
+            .flatMap { rows ->
+                def emitted = rows.collect { row -> row[0] } as Set
+                def dropped = fastq_expected.findAll { barcode -> !(barcode in emitted) }
+                if (dropped) {
+                    error "FASTQ pairing dropped ${dropped.size()} individual(s) that the input scan found data for: ${dropped.join(', ')} - check that every read file has its mate and that '${params.fastq_pattern}' pairs them"
+                }
+                rows
+            }
     } else {
         channels.fastq_files = Channel.empty()
     }
     
-    // Create CRAM channel for GRCh37 realignment
-    if (params.old_cram_37 && analysis_plan.alignment.needed.size() > 0) {
-        channels.cram_37_files = Channel
-            .fromPath("${params.old_cram_37}/*.cram")
-            .map { cram ->
-                def barcode = cram.name.tokenize('.')[0]
-                def crai_path = "${cram}.crai"
-                [barcode, cram, crai_path]
-            }
-            .filter { barcode, cram, crai_path -> 
-                barcode in analysis_plan.alignment.needed && new File(crai_path).exists()
-            }
-            .map { barcode, cram, crai_path ->
-                [barcode, cram, file(crai_path)]
-            }
-    } else {
-        channels.cram_37_files = Channel.empty()
-    }
-    
-    // Create CRAM channel for GRCh38 realignment
-    if (params.old_cram_38 && analysis_plan.alignment.needed.size() > 0) {
-        channels.cram_38_files = Channel
-            .fromPath("${params.old_cram_38}/*.cram")
-            .map { cram ->
-                def barcode = cram.name.tokenize('.')[0]
-                def crai_path = "${cram}.crai"
-                [barcode, cram, crai_path]
-            }
-            .filter { barcode, cram, crai_path -> 
-                barcode in analysis_plan.alignment.needed && new File(crai_path).exists()
-            }
-            .map { barcode, cram, crai_path ->
-                [barcode, cram, file(crai_path)]
-            }
-    } else {
-        channels.cram_38_files = Channel.empty()
-    }
+    // Create CRAM channels for realignment, from the single resolution pass rather than a
+    // second glob - re-globbing here is what let the channels and the plan drift apart
+    channels.cram_37_files = Channel.fromList(resolved_inputs.cram_37)
+    channels.cram_38_files = Channel.fromList(resolved_inputs.cram_38)
     
     // Create channel for existing CRAM files
     channels.existing_crams = Channel
         .fromPath("${params.data}/samples/*/*/*/sequences/*.${params.ref_name}.cram")
         .map { cram ->
-            def barcode = cram.name.tokenize('.')[0]
+            def barcode = barcodeFromCramName(cram.name)
             def crai_path = "${cram}.crai"
             [barcode, cram, crai_path]
         }
@@ -995,7 +1181,7 @@ def createChannels(analysis_plan) {
     channels.bedgraph_only_crams = Channel
         .fromPath("${params.data}/samples/*/*/*/sequences/*.${params.ref_name}.cram")
         .map { cram ->
-            def barcode = cram.name.tokenize('.')[0]
+            def barcode = barcodeFromCramName(cram.name)
             def crai_path = "${cram}.crai"
             [barcode, cram, crai_path]
         }

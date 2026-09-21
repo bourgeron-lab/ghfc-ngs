@@ -15,22 +15,44 @@ workflow SNVS_COHORT {
     wombat_files           // channel: [fid, wombat_config_name, tsv]
     need_bcf_merge         // boolean: true if BCF merge is needed
     need_wombat_merges     // map: [wombat_config_name: boolean] - whether merge is needed for each config
+    families               // list: every family in the pedigree
+    annotation_needed      // list: families whose common filtered BCF this run should produce
+    wombat_needed          // list: families whose wombat tables this run should produce
 
     main:
 
     // Conditionally run BCF merge
     if (need_bcf_merge) {
-        // Collect all BCF files and their indices for cohort merge
-        bcf_files = filtered_common_bcfs
-            .map { fid, bcf, csi -> bcf }
-            .collect()
-        
-        csi_files = filtered_common_bcfs
-            .map { fid, bcf, csi -> csi }
-            .collect()
+        // Collect the triples once so the barrier below filters the BCFs and their indices
+        // consistently - collecting each of them independently cannot be filtered as a unit
+        cohort_bcf_input = filtered_common_bcfs
+            .toList()
+            .filter { rows ->
+                // toList emits [] on an empty channel where collect emitted nothing at all,
+                // so keep the old behaviour of not running the merge with no inputs
+                if (!rows) {
+                    log.warn "Skipping cohort common variant merge: no family common filtered BCFs are available"
+                    return false
+                }
+                // Never publish a cohort BCF built from an incomplete set of families
+                def expected = families.findAll { fid ->
+                    fid in annotation_needed ||
+                    file("${Sharding.getFamilyDir(params.data, fid)}/vcfs/${fid}.common_gt.bcf").exists()
+                }
+                def missing = expected - rows.collect { fid, _bcf, _csi -> fid }
+                if (missing) {
+                    log.warn "Skipping cohort common variant merge: common filtered BCF missing for ${missing.join(', ')}"
+                    return false
+                }
+                return true
+            }
 
         // Run cohort merge
-        SNVS_COHORT_MERGE(params.cohort_name, bcf_files, csi_files)
+        SNVS_COHORT_MERGE(
+            params.cohort_name,
+            cohort_bcf_input.map { rows -> rows.collect { _fid, bcf, _csi -> bcf } },
+            cohort_bcf_input.map { rows -> rows.collect { _fid, _bcf, csi -> csi } }
+        )
         cohort_bcf_output = SNVS_COHORT_MERGE.out.cohort_bcf
     } else {
         cohort_bcf_output = Channel.empty()
@@ -44,6 +66,21 @@ workflow SNVS_COHORT {
             .filter { fid_list, wombat_config_name, file_list ->
                 // Only process configs that need merging
                 need_wombat_merges[wombat_config_name] == true
+            }
+            .filter { fid_list, wombat_config_name, _file_list ->
+                // Never publish a cohort table built from an incomplete set of families.
+                // A family that produced nothing in this run must block the merge rather
+                // than drop out of the cohort table unnoticed.
+                def expected = families.findAll { fid ->
+                    fid in wombat_needed ||
+                    file("${Sharding.getFamilyDir(params.data, fid)}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${wombat_config_name}.tsv").exists()
+                }
+                def missing = expected - fid_list
+                if (missing) {
+                    log.warn "Skipping cohort ${wombat_config_name} merge: wombat table missing for ${missing.join(', ')}"
+                    return false
+                }
+                return true
             }
             .map { fid_list, wombat_config_name, file_list ->
                 tuple(params.cohort_name, file_list, params.vep_config_name, wombat_config_name, "results")
