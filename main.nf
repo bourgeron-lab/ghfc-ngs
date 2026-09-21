@@ -23,6 +23,167 @@ include { ANCESTRY } from './workflows/ancestry'
 
 /*
 ========================================================================================
+    COHORT RUN STATE
+========================================================================================
+    Everything that writes .ghfc-ngs.state.json, the per-cohort record of when this cohort
+    was last run, whether it finished, which pedigree and parameters produced its outputs,
+    and how complete each step is. See COHORT_STATE.md for the schema.
+
+    The mechanics (checksums, atomic write, history) live in lib/CohortState.groovy, which
+    has no Nextflow dependency and is unit testable on its own. What a "step" is, and all
+    logging, stays here.
+*/
+
+// A mutable holder rather than plain variables, and this is not a style choice: a bare
+// assignment made inside `workflow {}` lands in a per-run binding that workflow.onComplete
+// cannot see. Mutating a script-level container works from both scopes; reassigning it
+// does not.
+ghfc_run_state = [terminal_written: false, warned_no_cohort: false,
+                  pedigree_file: null, pedigree_data: null, plan: null]
+
+// The cohort directory holds this cohort's params file, its pedigree and its outputs, so it
+// is also where its state file belongs. Null when we cannot know it - params.cohort_name has
+// no default in nextflow.config, and writing to .../cohorts/null/ would be worse than nothing.
+def cohortStateDir() {
+    if (!params.data || !params.cohort_name) return null
+    return java.nio.file.Paths.get("${params.data}/cohorts/${params.cohort_name}")
+}
+
+// The -params-file path is not exposed on the workflow object in any Nextflow version, so the
+// command line is the only place it can be recovered from.
+def resolveParamsFilePath() {
+    def matcher = (workflow.commandLine =~ /-params-file\s+(?:'([^']+)'|"([^"]+)"|(\S+))/)
+    return matcher.find() ? (matcher.group(1) ?: matcher.group(2) ?: matcher.group(3)) : null
+}
+
+// workflow.start is an OffsetDateTime on Nextflow >= 22.04 and a java.util.Date before it.
+// Both are written as ISO-8601 so a consumer never has to care which one produced the file.
+def isoTimestamp(value) {
+    if (value == null) return null
+    if (value instanceof Date) return value.format("yyyy-MM-dd'T'HH:mm:ssXXX")
+    return value.toString()
+}
+
+// A params file checksum cannot see --steps or --data given on the command line, which change
+// the results without changing the file. Hashing the resolved map catches those too.
+def effectiveParamsSha() {
+    try {
+        return CohortState.sha256OfString(groovy.json.JsonOutput.toJson(new TreeMap(params)))
+    }
+    catch (Exception e) {
+        return null
+    }
+}
+
+// Per-step completion, measured against the pedigree and never against the plan: `existing`
+// and `needed` are not a partition of the cohort, because `needed` is gated on upstream
+// prerequisites, so their sum understates the denominator.
+//
+// A null step is one that was not measured. That is not the same as one that is 0% done, and
+// conflating the two would be the easiest way for this file to mislead someone.
+def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
+    if (!plan) return null
+    return [
+        alignment:          CohortState.progress(plan.alignment.existing.size(), n_individuals),
+        deepvariant_sample: CohortState.progress(plan.deepvariant_sample.existing.size(), n_individuals),
+        deepvariant_family: CohortState.progress(plan.deepvariant_family.existing.size(), n_families),
+        annotation:         CohortState.progress(plan.annotation.existing.size(), n_families),
+        wombat:             CohortState.progress(plan.wombat.existing.size(), n_families),
+        wisecondorx:        CohortState.progress(plan.wisecondorx.existing.size(), n_individuals),
+        // The whole ancestry block of the plan is skipped when the step is not requested, so
+        // its empty lists mean "unmeasured", not "nothing done"
+        ancestry:           ('ancestry' in params.steps)
+                                ? CohortState.progress(plan.ancestry.existing.size(), n_families)
+                                : null,
+        // One sentinel entry for the whole cohort, not a per-entity count
+        snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
+        // The plan does no existence check for extractor at all, so there is no honest number
+        extractor:          null
+    ]
+}
+
+def buildStateRecord(Map opts) {
+    // Fall back to whatever the run stashed, so most call sites only have to say what happened
+    def pedigree_file = opts.containsKey('pedigree_file') ? opts.pedigree_file : ghfc_run_state.pedigree_file
+    def pedigree_data = opts.containsKey('pedigree_data') ? opts.pedigree_data : ghfc_run_state.pedigree_data
+    def plan          = opts.containsKey('plan')          ? opts.plan          : ghfc_run_state.plan
+
+    def n_families    = pedigree_data?.families?.size()
+    def n_individuals = pedigree_data?.individuals?.size()
+    def params_file   = resolveParamsFilePath()
+
+    def record = [
+        run_id:      workflow.sessionId?.toString(),
+        status:      opts.status,
+        started_at:  isoTimestamp(workflow.start),
+        finished_at: opts.status == 'running' ? null : isoTimestamp(new Date()),
+        cohort_name: params.cohort_name,
+        pipeline: [
+            version:    workflow.manifest?.version,
+            revision:   workflow.revision,
+            commit_id:  workflow.commitId,
+            repository: workflow.repository
+        ],
+        pedigree: [
+            path:        pedigree_file,
+            sha256:      CohortState.sha256(pedigree_file as String),
+            families:    n_families,
+            individuals: n_individuals
+        ],
+        params_file: params_file ? [path: params_file, sha256: CohortState.sha256(params_file)] : null,
+        params_effective_sha256: effectiveParamsSha(),
+        steps_requested: params.steps,
+        completion_measured: opts.measured,
+        outputs_may_be_incomplete: opts.incomplete ? true : false,
+        completion: buildCompletionBlock(plan, n_families, n_individuals)
+    ]
+    if (opts.reason) record.reason = opts.reason
+    return record
+}
+
+def recordRunState(Map opts) {
+    try {
+        // A stub run fabricates real files with fake content. A state file reporting those
+        // steps as complete would be actively dangerous, so these runs leave no trace.
+        if (workflow.stubRun) return
+        def is_preview = workflow.hasProperty('preview')
+            ? workflow.preview
+            : (workflow.commandLine =~ /(^|\s)-preview(\s|\$)/).find()
+        if (is_preview) return
+
+        if (opts.status != 'running') {
+            // More than one exit path can reach here; the first terminal record is the true one
+            if (ghfc_run_state.terminal_written) return
+            ghfc_run_state.terminal_written = true
+        }
+
+        def dir = cohortStateDir()
+        if (!dir) {
+            // Once per run: this is called from the running marker, from every exit site and
+            // from the completion handler, and repeating it would just be noise
+            if (!ghfc_run_state.warned_no_cohort) {
+                ghfc_run_state.warned_no_cohort = true
+                log.warn "cohort_name is not set - skipping ${CohortState.FILE_NAME}"
+            }
+            return
+        }
+
+        CohortState.write(dir, CohortState.merge(CohortState.read(dir), buildStateRecord(opts), CohortState.HISTORY_LIMIT))
+    }
+    catch (Throwable t) {
+        // Provenance bookkeeping must never take down a run that may have been going for days
+        log.warn "Could not write ${CohortState.FILE_NAME}: ${t}"
+    }
+}
+
+// Record a failure that is about to exit. workflow.onComplete never fires for these: Nextflow's
+// `exit` is a System.exit with no shutdown hook, so this is the only chance to leave a trace.
+def recordFailedRun(String reason) {
+    recordRunState(status: 'failed', measured: 'before', reason: reason)
+}
+
+/*
+========================================================================================
     VALIDATE INPUTS
 ========================================================================================
 */
@@ -35,6 +196,7 @@ if (!params.data) {
 }
 
 if (!params.steps || params.steps.isEmpty()) {
+    recordFailedRun("no steps requested")
     exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry"
 }
 
@@ -42,6 +204,7 @@ if (!params.steps || params.steps.isEmpty()) {
 def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor', 'ancestry']
 def invalid_steps = params.steps - valid_steps
 if (invalid_steps) {
+    recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
 }
 
@@ -51,6 +214,7 @@ if ('ancestry' in params.steps) {
     def missing_ancestry_params = ['ancestry_reference', 'ancestry_catalog', 'ancestry_panel_name']
         .findAll { key -> !params[key] }
     if (missing_ancestry_params) {
+        recordFailedRun("ancestry step is missing ${missing_ancestry_params.join(', ')}")
         exit 1, "ERROR: the 'ancestry' step requires ${missing_ancestry_params.join(', ')} to be set"
     }
 }
@@ -65,8 +229,11 @@ workflow {
     
     // Read and validate pedigree file
     def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
-    
+    // Stashed before the existence check so a failure record can still name the path it wanted
+    ghfc_run_state.pedigree_file = pedigree_file
+
     if (!new File(pedigree_file).exists()) {
+        recordFailedRun("pedigree file not found: ${pedigree_file}")
         exit 1, "ERROR: Pedigree file not found: ${pedigree_file}"
     }
     
@@ -88,12 +255,14 @@ workflow {
     def families = pedigree_data.families
     def individuals = pedigree_data.individuals
     def family_members = pedigree_data.family_members
-    
+    ghfc_run_state.pedigree_data = pedigree_data
+
     log.info "Found ${families.size()} families with ${individuals.size()} individuals total"
     
     // Check existing files and determine what needs to be done
     def analysis_plan = createAnalysisPlan(families, individuals, family_members)
-    
+    ghfc_run_state.plan = analysis_plan
+
     // Display analysis summary
     displayAnalysisSummary(analysis_plan)
     
@@ -102,6 +271,7 @@ workflow {
     // drifted should not silently become unrunnable without the operator asking for that.
     if (params.pedigree_strict && analysis_plan.pedigree_drift) {
         def n = analysis_plan.pedigree_drift.size()
+        recordFailedRun("${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set")
         exit 1, "ERROR: ${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set - see the STALE FAMILY OUTPUTS summary above"
     }
 
@@ -111,6 +281,11 @@ workflow {
 
     // Validate that required steps are available
     validateStepsAvailability(analysis_plan, resolved_inputs, family_members)
+
+    // Validation passed and real work is about to start. Nothing fires on a SLURM walltime
+    // kill or a Ctrl-C, so this marker is what makes such a death visible afterwards: the
+    // record stays 'running' forever, and the next run turns it into 'interrupted'.
+    recordRunState(status: 'running', measured: 'before')
     
     // Create channels for different steps
     def channels = createChannels(analysis_plan, resolved_inputs)
@@ -414,7 +589,10 @@ workflow {
 ========================================================================================
 */
 
-def parsePedigreeFile(pedigree_file) {
+// `quiet` suppresses the operator-facing messages only. The completion handler re-runs this
+// against the finished output tree, and every one of those lines has already been printed once
+// at the start of the run.
+def parsePedigreeFile(pedigree_file, quiet = false) {
     def families = [] as Set
     def individuals = [] as Set
     def family_members = [:]
@@ -427,11 +605,12 @@ def parsePedigreeFile(pedigree_file) {
         
         // Skip header row if first column is "FID"
         if (index == 0 && cols[0] == 'FID') {
-            log.info "Skipping pedigree header row"
+            if (!quiet) log.info "Skipping pedigree header row"
             return
         }
         
         if (cols.size() < 6) {
+            recordFailedRun("pedigree row with ${cols.size()} columns instead of 6")
             exit 1, "ERROR: Pedigree file must have 6 columns (FID, barcode, father, mother, sex, phenotype). Found ${cols.size()} columns in line: ${line}"
         }
         
@@ -450,7 +629,7 @@ def parsePedigreeFile(pedigree_file) {
     ]
 }
 
-def createAnalysisPlan(families, individuals, family_members) {
+def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
         alignment: [needed: [], existing: [], need_bedgraph: []],
         deepvariant_sample: [needed: [], existing: []],
@@ -483,7 +662,7 @@ def createAnalysisPlan(families, individuals, family_members) {
         // length() > 0 covers both "missing" and "present but empty": a 0-byte pedigree must not
         // count as done, otherwise FAMILIAL_PEDIGREE is skipped forever and it never self-heals
         def pedigree_ok = new File(pedigree_path).length() > 0
-        if (new File(pedigree_path).exists() && !pedigree_ok) {
+        if (new File(pedigree_path).exists() && !pedigree_ok && !quiet) {
             log.warn "Family ${fid} has an empty pedigree at ${pedigree_path} - it will be regenerated"
         }
 
@@ -668,12 +847,12 @@ def createAnalysisPlan(families, individuals, family_members) {
                 // gVCF and the ancestry panel extraction reads it directly, so a missing
                 // CRAM here costs nothing but the ability to regenerate coverage bedgraphs.
                 def bedgraph_note = has_bedgraph ? "" : " (its coverage bedgraph is also absent and cannot be regenerated without the CRAM)"
-                log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
+                if (!quiet) log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
             } else {
                 // Genuinely stuck: no CRAM, no gVCF, and the family is already called, so
                 // the plan will never schedule anything for this individual and the family's
                 // outputs cannot contain it. See the STALE FAMILY OUTPUTS summary.
-                log.warn "Individual ${barcode} has neither a ${params.ref_name} CRAM nor a gVCF, and family ${family_members[barcode]} is already called - nothing will be scheduled for it and the family's outputs cannot include it. Provide input data for it, or remove it from the pedigree"
+                if (!quiet) log.warn "Individual ${barcode} has neither a ${params.ref_name} CRAM nor a gVCF, and family ${family_members[barcode]} is already called - nothing will be scheduled for it and the family's outputs cannot include it. Provide input data for it, or remove it from the pedigree"
             }
         }
     }
@@ -923,6 +1102,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry
         ========================================================================================
         """
+        recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")
         exit 1, "Pipeline stopped due to missing required steps"
     }
 }
@@ -1328,4 +1508,53 @@ def createChannels(analysis_plan, resolved_inputs) {
         }
     
     return channels
+}
+
+/*
+========================================================================================
+    COMPLETION HANDLER
+========================================================================================
+*/
+
+// Registered at script level on purpose. An onComplete closure is delegated to the *script*
+// binding, so one registered inside `workflow {}` would see a per-run binding in which even
+// `workflow` and `params` read back as null - and, because the delegate is a Map, those
+// misses return null silently instead of raising.
+//
+// This fires on success and on task failure. It does NOT fire for `exit 1`, Ctrl-C or a
+// SLURM kill; those are covered by recordFailedRun and by the 'running' marker.
+workflow.onComplete {
+    def pedigree_file = ghfc_run_state.pedigree_file
+    def pedigree_data = ghfc_run_state.pedigree_data
+    def plan = ghfc_run_state.plan
+    def measured = 'before'
+
+    try {
+        if (pedigree_file) {
+            // Re-scan now that publishing has finished. This is the only honest answer to
+            // "how complete is this cohort?" - the plan built at the start of the run
+            // describes the tree as it was before this run published anything.
+            pedigree_data = parsePedigreeFile(pedigree_file, true)
+            plan = createAnalysisPlan(pedigree_data.families, pedigree_data.individuals,
+                                      pedigree_data.family_members, true)
+            measured = 'after'
+        }
+    }
+    catch (Throwable t) {
+        log.warn "Could not re-scan outputs for ${CohortState.FILE_NAME} (${t}) - recording the counts from the start of the run instead"
+        pedigree_data = ghfc_run_state.pedigree_data
+        plan = ghfc_run_state.plan
+        measured = 'before'
+    }
+
+    recordRunState(
+        status: workflow.success ? 'success' : 'failed',
+        plan: plan,
+        pedigree_data: pedigree_data,
+        pedigree_file: pedigree_file,
+        measured: measured,
+        // On a failed run Nextflow cancels in-flight publishDir copies, so outputs this run
+        // produced may not have landed yet and the counts above can under-report.
+        incomplete: !workflow.success
+    )
 }

@@ -53,6 +53,8 @@ So a parameter file kept next to you, in a local `cohorts/` directory, wins over
 
 If neither file exists, the runner stops before launching Nextflow and tells you which two paths it tried, distinguishing a cohort directory that does not exist at all from one that exists but has no parameter file in it.
 
+After a run, that same cohort directory gains a hidden `.ghfc-ngs.state.json` recording when the cohort was last run, whether it finished, which pedigree and parameters were used, and how complete each step is. See [COHORT_STATE.md](COHORT_STATE.md).
+
 ### Running with an explicit parameter file
 
 The `--params-file` option is still available, and takes precedence over a cohort name given on the same command line. Use it for parameter files that do not follow the `cohorts/<NAME>/<NAME>.params.yml` layout:
