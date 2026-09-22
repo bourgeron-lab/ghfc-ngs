@@ -178,7 +178,9 @@ its configuration, and so cannot be changed by anything that happens during the 
 steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "snvs_cohort"]
 ```
 
-Required, and must be non-empty. Every entry must be one of these nine:
+Required, and must be non-empty. A list is the form to use; a comma-separated string
+(`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
+the command line. Every entry must be one of these nine:
 
 | Step | Produces |
 |---|---|
@@ -217,13 +219,14 @@ ancestry reads gVCFs directly and never touches the normalised or annotated call
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the nine above — **or** `steps` given as a string (`steps: "alignment"`) instead of a list |
+| `ERROR: Invalid steps specified: ...` | a value outside the nine above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
 
-Two of those messages name `--data` and `--steps` as though they were command-line flags. They
-are not: the keys they refer to are `data:` and `steps:` in the parameters file.
+Two of those messages name `--data` and `--steps`. Both do exist as command-line flags, but the
+keys they are telling you about are `data:` and `steps:` in the parameters file, which is where
+they should be set.
 
 ## Key reference
 

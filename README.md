@@ -398,10 +398,8 @@ fastq_pattern: "*_R{1,2}.fastq.gz"
 
 Realistic, complete files live in [`params_example/`](params_example/). Configure a run from
 this file alone — parameters passed on the command line leave no trace in it, which is what
-the cohort's state record is checksumming against. Two things that catch people out:
+the cohort's state record is checksumming against. One thing that catches people out:
 
-- `steps` must be a YAML **list**. The `--steps "a,b"` flag used in the examples above does
-  not work — it arrives as a string and the run aborts with `Invalid steps specified`.
 - Several keys are baked into output filenames (`ref_name`, `bin`, `vep_config_name`,
   `wisecondorx_binsize`, `ancestry_panel_name`, `cohort_name`). Changing one makes the
   pipeline recompute; changing a setting that is *not* in a filename leaves existing results
