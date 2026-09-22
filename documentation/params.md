@@ -46,7 +46,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-49 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+50 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -73,6 +73,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `bin` 📄 | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `bin_size` ✗ | never — you want `bin` | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `bwa_mem2` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
+| `clean_stale_families` | optional — a repair flag, not a run setting | [Core paths and identity](#core-paths-and-identity) |
 | `cohort_name` 📄 | always — **required** | [Core paths and identity](#core-paths-and-identity) |
 | `cram4realignment_pattern` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `data` | always — **required** | [Core paths and identity](#core-paths-and-identity) |
@@ -127,7 +128,7 @@ A run is configured in two layers:
 
 | Layer | Where | Notes |
 |---|---|---|
-| 1. Built-in defaults | the `params { }` block in [`nextflow.config`](../nextflow.config) | Covers 31 of the 49 keys. The other 18 are `null` unless you set them. |
+| 1. Built-in defaults | the `params { }` block in [`nextflow.config`](../nextflow.config) | Covers 32 of the 50 keys. The other 18 are `null` unless you set them. |
 | 2. The parameters file | `-params-file`, via a cohort name or `--params-file` | Where a cohort is configured. |
 
 > **Configure everything in the parameters file.** Nextflow will also accept individual
@@ -230,7 +231,7 @@ they should be set.
 
 ## Key reference
 
-49 keys are read by the code. In the tables below, **no default** means the key is `null` when
+50 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -244,6 +245,7 @@ whose value is **part of output filenames**.
 | `work_dir` | path | *no default* → `work` | — | Nextflow's work directory. Read at config-parse time. |
 | `pedigree` | path | *no default* → the cohort's own pedigree | rarely | Only needed for a pedigree kept outside the cohort directory. See below. |
 | `pedigree_strict` | boolean | `false` | — | Stop the run on stale family outputs instead of warning. |
+| `clean_stale_families` | boolean | `false` | — | Delete stale family outputs so they are re-called, instead of only reporting them. See below. |
 | `steps` | list of strings | `['alignment']` | **always** | See [above](#steps-the-key-that-decides-everything-else). |
 
 `cohort_name` is **required**: the run aborts immediately without it. It names the cohort
@@ -263,6 +265,47 @@ somewhere else. Either way the file must exist, or the run aborts naming the pat
 saying which of the two it was.
 
 The list of samples is **not** in the parameters file — it comes from the pedigree.
+
+#### `clean_stale_families`: repairing a drifted cohort
+
+A family whose pedigree gains a member who was never called has *stale* outputs: the joint call
+on disk cannot contain that member, and the run reports this as `STALE FAMILY OUTPUTS`. It does
+not fix itself — the presence of the family's `norm.bcf` is exactly what stops the missing
+member being scheduled for anything.
+
+`clean_stale_families` deletes those families' derived outputs so they are re-called in full:
+the `norm.bcf` and its index, the family pedigree, every annotation output, and the wombat
+parquet and result TSVs — plus the cohort-level merges built from them. It leaves the
+`ancestry/` outputs alone, because those already rebuild themselves, and it never touches
+gVCFs, CRAMs or `extractor/` output.
+
+It is a repair flag, not a run setting. Pass it on the command line for the one run that needs
+it rather than putting it in a parameters file, where it would silently re-delete on every
+future run:
+
+```bash
+ghfc-ngs MY_COHORT --clean-stale-families --dry-run   # print every path it would remove
+ghfc-ngs MY_COHORT --clean-stale-families             # then actually do it
+```
+
+**It refuses families it cannot rebuild.** For each drifted family it checks that every missing
+member can reach a gVCF — the member already has a CRAM, or an alignment input resolves for it
+in `fastq_pattern` / `old_cram_37` / `old_cram_38` — *and* that `steps` contains the steps that
+would do the work. A family failing either check is left completely untouched and reported with
+the reason. This is the point of the flag: deleting a call set that cannot be rebuilt would
+leave the cohort worse off than the warning it replaces.
+
+Two things to know about how it is spelled:
+
+- **`--dry-run` is a real dry run.** It maps to Nextflow's `-preview`, and the clean prints
+  every path it would remove without deleting anything. `-stub-run` is inert in the same way.
+- **The hyphenated form only works through the `ghfc-ngs` wrapper.** Nextflow maps a
+  command-line `--clean-stale-families` to `params.cleanStaleFamilies`, never to
+  `params.clean_stale_families`; the wrapper translates it. Calling `nextflow run` directly,
+  use `--clean_stale_families`. Either spelling is read, so neither silently does nothing.
+- **Do not write `--clean-stale-families false`.** A value given to a flag on the command line
+  arrives as the *string* `"false"`, which is true. The flag reads `false`, `no`, `0` and the
+  empty string as off wherever it can, but the reliable way to not clean is to omit the flag.
 
 ### Reference genomes
 

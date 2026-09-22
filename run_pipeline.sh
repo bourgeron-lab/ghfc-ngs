@@ -43,6 +43,11 @@ OPTIONS:
     --ref FILE                  Reference genome file
     --ref-name NAME             Reference genome name
     --steps "step1,step2"       Pipeline steps to run (alignment,deepvariant,family_calling)
+    --clean-stale-families      Delete the outputs of families whose pedigree gained members
+                                that were never called, so they are re-called in full. Only
+                                touches families that can actually be rebuilt from the data
+                                on disk and the steps requested; reports the rest. Combine
+                                with --dry-run to see what it would remove.
     --migrate                   Run migration workflow instead of main pipeline
     --resume                    Resume previous run
     --dry-run                   Show what would be executed
@@ -64,6 +69,10 @@ EXAMPLES:
 
     # Resume previous run
     $PROG_NAME --params-file params.yml --resume
+
+    # See what a stale-family clean would delete, then do it
+    $PROG_NAME CANDY_mpx --clean-stale-families --dry-run
+    $PROG_NAME CANDY_mpx --clean-stale-families
 
 EOF
 }
@@ -115,6 +124,7 @@ PEDIGREE=""
 REF=""
 REF_NAME=""
 STEPS=""
+CLEAN_STALE=""
 MIGRATE=""
 DRY_RUN=""
 STUB_RUN=""
@@ -182,6 +192,12 @@ while [[ $# -gt 0 ]]; do
             STEPS="--steps $2"
             shift 2
             ;;
+        --clean-stale-families|--clean_stale_families)
+            # Nextflow maps a hyphenated --foo-bar to params.fooBar, never to params.foo_bar,
+            # so the flag has to be handed over in the spelling nextflow.config declares
+            CLEAN_STALE="--clean_stale_families"
+            shift
+            ;;
         --migrate)
             MIGRATE="migrate.nf"
             shift
@@ -242,6 +258,7 @@ CMD="$CMD -profile $PROFILE"
 [[ -n "$REF" ]] && CMD="$CMD $REF"
 [[ -n "$REF_NAME" ]] && CMD="$CMD $REF_NAME"
 [[ -n "$STEPS" ]] && CMD="$CMD $STEPS"
+[[ -n "$CLEAN_STALE" ]] && CMD="$CMD $CLEAN_STALE"
 [[ -n "$RESUME" ]] && CMD="$CMD $RESUME"
 [[ -n "$DRY_RUN" ]] && CMD="$CMD $DRY_RUN"
 [[ -n "$STUB_RUN" ]] && CMD="$CMD $STUB_RUN"

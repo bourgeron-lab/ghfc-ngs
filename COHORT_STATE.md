@@ -97,7 +97,19 @@ across many cohorts into one list without losing track of which is which.
     "ancestry":           null,
     "snvs_cohort":        { "done": 1, "total": 1, "pct": 100.0 },
     "extractor":          null
-  }
+  },
+  "samples_without_cram": {
+    "count": 41,
+    "blocked": 2,
+    "by_status": { "gvcf_only": 27, "will_align": 12, "no_input": 2 },
+    "searched": ["/pasteur/.../legacy/cram38/*.cram", "/pasteur/.../fastq/*_R{1,2}*.fastq.gz"],
+    "samples": [
+      { "barcode": "C0KLMNO", "family_id": "FID007", "has_gvcf": false,
+        "input_source": "old_cram_38_unindexed", "input_path": "/pasteur/.../C0KLMNO.cram",
+        "needs_alignment": false, "blocked": true }
+    ]
+  },
+  "stale_family_clean": null
 }
 ```
 
@@ -124,6 +136,8 @@ across many cohorts into one list without losing track of which is which.
 | `completion_measured` | string | — | `after` = the tree was re-scanned once the run finished. `before` = the numbers are from the start of the run (every `failed`-at-validation record, and every `running` record). |
 | `outputs_may_be_incomplete` | bool | — | `true` on a failed run. Nextflow cancels in-flight `publishDir` copies when a run aborts, so outputs this run produced may not have landed before the counts were taken. |
 | `completion` | object | **no plan was built** | Per-step progress. See below. |
+| `samples_without_cram` | object | **the input scan did not run** | Which individuals have no CRAM, and whether anything on disk could align them. See below. |
+| `stale_family_clean` | object | **no clean was requested** | What `--clean-stale-families` removed and refused. See below. |
 | `reason` | string | absent unless set | Short human explanation, present on records written by a validation failure, e.g. `invalid steps requested: bogus`. |
 
 ### A failed record
@@ -148,6 +162,8 @@ Two things to handle when reading a failure:
 - **`completion` is `null`** when the run stopped before a plan was built, which is the case for
   every validation error. A run that failed during execution *does* carry a `completion` block,
   with `outputs_may_be_incomplete` set.
+- **`samples_without_cram` and `stale_family_clean` are `null` too** on a validation failure
+  that stopped the run before the input scan, for the same reason: not measured, not empty.
 - **`reason` is only present on validation failures.** A run that failed because a task errored
   has no `reason` — the Nextflow log is the place to look for that. Treat `reason` as absent
   rather than null, and fall back to `status` alone.
@@ -211,6 +227,82 @@ Other things worth knowing before you quote a number:
 | `alignment`, `deepvariant_sample`, `wisecondorx` | `pedigree.individuals` |
 | `deepvariant_family`, `annotation`, `wombat`, `ancestry` | `pedigree.families` |
 | `snvs_cohort` | 1 |
+
+## Samples without a CRAM
+
+`samples_without_cram` answers the question the run log could only half-answer: which
+individuals have no CRAM, and whether the files needed to align them are actually there.
+
+```json
+{ "barcode": "C0KLMNO", "family_id": "FID007", "has_gvcf": false,
+  "input_source": "old_cram_38_unindexed", "input_path": "/.../C0KLMNO.cram",
+  "needs_alignment": false, "blocked": true }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `count` | How many individuals have no CRAM. `0` means everyone has one; `null` for the whole block means the scan never ran. |
+| `blocked` | How many of them can neither progress nor be fixed from what is on disk. **This is the number to watch.** |
+| `by_status` | `gvcf_only` (has a gVCF, so nothing needs a CRAM) + `will_align` (an input resolves) + `no_input` (= `blocked`). |
+| `searched` | The globs the input scan actually looked in. Empty when no input source is configured. |
+| `truncated` | Present and `true` only when `samples` was capped. The counts above are always exact. |
+| `samples[].has_gvcf` | Whether the individual already has a gVCF. If it does, the missing CRAM costs nothing but the ability to regenerate a coverage bedgraph. |
+| `samples[].input_source` | `fastq`, `old_cram_38`, `old_cram_37`, `old_cram_38_unindexed`, `old_cram_37_unindexed`, `fastq_unpaired`, or `none`. `null` means the scan had no opinion, not that it found nothing. |
+| `samples[].needs_alignment` | Whether **this run** schedules an alignment for it. |
+| `samples[].blocked` | No gVCF, no CRAM, and nothing on disk that could produce either. |
+
+Two things that are easy to get wrong:
+
+- **`blocked` is not `needs_alignment && no input`.** An individual whose family has already
+  been called is scheduled for nothing at all — precisely because the stale family outputs make
+  it look unnecessary — so it has `needs_alignment: false` and is still stuck. Those are exactly
+  the individuals behind a `STALE FAMILY OUTPUTS` warning, and they are marked `blocked`.
+- **`input_source` is resolved by scanning the input directories**, so it describes the tree at
+  the moment the block was built. On an `after` record the whole block is rebuilt, so an
+  individual this run aligned drops out of it.
+
+The list is sorted blocked first, then the rest, and capped so that a never-aligned cohort does
+not put every individual into every record. The actionable entries are the ones that survive.
+
+```bash
+# Who is stuck, and what would unstick them?
+jq -r '.last_run.samples_without_cram.samples[] | select(.blocked)
+       | "\(.barcode)\t\(.family_id)\t\(.input_source)\t\(.input_path // "-")"' \
+   .ghfc-ngs.state.json | column -t -s $'\t'
+```
+
+## Stale family cleans
+
+`stale_family_clean` records what `--clean-stale-families` did. `null` means no clean was
+requested, or the run died before it could run.
+
+```json
+{
+  "rehearsal": false,
+  "families_cleaned": [
+    { "family_id": "FID001", "members": 4, "missing": ["C0ABC"], "files_deleted": 17 }
+  ],
+  "families_skipped": [
+    { "family_id": "FID002", "members": 3, "missing": ["C0XYZ"],
+      "reason": "no input data on disk for C0XYZ" }
+  ],
+  "cohort_outputs_deleted": ["EAGER.common_gt.bcf", "EAGER.common_gt.bcf.csi"],
+  "cohort_outputs_stale": [],
+  "errors": []
+}
+```
+
+- **`families_skipped` is the interesting half.** Each entry carries the reason the clean
+  refused: no input data, an unindexed CRAM, or a step missing from `steps`. Fix that and run
+  again with the same flag.
+- **`cohort_outputs_stale`** names cohort merges that are now wrong but were left in place
+  because this run could not rebuild them — `annotation` and `snvs_cohort` must both be in
+  `steps`. They still contain data from call sets that no longer exist.
+- **`rehearsal` is always `false` here.** A `-preview` or `-stub-run` deletes nothing and
+  writes no state file at all, so a record describing a rehearsal cannot exist.
+- **`errors`** is normally empty. An entry means a file could not be deleted; if it names a
+  family's `norm.bcf`, that family also appears in `families_skipped`, because a family whose
+  `norm.bcf` survived still looks complete to the next run.
 
 ## Checksums
 
