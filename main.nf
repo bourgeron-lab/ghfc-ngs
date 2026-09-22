@@ -92,7 +92,7 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         wisecondorx:        CohortState.progress(plan.wisecondorx.existing.size(), n_individuals),
         // The whole ancestry block of the plan is skipped when the step is not requested, so
         // its empty lists mean "unmeasured", not "nothing done"
-        ancestry:           ('ancestry' in params.steps)
+        ancestry:           ('ancestry' in pipeline_steps)
                                 ? CohortState.progress(plan.ancestry.existing.size(), n_families)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
@@ -132,7 +132,7 @@ def buildStateRecord(Map opts) {
         ],
         params_file: params_file ? [path: params_file, sha256: CohortState.sha256(params_file)] : null,
         params_effective_sha256: effectiveParamsSha(),
-        steps_requested: params.steps,
+        steps_requested: pipeline_steps,
         completion_measured: opts.measured,
         outputs_may_be_incomplete: opts.incomplete ? true : false,
         completion: buildCompletionBlock(plan, n_families, n_individuals)
@@ -190,19 +190,48 @@ def recordFailedRun(String reason) {
 
 // def summary_params = NfcoreSchema.paramsSummaryMap(workflow, params)
 
+// Nextflow types params.steps from wherever it came: a YAML list arrives as a List, while
+// --steps "a,b" on the command line arrives as a String. Every use below tests membership or
+// joins, and `'alignment' in "alignment,wombat"` is quietly false rather than an error, so
+// both forms are reconciled into one list here and nothing downstream reads params.steps.
+// Assigned at script level without def, so the onComplete handler and the functions it calls
+// can see it - the same reason ghfc_run_state is written that way.
+def normaliseSteps(value) {
+    if (value == null) return []
+    def items
+    if (value instanceof CharSequence) {
+        items = value.toString().split(',') as List
+    } else if (value instanceof Collection) {
+        items = value as List
+    } else {
+        items = [value]
+    }
+    return items.collect { it?.toString()?.trim() }.findAll { it }
+}
+
+pipeline_steps = normaliseSteps(params.steps)
+
 // Validate input parameters
 if (!params.data) {
     exit 1, "ERROR: --data parameter is required"
 }
 
-if (!params.steps || params.steps.isEmpty()) {
+// Every cohort-level output path, the default pedigree location and the state file itself are
+// built from cohort_name. Without it the run writes .../cohorts/null/null.* and records nothing
+// about itself. Checked here rather than at first use, and with a bare exit like data above,
+// because recordFailedRun has nowhere to write a state file until both of them are known.
+if (!params.cohort_name) {
+    exit 1, "ERROR: cohort_name parameter is required"
+}
+
+if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
     exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry"
 }
 
 // Validate steps
 def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor', 'ancestry']
-def invalid_steps = params.steps - valid_steps
+def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
@@ -210,7 +239,7 @@ if (invalid_steps) {
 
 // The ancestry step reads its panel and weights from paths that have no sensible
 // default, and every one of its processes would fail on an empty string.
-if ('ancestry' in params.steps) {
+if ('ancestry' in pipeline_steps) {
     def missing_ancestry_params = ['ancestry_reference', 'ancestry_catalog', 'ancestry_panel_name']
         .findAll { key -> !params[key] }
     if (missing_ancestry_params) {
@@ -227,14 +256,20 @@ if ('ancestry' in params.steps) {
 
 workflow {
     
-    // Read and validate pedigree file
-    def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
+    // Read and validate pedigree file. The pedigree lives in the cohort directory, next to the
+    // parameters file and the cohort's outputs, so that convention is the default and only a
+    // pedigree kept somewhere else needs the parameter set at all.
+    def pedigree_file = params.pedigree ?: "${params.data}/cohorts/${params.cohort_name}/${params.cohort_name}.pedigree.tsv"
     // Stashed before the existence check so a failure record can still name the path it wanted
     ghfc_run_state.pedigree_file = pedigree_file
 
     if (!new File(pedigree_file).exists()) {
         recordFailedRun("pedigree file not found: ${pedigree_file}")
-        exit 1, "ERROR: Pedigree file not found: ${pedigree_file}"
+        // Which of the two it is changes what the operator has to fix, so say so
+        def hint = params.pedigree
+            ? " (from the pedigree parameter)"
+            : " (default location for cohort '${params.cohort_name}' - set pedigree: to read it from elsewhere)"
+        exit 1, "ERROR: Pedigree file not found: ${pedigree_file}${hint}"
     }
     
     log.info """
@@ -243,7 +278,7 @@ workflow {
     ========================================================================================
     Pedigree file    : ${pedigree_file}
     Data directory   : ${params.data}
-    Steps to run     : ${params.steps.join(', ')}
+    Steps to run     : ${pipeline_steps.join(', ')}
     Reference        : ${params.ref_name}
     Work directory   : ${workflow.workDir}
     VEP Config Name  : ${params.vep_config_name} (${params.vep_config})
@@ -293,7 +328,7 @@ workflow {
     // Run alignment if needed and allowed
     // Also entered when CRAMs exist but their coverage bedgraphs are missing, in which case only
     // MOSDEPTH/TABIX_INDEX run - no realignment is triggered.
-    if ((analysis_plan.alignment.needed.size() > 0 || analysis_plan.alignment.need_bedgraph.size() > 0) && 'alignment' in params.steps) {
+    if ((analysis_plan.alignment.needed.size() > 0 || analysis_plan.alignment.need_bedgraph.size() > 0) && 'alignment' in pipeline_steps) {
         if (analysis_plan.alignment.needed.size() > 0) {
             log.info "Running alignment for ${analysis_plan.alignment.needed.size()} individuals..."
         }
@@ -317,7 +352,7 @@ workflow {
     all_available_crams = channels.existing_crams.mix(aligned_crams ?: Channel.empty())
     
     // Run DeepVariant sample workflow if needed and allowed
-    if (analysis_plan.deepvariant_sample.needed.size() > 0 && 'deepvariant_sample' in params.steps) {
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && 'deepvariant_sample' in pipeline_steps) {
         log.info "Running DeepVariant sample workflow for ${analysis_plan.deepvariant_sample.needed.size()} individuals..."
         
         // Filter CRAM files for individuals that need DeepVariant
@@ -340,7 +375,7 @@ workflow {
     family_vcfs_output = Channel.empty()
     normalized_bcfs_output = Channel.empty()
     family_pedigrees_output = Channel.empty()
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in params.steps) {
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in pipeline_steps) {
         log.info "Running family calling, normalization, and pedigree extraction for ${analysis_plan.deepvariant_family.needed.size()} families..."
         
         // Group gVCF files by family
@@ -365,7 +400,7 @@ workflow {
     
     // Run annotation (gnomAD annotation, filtering, VEP) if needed and allowed
     annotation_common_bcfs_output = Channel.empty()
-    if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
+    if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in pipeline_steps) {
         log.info "Running annotation for ${analysis_plan.annotation.needed.size()} families..."
         
         // Get all available normalized family BCFs (existing + newly created)
@@ -395,7 +430,7 @@ workflow {
     
     // Run Wombat analysis if needed and allowed
     wombat_output = Channel.empty()
-    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in params.steps) {
+    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in pipeline_steps) {
         log.info "Running Wombat analysis for ${analysis_plan.wombat.needed.size()} families..."
         
         // Get all available annotated BCFs (existing + newly created)
@@ -430,7 +465,7 @@ workflow {
     }
     
     // Run cohort common variants merge if needed and allowed
-    if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in params.steps) {
+    if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in pipeline_steps) {
         def merge_tasks = []
         if (analysis_plan.snvs_cohort.need_bcf_merge) merge_tasks.add("BCF merge")
         def wombat_merge_count = analysis_plan.snvs_cohort.need_wombat_merges?.count { k, v -> v == true } ?: 0
@@ -438,7 +473,7 @@ workflow {
         log.info "Running cohort: ${merge_tasks.join(' and ')}..."
         
         // Get all available common filtered BCFs (existing + newly created)
-        if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in params.steps) {
+        if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in pipeline_steps) {
             // Mix existing BCFs with newly created ones
             all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(annotation_common_bcfs_output)
         } else {
@@ -461,7 +496,7 @@ workflow {
     if ((analysis_plan.wisecondorx.needed.size() > 0 || 
          analysis_plan.wisecondorx.need_family_merge.any { k, v -> v == true } || 
          analysis_plan.wisecondorx.need_family_annotate.any { k, v -> v == true } || 
-         analysis_plan.wisecondorx.need_cohort_merge) && 'wisecondorx' in params.steps) {
+         analysis_plan.wisecondorx.need_cohort_merge) && 'wisecondorx' in pipeline_steps) {
         
         def tasks = []
         if (analysis_plan.wisecondorx.needed.size() > 0) {
@@ -504,7 +539,7 @@ workflow {
     }
     
     // Run Extractor if TSV files are provided and step is allowed
-    if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in params.steps) {
+    if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
         log.info "Running Extractor for ${analysis_plan.extractor.tsv_count} TSV files on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples..."
         
         // Create channel from TSV list
@@ -552,7 +587,7 @@ workflow {
     // only its variant sites - around 57% of the panel for a trio - which is below
     // what admixture accepts and enough to distort the projected PCs.
     if ((analysis_plan.ancestry.needed.size() > 0 ||
-         analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in params.steps) {
+         analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in pipeline_steps) {
 
         def ancestry_tasks = []
         if (analysis_plan.ancestry.need_extract.size() > 0) {
@@ -753,7 +788,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // The panel label is part of every file name on purpose: the depth/quality
     // thresholds and the reference bundle are not recorded anywhere this check can
     // see, so bumping ancestry_panel_name is what invalidates the old extractions.
-    if ('ancestry' in params.steps) {
+    if ('ancestry' in pipeline_steps) {
         def panel_name = params.ancestry_panel_name
         def table_kinds = ['pcs', 'ancestry', 'Q', 'pgs_raw', 'pgs_adjusted', 'pgs_zscore']
 
@@ -986,7 +1021,7 @@ def displayAnalysisSummary(analysis_plan) {
     == SVs Calling ==
     WISECONDORX PREDICT: ${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do
     == Ancestry / PGS ==
-    ANCESTRY: ${'ancestry' in params.steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
+    ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     == Other ==
     EXTRACTOR: ${analysis_plan.extractor.tsv_count > 0 ? "${analysis_plan.extractor.tsv_count} TSV files to process on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples" : 'Skipped (no TSV files provided)'}
     ========================================================================================
@@ -1053,7 +1088,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     def errors = []
     
     // Check if alignment is needed but not available
-    if (analysis_plan.alignment.needed.size() > 0 && !('alignment' in params.steps)) {
+    if (analysis_plan.alignment.needed.size() > 0 && !('alignment' in pipeline_steps)) {
         errors.add("Alignment step is required for ${analysis_plan.alignment.needed.size()} individuals but not included in steps parameter")
     }
 
@@ -1067,7 +1102,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     }
 
     // Check if deepvariant_sample is needed but not available  
-    if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in params.steps)) {
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in pipeline_steps)) {
         errors.add("DeepVariant sample step is required for ${analysis_plan.deepvariant_sample.needed.size()} individuals but not included in steps parameter")
     }
     
@@ -1080,14 +1115,14 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     def annotation_consumers = ['annotation', 'wombat', 'snvs_cohort']
 
     // Check if deepvariant_family is needed but not available
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in params.steps) &&
-        family_consumers.any { step -> step in params.steps }) {
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in pipeline_steps) &&
+        family_consumers.any { step -> step in pipeline_steps }) {
         errors.add("DeepVariant family step is required for ${analysis_plan.deepvariant_family.needed.size()} families but not included in steps parameter")
     }
     
     // Check if annotation is needed but not available
-    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in params.steps) &&
-        annotation_consumers.any { step -> step in params.steps }) {
+    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in pipeline_steps) &&
+        annotation_consumers.any { step -> step in pipeline_steps }) {
         errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
     

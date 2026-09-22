@@ -116,7 +116,11 @@ slurm {
 
 ### 2. Workflow parameter file (*params.yml*)
 
-The tuning in this file is mostly restricted to the maximum resources available per node.
+This file carries every parameter the workflow reads — see
+[documentation/params.md](documentation/params.md) for the full reference.
+
+What is worth tuning here for Pasteur specifically is the maximum resources available per
+node, and `work_dir`, which should point into scratch rather than into the project tree.
 
 ```bash
 # Resource limits
