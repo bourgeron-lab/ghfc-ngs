@@ -195,6 +195,14 @@ if (!params.data) {
     exit 1, "ERROR: --data parameter is required"
 }
 
+// Every cohort-level output path, the default pedigree location and the state file itself are
+// built from cohort_name. Without it the run writes .../cohorts/null/null.* and records nothing
+// about itself. Checked here rather than at first use, and with a bare exit like data above,
+// because recordFailedRun has nowhere to write a state file until both of them are known.
+if (!params.cohort_name) {
+    exit 1, "ERROR: cohort_name parameter is required"
+}
+
 if (!params.steps || params.steps.isEmpty()) {
     recordFailedRun("no steps requested")
     exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry"
@@ -227,14 +235,20 @@ if ('ancestry' in params.steps) {
 
 workflow {
     
-    // Read and validate pedigree file
-    def pedigree_file = params.pedigree ?: "${params.data}/pedigree.tsv"
+    // Read and validate pedigree file. The pedigree lives in the cohort directory, next to the
+    // parameters file and the cohort's outputs, so that convention is the default and only a
+    // pedigree kept somewhere else needs the parameter set at all.
+    def pedigree_file = params.pedigree ?: "${params.data}/cohorts/${params.cohort_name}/${params.cohort_name}.pedigree.tsv"
     // Stashed before the existence check so a failure record can still name the path it wanted
     ghfc_run_state.pedigree_file = pedigree_file
 
     if (!new File(pedigree_file).exists()) {
         recordFailedRun("pedigree file not found: ${pedigree_file}")
-        exit 1, "ERROR: Pedigree file not found: ${pedigree_file}"
+        // Which of the two it is changes what the operator has to fix, so say so
+        def hint = params.pedigree
+            ? " (from the pedigree parameter)"
+            : " (default location for cohort '${params.cohort_name}' - set pedigree: to read it from elsewhere)"
+        exit 1, "ERROR: Pedigree file not found: ${pedigree_file}${hint}"
     }
     
     log.info """

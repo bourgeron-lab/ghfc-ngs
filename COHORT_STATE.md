@@ -114,7 +114,7 @@ across many cohorts into one list without losing track of which is which.
 | `pipeline.revision` | string | — | Branch or tag, e.g. `main`. |
 | `pipeline.commit_id` | string | **local runs** | Full SHA of the commit that ran. Null when launched as `nextflow run main.nf` from a working copy rather than as a remote project. **This is the only field that identifies the code that actually ran**, which matters because `run_pipeline.sh` launches with `-latest`. |
 | `pipeline.repository` | string | **local runs** | Git remote URL. |
-| `pedigree.path` | string | — | The pedigree `main.nf` read (`params.pedigree`, else `${data}/pedigree.tsv`). |
+| `pedigree.path` | string | — | The pedigree `main.nf` read (`params.pedigree`, else `${data}/cohorts/${cohort_name}/${cohort_name}.pedigree.tsv`). |
 | `pedigree.sha256` | string | **file absent** | See [Checksums](#checksums). |
 | `pedigree.families` | int | no pedigree parsed | Distinct FIDs. The denominator for family-level steps. |
 | `pedigree.individuals` | int | no pedigree parsed | Distinct barcodes. The denominator for sample-level steps. |

@@ -22,8 +22,10 @@ data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
 scratch: "/pasteur/appa/scratch/ghfc"
 work_dir: "/pasteur/appa/scratch/ghfc/work-ghfc-grch38"
 
-# Pedigree file (optional - defaults to {data}/pedigree.tsv)
-pedigree: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/dataset_paper_20251010/dataset_paper_20251010.pedigree.tsv"
+# Pedigree file. Defaults to {data}/cohorts/{cohort_name}/{cohort_name}.pedigree.tsv,
+# which is where this cohort's pedigree already lives, so it does not need to be set.
+# Set it only for a pedigree kept somewhere else.
+# pedigree: "/path/to/elsewhere.pedigree.tsv"
 
 # reference genome used by all steps when needed
 ref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/GRCh38.fasta"

@@ -95,7 +95,14 @@ See [MIGRATION.md](MIGRATION.md) for detailed migration instructions.
 
 ### 3. Prepare Your Pedigree File
 
-Create a TSV file with 6 columns (FID, barcode, father, mother, sex, phenotype):
+Create a TSV file with 6 columns (FID, barcode, father, mother, sex, phenotype), and save it in
+the cohort's own directory, where the pipeline looks for it by default:
+
+```
+${data}/cohorts/<COHORT_NAME>/<COHORT_NAME>.pedigree.tsv
+```
+
+A pedigree kept anywhere else has to be named with the `pedigree` parameter.
 
 ```tsv
 FID barcode father mother sex phenotype
@@ -367,108 +374,38 @@ modules/ancestry/scripts/panel_genotype_test
 
 ### Parameters File (params.yml)
 
-Key parameters to configure:
+Every parameter the workflow reads is documented in
+**[documentation/params.md](documentation/params.md)** — what each key does, its default,
+which step reads it, and which keys found in older parameters files no longer do anything.
+
+The smallest file that runs:
 
 ```yaml
-# Pipeline steps - ALL REQUIRED STEPS MUST BE LISTED
-steps: [
-    "alignment",
-    "deepvariant_sample",
-    "deepvariant_family",
-    "annotation",
-    "snvs_cohort",
-    "wisecondorx",
-    "wombat"
-]
+steps: ["alignment"]
 
-# Data directories
 data: "/path/to/your/data/"
 scratch: "/path/to/your/scratch/"
-
-# Cohort name for merged files
+# The pedigree defaults to
+# <data>/cohorts/my_cohort/my_cohort.pedigree.tsv
 cohort_name: "my_cohort"
 
-# Pedigree file (optional - defaults to ${data}/pedigree.tsv)
-pedigree: "/path/to/your/pedigree.tsv"
-
-# Reference genomes
 ref: "/path/to/reference/genome.fa"
-ref_name: "GRCh38_GIABv3"  # Used in output file naming
-oldref: "/path/to/old/reference/genome.fa"  # For realignment (optional)
-wisecondorx_reference: "/path/to/wisecondorx/reference.npz"  # WisecondorX reference
+ref_name: "GRCh38_GIABv3"
 
-# Bedgraph parameters
-bin: 1000  # Bin size for coverage bedgraph generation
-
-# Tool paths (when not using containers)
-bwa_mem2: "bwa-mem2"
-samtools: "samtools"
-sambamba: "sambamba"
-samblaster: "samblaster"
-bazam: "/path/to/bazam.jar"
-
-# GLnexus configuration
-glnexus_config: "DeepVariant_unfiltered"
-
-# DeepVariant configuration
-deepvariant_threads: 96  # Number of parallel tasks for DeepVariant make_examples
-
-# gnomAD frequency annotation configuration
-gnomad_file: "/path/to/gnomad_v4.1_allChroms.bcf"  # Path to gnomAD annotation file
-gnomad_filter_field: "AF"                           # gnomAD field to filter on (e.g., AF, AF_popmax)
-gnomad_filter_threshold: "0.01"                     # Frequency threshold for filtering (e.g., 0.01 for 1%)
-
-# VEP annotation configuration
-vep_config: "/path/to/vep/config.ini"      # Path to VEP config INI file
-vep_config_name: "ensembl_vep_115"         # Name suffix for output files
-
-# Additional annotation configuration
-annotation_annotation_path: "/path/to/annotations/"                     # Directory containing annotation BCF files
-annotation_annotation_list: ["gnomad_v4.1_allChroms.bcf", "LCR.bed.gz"] # List of BCF/BED files for annotation
-annotation_gencode: "gencode.v47.basic"                                  # Gencode version for WisecondorX aberrations annotation
-
-# De novo mutation extraction configuration
-annotation_dnm_min_callrate: "0.9"   # Minimum call rate for de novo variants
-annotation_dnm_min_DP: "10"          # Minimum depth (DP) for de novo variants in child
-annotation_dnm_min_GQ: "19"          # Minimum genotype quality (GQ) for de novo variants in child
-annotation_dnm_min_VAF: "0.25"       # Minimum variant allele frequency (VAF) for de novo variants in child
-
-# Wombat configuration
-wombat_config_path: "/path/to/wombat/configs"                                      # Directory containing Wombat YAML configuration files
-wombat_config_list: ["rare_variants_high_impact.yml", "de_novo_mutations.yml"]   # List of Wombat config files
-
-# Ancestry and PGS configuration (required when the "ancestry" step is listed)
-ancestry_reference: "/path/to/ancestry/reference"        # ancestry-pgs reference bundle directory
-ancestry_catalog: "/path/to/PGS_catalog/catalog.tsv"     # PGS weights, SbayesRC layout
-ancestry_panel_name: "apgs_b1.0.0_dp10gq20"              # label baked into output names; bump to invalidate
-ancestry_min_dp: 10                                       # min DP (variants) / MIN_DP (reference blocks)
-ancestry_min_gq: 20                                       # min GQ to call a panel site
-ancestry_min_coverage: ""                                 # empty uses admixture's 0.90 floor
-ancestry_model: ""                                        # empty uses the bundle's own fitted model
-
-# Extractor configuration (optional - for variant extraction from TSV lists)
-extractor_tsvs_list: []                              # List of TSV files with variants to extract
-liftover_chain: "/path/to/hg19ToHg38.over.chain.gz"  # Chain file for GRCh37 to GRCh38 liftover
-
-# Pseudo-autosomal regions (PAR) coordinates for GRCh38
-ref_par1_start: "10001"        # PAR1 start position on chrX
-ref_par1_end: "2781479"        # PAR1 end position on chrX
-ref_par2_start: "155701383"    # PAR2 start position on chrX
-ref_par2_end: "156030895"      # PAR2 end position on chrX
-
-# SLURM account and partition settings
-slurm_account: "your_account"
-slurm_partition: "ghfc"
-
-# Container cache directory
-apptainer_cache: "/path/to/apptainer/cache/"
-singularity_cache: "/path/to/singularity/cache/"
-
-# Resource limits
-max_memory: "460.GB"
-max_cpus: 95
-max_time: "240.h"
+# One input source is required: fastq_pattern, old_cram_38 or old_cram_37
+fastq_pattern: "*_R{1,2}.fastq.gz"
 ```
+
+Realistic, complete files live in [`params_example/`](params_example/). Configure a run from
+this file alone — parameters passed on the command line leave no trace in it, which is what
+the cohort's state record is checksumming against. Two things that catch people out:
+
+- `steps` must be a YAML **list**. The `--steps "a,b"` flag used in the examples above does
+  not work — it arrives as a string and the run aborts with `Invalid steps specified`.
+- Several keys are baked into output filenames (`ref_name`, `bin`, `vep_config_name`,
+  `wisecondorx_binsize`, `ancestry_panel_name`, `cohort_name`). Changing one makes the
+  pipeline recompute; changing a setting that is *not* in a filename leaves existing results
+  in place and reuses them.
 
 ### Smart File Detection
 
@@ -485,7 +422,7 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **VEP annotated VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz` (and `.tbi`)
 - **Fully annotated BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf` (and `.csi`)
 - **Wombat TSV files**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
-- **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.npz`
+- **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.${wisecondorx_binsize}.npz`
 - **WisecondorX aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
 - **Cohort BCF files**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf` (and `.csi`)
 - **Panel genotype files (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/ancestry/${barcode}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
@@ -513,7 +450,6 @@ Cohort directories are **not** sharded.
 
 ```
 data/
-├── pedigree.tsv                   # Family structure (required)
 ├── fastq/                         # FASTQ files for alignment (optional)
 │   ├── A001_DA_SAMPLE1_L001_1_001.HG7T2.dual.fastq.gz
 │   ├── A001_DA_SAMPLE1_L001_2_001.HG7T2.dual.fastq.gz
@@ -583,8 +519,10 @@ data/
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_adjusted.tsv    # Ancestry-adjusted
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_zscore.tsv      # Z-scored
 │                   └── FID001.apgs_b1.0.0_dp10gq20.*.qc.json           # One QC report per command
-├── cohorts/                       # Cohort-specific output directories (not sharded)
+├── cohorts/                       # Cohort-specific directories (not sharded)
 │   └── COHORT_NAME/
+│       ├── COHORT_NAME.pedigree.tsv                 # Family structure (required)
+│       ├── COHORT_NAME.params.yml                   # This cohort's parameters
 │       ├── vcfs/
 │       │   ├── COHORT_NAME.common_gt.bcf            # Cohort common variants
 │       │   └── COHORT_NAME.common_gt.bcf.csi
@@ -858,20 +796,17 @@ process {
 
 ### Account and Partition Settings
 
-Modify the SLURM settings in your parameters:
-
-```yaml
-slurm_account: "your_account"
-slurm_partition: "ghfc"
-```
-
-Or in `nextflow.config`:
+SLURM account and partition are set in `nextflow.config`, not in the parameters file:
 
 ```groovy
 process {
     clusterOptions = '-p ghfc --qos=ghfc --account=your_account'
 }
 ```
+
+> `slurm_account` and `slurm_partition` appear in some parameters files but are **not read by
+> anything** — the `clusterOptions` strings above are the only place these are configured.
+> See [documentation/params.md](documentation/params.md#keys-that-look-live-but-are-inert).
 
 ### Queue Management
 
