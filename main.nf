@@ -39,7 +39,8 @@ include { ANCESTRY } from './workflows/ancestry'
 // cannot see. Mutating a script-level container works from both scopes; reassigning it
 // does not.
 ghfc_run_state = [terminal_written: false, warned_no_cohort: false,
-                  pedigree_file: null, pedigree_data: null, plan: null]
+                  pedigree_file: null, pedigree_data: null, plan: null,
+                  alignment_scan: null, stale_family_clean: null]
 
 // The cohort directory holds this cohort's params file, its pedigree and its outputs, so it
 // is also where its state file belongs. Null when we cannot know it - params.cohort_name has
@@ -102,11 +103,80 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
     ]
 }
 
+// Which individuals have no CRAM, and whether anything on disk could align them.
+//
+// This is the question the run log could only ever half-answer: the plan's three CRAM-less
+// buckets went to log.info/log.warn, and the input scan used to skip the stuck ones entirely.
+// Every fact here was already gathered by createAnalysisPlan and resolveAlignmentInputs, so
+// this does no filesystem work of its own and the completion handler can rebuild it against
+// the re-scanned plan for free.
+//
+// Null when the scan never ran - unmeasured, not "none" - exactly as a null step in
+// `completion` means unmeasured rather than 0%. A count of 0 means everyone has a CRAM.
+def buildSamplesWithoutCramBlock(plan, scan, Map family_members, int limit = 200) {
+    if (!plan || scan == null) return null
+
+    def no_cram = plan.alignment.no_cram ?: []
+    def with_gvcf = (plan.alignment.no_cram_with_gvcf ?: []) as Set
+    def needed = (plan.alignment.needed ?: []) as Set
+
+    def rows = no_cram.collect { barcode ->
+        def source = scan.by_barcode?.get(barcode)
+        def needs_alignment = barcode in needed
+        [
+            barcode        : barcode,
+            family_id      : family_members?.get(barcode),
+            has_gvcf       : barcode in with_gvcf,
+            // Null rather than 'none' when the scan has no opinion at all, which happens when
+            // no input source is configured - "we did not look" is not "we looked and found nothing"
+            input_source   : source ? source.source : (scan.searched ? 'none' : null),
+            input_path     : source?.path,
+            // Whether this run schedules it, which is a different question from whether
+            // anything could: a stuck member of an already-called family is scheduled for
+            // nothing precisely because the stale family outputs make it look unnecessary
+            needs_alignment: needs_alignment,
+            // The one field worth grepping for: no gVCF, no CRAM, and nothing on disk that
+            // could produce either. Deliberately not gated on needs_alignment - the samples
+            // behind a stale family are scheduled for nothing at all, and they are exactly
+            // the ones an operator has to go and find data for.
+            blocked        : !(barcode in with_gvcf) && !(source?.usable)
+        ]
+    }
+
+    def counts = [
+        gvcf_only : rows.count { it.has_gvcf },
+        will_align: rows.count { !it.has_gvcf && !it.blocked },
+        no_input  : rows.count { it.blocked }
+    ]
+
+    // Actionable first, so the entries that matter are the ones that survive the cap. A
+    // never-aligned cohort puts every individual in here, and at ~12 records per file that
+    // is megabytes of JSON rewritten atomically on every run, for rows that are all alike.
+    def sorted = rows.sort(false) { row ->
+        [row.blocked ? 0 : (row.has_gvcf ? 2 : 1), row.barcode]
+    }
+
+    def block = [
+        count    : rows.size(),
+        blocked  : counts.no_input,
+        by_status: counts,
+        searched : scan.searched ?: []
+    ]
+    if (sorted.size() > limit) {
+        block.truncated = true
+        block.samples = sorted[0..<limit]
+    } else {
+        block.samples = sorted
+    }
+    return block
+}
+
 def buildStateRecord(Map opts) {
     // Fall back to whatever the run stashed, so most call sites only have to say what happened
     def pedigree_file = opts.containsKey('pedigree_file') ? opts.pedigree_file : ghfc_run_state.pedigree_file
     def pedigree_data = opts.containsKey('pedigree_data') ? opts.pedigree_data : ghfc_run_state.pedigree_data
     def plan          = opts.containsKey('plan')          ? opts.plan          : ghfc_run_state.plan
+    def scan          = opts.containsKey('alignment_scan') ? opts.alignment_scan : ghfc_run_state.alignment_scan
 
     def n_families    = pedigree_data?.families?.size()
     def n_individuals = pedigree_data?.individuals?.size()
@@ -135,21 +205,32 @@ def buildStateRecord(Map opts) {
         steps_requested: pipeline_steps,
         completion_measured: opts.measured,
         outputs_may_be_incomplete: opts.incomplete ? true : false,
-        completion: buildCompletionBlock(plan, n_families, n_individuals)
+        completion: buildCompletionBlock(plan, n_families, n_individuals),
+        samples_without_cram: buildSamplesWithoutCramBlock(plan, scan, pedigree_data?.family_members),
+        // Null when no clean was asked for, or when the run died before it could run - the
+        // same "this was not measured" convention the blocks above use
+        stale_family_clean: ghfc_run_state.stale_family_clean
     ]
     if (opts.reason) record.reason = opts.reason
     return record
 }
 
+// A rehearsal run: -stub-run fabricates real files with fake content, -preview builds the DAG
+// without executing anything. Both still run the whole `workflow {}` body, so anything with a
+// side effect out in the data tree - writing the state file, deleting stale outputs - has to
+// ask. Assigned at script level so both the workflow and the completion handler can see it.
+def isRehearsalRun() {
+    if (workflow.stubRun) return true
+    return workflow.hasProperty('preview')
+        ? workflow.preview
+        : (workflow.commandLine =~ /(^|\s)-preview(\s|\$)/).find()
+}
+
 def recordRunState(Map opts) {
     try {
-        // A stub run fabricates real files with fake content. A state file reporting those
-        // steps as complete would be actively dangerous, so these runs leave no trace.
-        if (workflow.stubRun) return
-        def is_preview = workflow.hasProperty('preview')
-            ? workflow.preview
-            : (workflow.commandLine =~ /(^|\s)-preview(\s|\$)/).find()
-        if (is_preview) return
+        // A state file reporting a stub run's fabricated outputs as complete would be worse
+        // than no file at all, and a preview did not do the work it would be describing.
+        if (isRehearsalRun()) return
 
         if (opts.status != 'running') {
             // More than one exit path can reach here; the first terminal record is the true one
@@ -210,6 +291,16 @@ def normaliseSteps(value) {
 }
 
 pipeline_steps = normaliseSteps(params.steps)
+
+// Groovy truth makes the non-empty string "false" true, and `--flag false` on the command line
+// arrives as exactly that string - measured on 26.04, for both `--flag false` and `--flag=false`.
+// Only a YAML params file yields a real Boolean. So a bare truth test on a flag reads the
+// operator's "off" as "on", which for a flag that deletes call sets is not survivable.
+def asBoolean(value) {
+    if (value == null) return false
+    if (value instanceof Boolean) return value
+    return !(value.toString().trim().toLowerCase() in ['', 'false', 'no', '0', 'null'])
+}
 
 // Validate input parameters
 if (!params.data) {
@@ -294,25 +385,60 @@ workflow {
 
     log.info "Found ${families.size()} families with ${individuals.size()} individuals total"
     
-    // Check existing files and determine what needs to be done
-    def analysis_plan = createAnalysisPlan(families, individuals, family_members)
+    // --clean-stale-families reaches Nextflow as clean_stale_families; cleanStaleFamilies is
+    // the camelCase spelling Nextflow produces when the hyphenated flag bypasses the wrapper
+    def clean_requested = asBoolean(params.clean_stale_families) || asBoolean(params.cleanStaleFamilies)
+
+    // Check existing files and determine what needs to be done.
+    // Quiet on this pass when a clean is coming: its per-sample messages describe a tree that
+    // is about to change, and the rebuild below re-emits them against the one the run uses.
+    def analysis_plan = createAnalysisPlan(families, individuals, family_members, clean_requested)
+
+    // Resolve the input files behind every individual with no CRAM, once. The guard below and
+    // the channels built afterwards need it, the run-state report is built from it, and the
+    // clean cannot judge a drifted family without it.
+    //
+    // Before the clean, and reused after it. That is sound only because the CRAM-less set
+    // this scan is keyed on cannot change when family VCFs are deleted - so the verdicts stay
+    // valid for the rebuilt plan, and the directory globs happen once.
+    def resolved_inputs = resolveAlignmentInputs(analysis_plan)
+    ghfc_run_state.alignment_scan = resolved_inputs
+
+    if (clean_requested) {
+        if (!params.vep_config_name) {
+            // Every annotation and wombat path is named after it. Unset, they would all be
+            // built as '...rare.null...', deleteIfExists would quietly match nothing, and the
+            // clean would report success having removed only the deepvariant_family files.
+            recordFailedRun("clean_stale_families requires vep_config_name")
+            exit 1, "ERROR: clean_stale_families needs vep_config_name to know which annotation and wombat outputs belong to a family - set it in the parameters file"
+        }
+        if (analysis_plan.pedigree_drift) {
+            ghfc_run_state.stale_family_clean = cleanStaleFamilies(analysis_plan, resolved_inputs, family_members)
+            // A rehearsal deleted nothing, so re-planning would have the run proceed as
+            // though the outputs were gone when every one of them is still there
+            if (ghfc_run_state.stale_family_clean.families_cleaned &&
+                !ghfc_run_state.stale_family_clean.rehearsal) {
+                analysis_plan = createAnalysisPlan(families, individuals, family_members)
+            }
+        } else {
+            log.info "clean_stale_families is set, but no family has stale outputs - nothing to clean"
+        }
+    }
     ghfc_run_state.plan = analysis_plan
 
-    // Display analysis summary
-    displayAnalysisSummary(analysis_plan)
-    
+    // Display analysis summary. After a clean this describes the tree the run will actually
+    // work on, and any family still listed as drifted is one the clean refused.
+    displayAnalysisSummary(analysis_plan, resolved_inputs, ghfc_run_state.stale_family_clean)
+
     // Stale family outputs are wrong results rather than missing ones, so the run can be
     // stopped on them. Warning is the default deliberately: a cohort whose pedigree has
     // drifted should not silently become unrunnable without the operator asking for that.
-    if (params.pedigree_strict && analysis_plan.pedigree_drift) {
+    // Evaluated after the clean, so the two together mean "fix what you can, stop on the rest".
+    if (asBoolean(params.pedigree_strict) && analysis_plan.pedigree_drift) {
         def n = analysis_plan.pedigree_drift.size()
         recordFailedRun("${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set")
         exit 1, "ERROR: ${n} ${n == 1 ? 'family has' : 'families have'} stale outputs and pedigree_strict is set - see the STALE FAMILY OUTPUTS summary above"
     }
-
-    // Resolve the input files behind everything the plan wants to align, once, so that the
-    // guard below and the channels built afterwards agree on what work is actually possible
-    def resolved_inputs = resolveAlignmentInputs(analysis_plan)
 
     // Validate that required steps are available
     validateStepsAvailability(analysis_plan, resolved_inputs, family_members)
@@ -666,7 +792,10 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
 
 def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
-        alignment: [needed: [], existing: [], need_bedgraph: []],
+        // no_cram is every individual with no usable CRAM, whatever the reason and whether or
+        // not anything will be scheduled for it. It is the set the input scan probes, which is
+        // what lets the run report on samples that nothing would otherwise look at.
+        alignment: [needed: [], existing: [], need_bedgraph: [], no_cram: [], no_cram_with_gvcf: []],
         deepvariant_sample: [needed: [], existing: []],
         deepvariant_family: [needed: [], existing: []],
         annotation: [needed: [], existing: []],
@@ -874,10 +1003,18 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 plan.alignment.need_bedgraph.add(barcode)
             }
         } else {
+            plan.alignment.no_cram.add(barcode)
+            // Hoisted out of the two branches below, which each needed it anyway, so the
+            // three CRAM-less buckets can be told apart later without a second stat
+            def has_gvcf = new File("${smp_dir}/deepvariant/${barcode}.g.vcf.gz").exists()
+            if (has_gvcf) {
+                plan.alignment.no_cram_with_gvcf.add(barcode)
+            }
+
             // Only need alignment if the individual needs DeepVariant
             if (barcode in plan.deepvariant_sample.needed) {
                 plan.alignment.needed.add(barcode)
-            } else if (new File("${smp_dir}/deepvariant/${barcode}.g.vcf.gz").exists()) {
+            } else if (has_gvcf) {
                 // Benign: nothing downstream reads the CRAM. Family calling consumes the
                 // gVCF and the ancestry panel extraction reads it directly, so a missing
                 // CRAM here costs nothing but the ability to regenerate coverage bedgraphs.
@@ -1005,12 +1142,22 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     return plan
 }
 
-def displayAnalysisSummary(analysis_plan) {
+def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report = null) {
+    // Every CRAM-less individual, split the way an operator has to act on them: the ones with
+    // a gVCF need nothing, and the rest are only fine if an input actually resolves for them
+    def no_cram = analysis_plan.alignment.no_cram ?: []
+    def no_cram_gvcf = (analysis_plan.alignment.no_cram_with_gvcf ?: []).size()
+    def no_cram_blocked = resolved_inputs == null ? null : no_cram.count { barcode ->
+        !(barcode in analysis_plan.alignment.no_cram_with_gvcf) &&
+        !(resolved_inputs.by_barcode?.get(barcode)?.usable)
+    }
+
     log.info """
     ========================================================================================
                                     ANALYSIS SUMMARY
     ========================================================================================
     ALIGNMENT: ${analysis_plan.alignment.existing.size()} individuals done, ${analysis_plan.alignment.needed.size()} to align, ${analysis_plan.alignment.need_bedgraph.size()} needing bedgraph only
+    SAMPLES WITHOUT CRAM: ${no_cram.size()}${no_cram ? " (${no_cram_gvcf} with a gVCF so nothing needs one, ${no_cram_blocked == null ? 'inputs not scanned' : "${no_cram_blocked} with no usable input"})" : ''}
     == SNVs/INDELs Calling ==
     DEEPVARIANT_SAMPLE: ${analysis_plan.deepvariant_sample.existing.size()} individuals done and ${analysis_plan.deepvariant_sample.needed.size()} to do
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
@@ -1055,9 +1202,41 @@ def displayAnalysisSummary(analysis_plan) {
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
         def drift_noun = n_drift == 1 ? "FAMILY" : "FAMILIES"
+        // After a real clean, every family still listed here is one the clean refused, so
+        // say why rather than repeating advice the operator has already acted on. After a
+        // rehearsal nothing was deleted, so the cleanable ones are still listed too and have
+        // to be told apart from the refusals.
+        def skip_reasons = [:]
+        (clean_report?.families_skipped ?: []).each { entry -> skip_reasons[entry.family_id] = entry.reason }
+        def would_clean = (clean_report?.rehearsal ? clean_report.families_cleaned : []).collect { it.family_id } as Set
+
         def drift_lines = analysis_plan.pedigree_drift.collect { fid, drift ->
-            "${fid}: ${drift.missing.size()} of ${drift.members} members have no gVCF (${drift.missing.join(', ')})"
+            def line = "${fid}: ${drift.missing.size()} of ${drift.members} members have no gVCF (${drift.missing.join(', ')})"
+            if (skip_reasons[fid]) return "${line}\n        not cleaned: ${skip_reasons[fid]}"
+            if (fid in would_clean) return "${line}\n        would be cleaned by this flag"
+            return line
         }
+
+        def remedy = clean_report?.rehearsal
+            ? """This was a rehearsal: nothing was deleted. The families marked above would be cleaned;
+    run the same command without --dry-run to do it. The rest were refused for the reason
+    given above them - supply the input data, index the CRAM, or add the missing step to
+    steps: - or remove the members that have no data from the pedigree."""
+            : clean_report != null
+            ? """Each of these was left alone for the reason given above it. Fix that - supply the input
+    data, index the CRAM, add the missing step to steps: - and run again with the same flag;
+    or remove the members that have no data from the pedigree, if they were never sequenced."""
+            : """Then either
+      - run again with --clean-stale-families, which deletes each family's norm.bcf and the
+        annotation and wombat outputs built from it so the family is re-called in full. It
+        only touches families whose missing members can actually be re-called from data on
+        disk and from the steps you asked for, and reports the rest. Add --dry-run first to
+        see exactly what it would remove; or
+      - remove the members that have no data from the pedigree, if they were never sequenced.
+
+    Ancestry outputs need no action: a member with no gVCF has no panel genotypes either, so
+    the family's ancestry merge and scores are already re-scheduled on their own."""
+
         log.warn "STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun.toLowerCase()} with already-called outputs that cannot contain every member the pedigree lists - details below"
         log.info """
     ========================================================================================
@@ -1073,15 +1252,192 @@ def displayAnalysisSummary(analysis_plan) {
     Confirm which samples a family actually contains with:
       bcftools query -l <data>/families/{S1}/{S2}/<FID>/vcfs/<FID>.norm.bcf
 
-    Then either
-      - provide the missing input data and delete that family's norm.bcf, its .csi and the
-        annotation/wombat/ancestry outputs built from it, so it is re-called in full; or
-      - remove the members that have no data from the pedigree, if they were never sequenced.
+    ${remedy}
 
     Set pedigree_strict: true to stop the run on this instead of warning.
     ========================================================================================
     """
     }
+}
+
+/*
+========================================================================================
+    STALE FAMILY CLEAN
+========================================================================================
+*/
+
+// Delete one file, but only from inside the data tree.
+//
+// The containment check is not defensive programming for its own sake: every path handed here
+// is built by string interpolation from params.data, and this is the only code in the pipeline
+// that unlinks anything. A malformed data value must fail loudly rather than quietly become an
+// unlink somewhere else on shared project storage.
+//
+// Records into `deleted` / `failed` rather than throwing, so one bad path cannot abandon a
+// family half-cleaned.
+def deleteWithinData(String path, String data_root, boolean rehearsal, List deleted, Map failed) {
+    try {
+        def target = new File(path)
+        def canonical = target.canonicalPath
+        if (canonical != data_root && !canonical.startsWith(data_root + File.separator)) {
+            failed[path] = 'refusing to delete a path outside the data directory'
+            return false
+        }
+        if (rehearsal) {
+            if (target.exists()) {
+                log.info "  would delete: ${path}"
+                deleted.add(path)
+            }
+            return true
+        }
+        if (java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(path))) {
+            log.info "  deleted: ${path}"
+            deleted.add(path)
+        }
+        return true
+    }
+    catch (Exception e) {
+        failed[path] = e.toString()
+        return false
+    }
+}
+
+// Delete the derived outputs of families whose pedigree has drifted, so the next plan
+// re-schedules them. This is the only code in the pipeline that destroys data, so the whole
+// function is built around one rule: never delete what this run cannot rebuild.
+//
+// A family that loses its norm.bcf and then cannot be re-called is strictly worse off than
+// the warning this replaces - the call set is gone, nothing schedules the missing member, and
+// the run aborts in validateStepsAvailability having already destroyed the evidence. So every
+// family is gated on both halves of "can we rebuild it": the data on disk, and the steps this
+// run was actually asked to perform. Families that fail are reported, with the reason, and
+// left completely untouched.
+//
+// Returns a JSON-safe report for the run-state file. Never throws.
+def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
+    def rehearsal = isRehearsalRun()
+    def report = [
+        // On a rehearsal these say what *would* happen. The flag is what stops the caller
+        // re-planning as though the files were gone, and what lets the summary say so.
+        rehearsal             : rehearsal,
+        families_cleaned      : [],
+        families_skipped      : [],
+        cohort_outputs_deleted: [],
+        cohort_outputs_stale  : [],
+        errors                : []
+    ]
+
+    def verb = rehearsal ? 'would delete' : 'deleted'
+
+    def wombat_configs = (params.wombat_config_list ?: []) as List
+    def with_wisecondorx = 'wisecondorx' in pipeline_steps
+
+    if (!wombat_configs) {
+        log.info "No wombat_config_list is set, so no wombat result TSVs will be removed"
+    }
+    if (!with_wisecondorx) {
+        log.info "The wisecondorx step was not requested, so its family aberration BEDs are left in place"
+    }
+
+    // Every path below is built by interpolation from params.data, which is user-supplied
+    def data_root = new File(params.data as String).canonicalPath
+
+    analysis_plan.pedigree_drift.each { fid, drift ->
+        def verdict = StaleFamily.recovery(drift.missing,
+                                           analysis_plan.alignment.existing as Set,
+                                           resolved_inputs.resolvable as Set,
+                                           resolved_inputs.index_missing ?: [:],
+                                           pipeline_steps)
+        if (!verdict.recoverable) {
+            report.families_skipped.add([family_id: fid, members: drift.members,
+                                         missing: drift.missing,
+                                         reason: verdict.reasons.join('; ')])
+            return
+        }
+
+        def paths = StaleFamily.familyOutputs(params.data as String, fid,
+                                              params.vep_config_name as String,
+                                              wombat_configs, with_wisecondorx)
+        def deleted = []
+        def failed = [:]
+        log.info "Family ${fid}: ${verb} the outputs of a joint call that is missing ${drift.missing.join(', ')}"
+        paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
+
+        // The norm.bcf is what makes the family look done. If it survived, the family was not
+        // cleaned however many other files went, and calling it a success would be a lie the
+        // next run pays for - it would find the family "existing" with half its outputs gone.
+        def norm_bcf = "${Sharding.getFamilyDir(params.data as String, fid)}/vcfs/${fid}.norm.bcf".toString()
+        if (failed[norm_bcf] || (!rehearsal && new File(norm_bcf).exists())) {
+            def why = failed[norm_bcf] ?: 'it is still present after the delete'
+            log.warn "Family ${fid} was NOT cleaned: its norm.bcf could not be removed (${why}) - the family still looks complete and the other files removed from it are now missing"
+            report.errors.add("${fid}: norm.bcf could not be removed (${why})".toString())
+            report.families_skipped.add([family_id: fid, members: drift.members,
+                                         missing: drift.missing,
+                                         reason: "norm.bcf could not be removed: ${why}".toString()])
+            return
+        }
+
+        failed.each { path, why ->
+            log.warn "Could not delete ${path}: ${why}"
+            report.errors.add("${fid}: ${path}: ${why}".toString())
+        }
+        report.families_cleaned.add([family_id: fid, members: drift.members,
+                                     missing: drift.missing, files_deleted: deleted.size()])
+    }
+
+    // The cohort merges keep data from call sets that no longer exist, and the plan only
+    // checks that they exist - so nothing would ever rebuild them. But deleting them when
+    // this run cannot re-merge is worse than leaving them: SNVS_COHORT would rebuild from
+    // whatever families happen to be annotated right now and write a *new* wrong file with a
+    // fresh timestamp, which looks current and is not.
+    if (report.families_cleaned) {
+        def can_remerge = ['annotation', 'snvs_cohort'].every { step -> step in pipeline_steps }
+        def cohort_paths = StaleFamily.cohortOutputs(params.data as String, params.cohort_name as String,
+                                                     params.vep_config_name as String,
+                                                     wombat_configs, with_wisecondorx)
+        if (can_remerge) {
+            def deleted = []
+            def failed = [:]
+            log.info "Cohort ${params.cohort_name}: ${verb} the cohort merges, which contain data from the call sets just removed"
+            cohort_paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
+            failed.each { path, why ->
+                log.warn "Could not delete ${path}: ${why}"
+                report.errors.add("cohort: ${path}: ${why}".toString())
+            }
+            report.cohort_outputs_deleted = deleted.collect { new File(it).name }
+        } else {
+            def present = cohort_paths.findAll { new File(it).exists() }
+            report.cohort_outputs_stale = present.collect { new File(it).name }
+            if (present) {
+                log.warn """The cohort merges below still contain data from the call sets just removed, and were
+    left in place because this run cannot rebuild them - 'annotation' and 'snvs_cohort' must
+    both be in steps. Add them and run again, or delete these by hand once the families are
+    re-annotated:
+      ${present.join('\n      ')}"""
+            }
+        }
+    }
+
+    def n_clean = report.families_cleaned.size()
+    def n_skip = report.families_skipped.size()
+    def n_files = report.families_cleaned.sum { it.files_deleted } ?: 0
+    def to_align = report.families_cleaned.collectMany { entry ->
+        entry.missing.findAll { barcode -> !(barcode in analysis_plan.alignment.existing) }
+    }.unique()
+
+    log.info """
+    ========================================================================================
+                    ${rehearsal ? 'STALE FAMILY CLEAN (rehearsal - nothing was deleted)' : 'CLEANED STALE FAMILY OUTPUTS'}
+    ========================================================================================
+    ${n_clean} ${n_clean == 1 ? 'family' : 'families'} ${rehearsal ? 'would be cleaned' : 'cleaned'} (${n_files} ${rehearsal ? 'files would be removed' : 'files removed'}), ${n_skip} left alone.
+    ${report.cohort_outputs_deleted ? "Cohort merges ${rehearsal ? 'that would be removed' : 'removed'}: ${report.cohort_outputs_deleted.join(', ')}" : "No cohort merges ${rehearsal ? 'would be removed' : 'removed'}."}
+    ${!n_clean ? 'Nothing was cleaned, so nothing new needs aligning.' : to_align ? "${to_align.size()} sample(s) must be aligned from scratch before their families can be re-called: ${to_align.join(', ')}" : 'Every missing member already has a CRAM; only variant calling is needed.'}
+    ${report.families_skipped ? "\n    Left alone:\n      " + report.families_skipped.collect { "${it.family_id}: ${it.reason}" }.join('\n      ') : ''}
+    ${rehearsal ? '\n    This was a rehearsal run (-preview or -stub-run). Nothing on disk was changed.' : ''}
+    ========================================================================================
+    """
+
+    return report
 }
 
 def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
@@ -1160,12 +1516,34 @@ def unitFromFastqName(fastq_name) {
     return "${parts[4]}_${flowcell}_${parts[5]}"
 }
 
-// Resolve the actual input files behind every individual the plan wants to align.
+// Record which source a barcode's alignment input came from, for the run-state report.
+//
+// A barcode can sit in more than one source, and the sources are scanned in a fixed order
+// that has nothing to do with which one is usable. An unindexed CRAM found first must not be
+// the answer for a barcode that also has a good FASTQ pair, or the report would call a
+// perfectly alignable sample blocked - so a usable source always wins, whenever it turns up.
+def noteAlignmentSource(resolved, String barcode, String source, String path, boolean usable) {
+    def existing = resolved.by_barcode[barcode]
+    if (existing && (existing.usable || !usable)) return
+    resolved.by_barcode[barcode] = [source: source, path: path, usable: usable]
+}
+
+// Resolve the actual input files behind every individual that has no CRAM.
 //
 // alignment.needed means "the output CRAM is missing and something downstream wants it" -
 // it says nothing about an input existing. Resolving inputs here, eagerly and once, gives
 // validateStepsAvailability something real to check and gives createChannels its rows, so
 // the plan and the channels describe the same set of work.
+//
+// The probe set is deliberately wider than alignment.needed: it is every CRAM-less individual.
+// Two things need that. The run-state report answers "can this sample be aligned?" for samples
+// nothing is scheduled for, and --clean_stale_families cannot decide whether a drifted family
+// is recoverable without it - the missing member of an already-called family is precisely the
+// case that never reaches alignment.needed, which is usually empty exactly when it matters.
+// The globs are whole-directory scans either way, so the wider set costs only in-memory work.
+//
+// Rows in cram_37/cram_38 therefore cover barcodes that must NOT be realigned; createChannels
+// filters them down to alignment.needed.
 def resolveAlignmentInputs(analysis_plan) {
     def resolved = [
         cram_37       : [],
@@ -1174,14 +1552,18 @@ def resolveAlignmentInputs(analysis_plan) {
         fastq_barcodes: [] as Set,
         index_missing : [:],
         unpaired_fastq: [:],
-        searched      : []
+        searched      : [],
+        // barcode -> [source: String, path: String|null, usable: boolean], the JSON-safe
+        // verdict the state file records. One answer per barcode, even when several sources
+        // hold it.
+        by_barcode    : [:]
     ]
 
-    if (analysis_plan.alignment.needed.size() == 0) {
+    if (analysis_plan.alignment.no_cram.size() == 0) {
         return resolved
     }
 
-    def needed = analysis_plan.alignment.needed as Set
+    def needed = analysis_plan.alignment.no_cram as Set
 
     // Old CRAMs: flat directories, one file per individual
     [['cram_37', params.old_cram_37], ['cram_38', params.old_cram_38]].each { key, dir ->
@@ -1200,13 +1582,16 @@ def resolveAlignmentInputs(analysis_plan) {
                 return
             }
             def crai_path = "${cram}.crai"
+            def source = key == 'cram_37' ? 'old_cram_37' : 'old_cram_38'
             if (new File(crai_path).exists()) {
                 resolved[key].add([barcode, cram, file(crai_path)])
                 resolved.resolvable.add(barcode)
+                noteAlignmentSource(resolved, barcode, source, cram.toString(), true)
             } else {
                 // Recorded rather than dropped: the data is there, only the index is not,
                 // and that needs a different fix than missing input
-                resolved.index_missing[barcode] = cram.toString()
+                resolved.index_missing[barcode] = [source: source, path: cram.toString()]
+                noteAlignmentSource(resolved, barcode, "${source}_unindexed".toString(), cram.toString(), false)
             }
         }
     }
@@ -1241,15 +1626,22 @@ def resolveAlignmentInputs(analysis_plan) {
             unit_barcode[unit] = barcode
         }
         unit_count.each { unit, n ->
+            def barcode = unit_barcode[unit]
             if (n == 2) {
-                resolved.resolvable.add(unit_barcode[unit])
-                resolved.fastq_barcodes.add(unit_barcode[unit])
+                resolved.resolvable.add(barcode)
+                resolved.fastq_barcodes.add(barcode)
+                noteAlignmentSource(resolved, barcode, 'fastq', null, true)
             } else {
                 resolved.unpaired_fastq[unit] = n
+                noteAlignmentSource(resolved, barcode, 'fastq_unpaired', null, false)
             }
         }
+        // Recorded for every probed barcode above, but only worth saying out loud for the ones
+        // this run would actually align - a migrated cohort would otherwise bury the log
         resolved.unpaired_fastq.each { unit, n ->
-            log.warn "FASTQ unit ${unit} has ${n} read file(s) instead of 2 and will be ignored by fromFilePairs"
+            if (unit_barcode[unit] in analysis_plan.alignment.needed) {
+                log.warn "FASTQ unit ${unit} has ${n} read file(s) instead of 2 and will be ignored by fromFilePairs"
+            }
         }
     }
 
@@ -1289,7 +1681,7 @@ def reconcilePlanWithInputs(analysis_plan, resolved_inputs, family_members) {
     def index_missing = resolved_inputs.index_missing.findAll { barcode, _cram -> barcode in unresolved }
     if (index_missing) {
         errors.add("Input CRAM found but unusable for ${index_missing.size()} individual(s) - the index must exist and be named <file>.cram.crai, run 'samtools index' on each:\n        " +
-                   index_missing.collect { barcode, cram -> "${barcode}: ${cram}" }.join("\n        "))
+                   index_missing.collect { barcode, info -> "${barcode}: ${info.path}" }.join("\n        "))
     }
 
     // Name the downstream work that cannot happen either, so this report covers everything
@@ -1342,7 +1734,12 @@ def createChannels(analysis_plan, resolved_inputs) {
     // channel actually emitted: toList/flatMap keeps that to a single consumption and
     // still aborts before any alignment task is submitted.
     if (params.fastq_pattern && analysis_plan.alignment.needed.size() > 0) {
-        def fastq_expected = resolved_inputs.fastq_barcodes
+        // Narrowed to what this run will align: the scan probes every CRAM-less individual,
+        // and the channel below filters to alignment.needed, so comparing against the raw
+        // scan would report every unscheduled sample that happens to have FASTQ as "dropped"
+        def fastq_expected = resolved_inputs.fastq_barcodes.findAll { barcode ->
+            barcode in analysis_plan.alignment.needed
+        }
         channels.fastq_files = Channel
             .fromFilePairs("${params.data}/fastq/${params.fastq_pattern}", size: 2)
             .map { sample_id, reads ->
@@ -1373,9 +1770,16 @@ def createChannels(analysis_plan, resolved_inputs) {
     }
     
     // Create CRAM channels for realignment, from the single resolution pass rather than a
-    // second glob - re-globbing here is what let the channels and the plan drift apart
+    // second glob - re-globbing here is what let the channels and the plan drift apart.
+    //
+    // The scan resolves inputs for every CRAM-less individual, not just the ones being
+    // aligned, so that the run can report on samples nothing is scheduled for. Those extra
+    // rows must not reach ALIGNMENT: realigning a sample that already has what it needs is
+    // days of compute for no change.
     channels.cram_37_files = Channel.fromList(resolved_inputs.cram_37)
+        .filter { barcode, _cram, _crai -> barcode in analysis_plan.alignment.needed }
     channels.cram_38_files = Channel.fromList(resolved_inputs.cram_38)
+        .filter { barcode, _cram, _crai -> barcode in analysis_plan.alignment.needed }
     
     // Create channel for existing CRAM files
     channels.existing_crams = Channel
@@ -1562,6 +1966,7 @@ workflow.onComplete {
     def pedigree_file = ghfc_run_state.pedigree_file
     def pedigree_data = ghfc_run_state.pedigree_data
     def plan = ghfc_run_state.plan
+    def scan = ghfc_run_state.alignment_scan
     def measured = 'before'
 
     try {
@@ -1572,6 +1977,9 @@ workflow.onComplete {
             pedigree_data = parsePedigreeFile(pedigree_file, true)
             plan = createAnalysisPlan(pedigree_data.families, pedigree_data.individuals,
                                       pedigree_data.family_members, true)
+            // And re-resolve inputs against it, so a sample this run aligned drops out of the
+            // CRAM-less report instead of being carried over from the start of the run
+            scan = resolveAlignmentInputs(plan)
             measured = 'after'
         }
     }
@@ -1579,6 +1987,7 @@ workflow.onComplete {
         log.warn "Could not re-scan outputs for ${CohortState.FILE_NAME} (${t}) - recording the counts from the start of the run instead"
         pedigree_data = ghfc_run_state.pedigree_data
         plan = ghfc_run_state.plan
+        scan = ghfc_run_state.alignment_scan
         measured = 'before'
     }
 
@@ -1587,6 +1996,7 @@ workflow.onComplete {
         plan: plan,
         pedigree_data: pedigree_data,
         pedigree_file: pedigree_file,
+        alignment_scan: scan,
         measured: measured,
         // On a failed run Nextflow cancels in-flight publishDir copies, so outputs this run
         // produced may not have landed yet and the counts above can under-report.

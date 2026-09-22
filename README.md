@@ -696,10 +696,21 @@ It holds the last run and the last successful run, each with a timestamp, a comp
 SHA-256 checksums of the pedigree and parameters file that produced the outputs, the pipeline
 version and commit, and per-step completion percentages - plus a short history of earlier runs.
 
+Two further blocks describe the cohort's inputs rather than its outputs.
+`samples_without_cram` lists every individual with no CRAM, with its family, whether it already
+has a gVCF, and which input source - if any - could align it; its `blocked` count is the number
+that can neither progress nor be fixed from what is on disk. `stale_family_clean` records what
+a `--clean-stale-families` run removed, and which families it refused and why.
+
 ```bash
 # Did the last run finish, and how complete is the cohort?
 jq -r '.last_run.status' "$data/cohorts/EAGER/.ghfc-ngs.state.json"
 jq -r '.last_run.completion' "$data/cohorts/EAGER/.ghfc-ngs.state.json"
+
+# Which samples are stuck, and what would unstick them?
+jq -r '.last_run.samples_without_cram.samples[] | select(.blocked)
+       | "\(.barcode)\t\(.family_id)\t\(.input_source)"' \
+   "$data/cohorts/EAGER/.ghfc-ngs.state.json" | column -t -s $'\t'
 ```
 
 Stub and preview runs deliberately write nothing, and the file is skipped when `cohort_name` is

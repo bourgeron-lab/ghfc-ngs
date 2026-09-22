@@ -55,6 +55,22 @@ If neither file exists, the runner stops before launching Nextflow and tells you
 
 After a run, that same cohort directory gains a hidden `.ghfc-ngs.state.json` recording when the cohort was last run, whether it finished, which pedigree and parameters were used, and how complete each step is. See [COHORT_STATE.md](COHORT_STATE.md).
 
+### Repairing a cohort whose pedigree has drifted
+
+If a run warns about `STALE FAMILY OUTPUTS`, the pedigree has gained members that were never
+called, and the families holding them cannot be re-called on their own. To have the workflow
+clear them out instead of deleting the files by hand:
+
+```bash
+ghfc-ngs CANDY_mpx --clean-stale-families --dry-run
+ghfc-ngs CANDY_mpx --clean-stale-families
+```
+
+The first prints every path it would remove and changes nothing. Only families whose missing
+members can actually be re-called — from data on disk and from the steps requested — are
+touched; the rest are reported with the reason. See
+[documentation/params.md](documentation/params.md#clean_stale_families-repairing-a-drifted-cohort).
+
 ### Running with an explicit parameter file
 
 The `--params-file` option is still available, and takes precedence over a cohort name given on the same command line. Use it for parameter files that do not follow the `cohorts/<NAME>/<NAME>.params.yml` layout:
