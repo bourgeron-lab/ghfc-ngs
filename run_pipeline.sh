@@ -367,8 +367,11 @@ if [[ -n "$SUBMIT" ]]; then
     # moved under a live run - the check above saw to that - and it pins the code the job runs.
     command -v nextflow &> /dev/null || die "Nextflow is not available. Please load the nextflow module."
     JOB_ASSETS="$LAUNCH_DIR/.nextflow-assets"
-    echo "Pulling bourgeron-lab/ghfc-ngs${REVISION:+ ($REVISION)} into $JOB_ASSETS"
-    NXF_ASSETS="$JOB_ASSETS" nextflow -q pull bourgeron-lab/ghfc-ngs ${REVISION:+-r "$REVISION"} \
+    # Always an explicit revision: a pull without -r updates whatever branch the clone is on,
+    # so one submit of a branch would otherwise leave every later one on that branch
+    JOB_REVISION="${REVISION:-main}"
+    echo "Pulling bourgeron-lab/ghfc-ngs ($JOB_REVISION) into $JOB_ASSETS"
+    NXF_ASSETS="$JOB_ASSETS" nextflow -q pull bourgeron-lab/ghfc-ngs -r "$JOB_REVISION" \
         || die "could not pull bourgeron-lab/ghfc-ngs"
     JOB_SCRIPT="$LAUNCH_DIR/.submit/job.$STAMP.sh"
     {
@@ -376,6 +379,7 @@ if [[ -n "$SUBMIT" ]]; then
         echo "export NXF_OPTS=\"-Xms1g -Xmx$HEAD_HEAP\""
         echo "export GHFC_NGS_IN_JOB=1"
         printf 'export NXF_ASSETS=%q\n' "$JOB_ASSETS"
+        printf 'export GHFC_NGS_REVISION=%q\n' "$JOB_REVISION"
         printf 'cd %q\n' "$PWD"
         printf 'exec bash -l %q%s\n' "$RUNNER" "$(printf ' %q' "${JOB_ARGS[@]}")"
     } > "$JOB_SCRIPT"
@@ -421,8 +425,9 @@ fi
 if [[ -n "$MIGRATE" ]]; then
     CMD="nextflow run -latest bourgeron-lab/ghfc-ngs/$MIGRATE"
 elif [[ -n "${GHFC_NGS_IN_JOB:-}" ]]; then
-    # The checkout pulled at submit time, as it is: no -latest, which would fetch, and no -r
-    CMD="nextflow run bourgeron-lab/ghfc-ngs"
+    # The checkout pulled at submit time: no -latest, which would fetch. -r always, since
+    # Nextflow refuses to run a checkout off the default branch without it ("stuck on revision")
+    CMD="nextflow run bourgeron-lab/ghfc-ngs -r ${REVISION:-main}"
 else
     CMD="nextflow run -latest bourgeron-lab/ghfc-ngs${REVISION:+ -r $REVISION}"
 fi
