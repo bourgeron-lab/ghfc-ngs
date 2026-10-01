@@ -55,6 +55,33 @@ If neither file exists, the runner stops before launching Nextflow and tells you
 
 After a run, that same cohort directory gains a hidden `.ghfc-ngs.state.json` recording when the cohort was last run, whether it finished, which pedigree and parameters were used, and how complete each step is. See [COHORT_STATE.md](COHORT_STATE.md).
 
+Runs started by cohort name are launched from `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/<NAME>`
+(`$GHFC_NGS_RUNS`), whatever directory you are in. That is where that cohort's `.nextflow.log`,
+`reports/` and Nextflow history now live. `--here` launches from the current directory instead.
+
+### Running as a Slurm job rather than in tmux
+
+The ghfc compute nodes can submit jobs, and ghfc has no time limit, so Nextflow itself can run as a
+job instead of in a tmux on the login node:
+
+```bash
+ghfc-ngs CANDY_mpx --submit                          # start
+ghfc-ngs CANDY_mpx --submit --resume                 # resume the cohort's last run
+ghfc-ngs CANDY_mpx --submit --clean-stale-families   # start, cleaning stale families first
+squeue --me -n ghfc-ngs.CANDY_mpx                    # is it running?
+tail -f /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/CANDY_mpx/ghfc-ngs.*.log
+scancel --signal=TERM --batch --name=ghfc-ngs.CANDY_mpx   # stop cleanly
+```
+
+The job is `ghfc-ngs.<NAME>`, with 2 CPUs and 16 GB. A second run of a cohort that already has
+one queued or running is refused. Stop a run with `--signal=TERM --batch`, as above: Nextflow then
+cancels its own tasks and records the run as failed. A plain `scancel` leaves its tasks behind. The
+live per-process counts are in `cohorts/<NAME>/.ghfc-ngs.progress.json`. See
+[COHORT_STATE.md](COHORT_STATE.md#live-progress-ghfc-ngsprogressjson).
+
+`--resume` on its own resumes the cohort's last run, whose session ID it reads from the cohort state
+file. It also works on runs from before the move to `runs/<NAME>`.
+
 ### Repairing a cohort whose pedigree has drifted
 
 If a run warns about `STALE FAMILY OUTPUTS`, the pedigree has gained members that were never

@@ -81,6 +81,11 @@ across many cohorts into one list without losing track of which is which.
     "sha256": "fb6d11d8c0335d176533755eb7d926635d6d013aae7fb2463d2481613d4a248c"
   },
   "params_effective_sha256": "4f50615493b5f007beb00925c53982225215ffc7a6b5f214256ff3c83f7557b2",
+  "launch": {
+    "dir": "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/EAGER",
+    "slurm_job_id": "23790693",
+    "host": "maestro-1128"
+  },
   "steps_requested": [
     "alignment", "deepvariant_sample", "deepvariant_family",
     "annotation", "snvs_cohort", "wisecondorx", "wombat"
@@ -132,6 +137,9 @@ across many cohorts into one list without losing track of which is which.
 | `pedigree.individuals` | int | no pedigree parsed | Distinct barcodes. The denominator for sample-level steps. |
 | `params_file` | object | **no `-params-file` given** | `{path, sha256}` of the YAML. Recovered from the command line, since Nextflow does not expose it. |
 | `params_effective_sha256` | string | rarely, if params will not serialise | SHA-256 of the resolved parameter map. See [Checksums](#checksums). |
+| `launch.dir` | string | — | Nextflow's `launchDir`: where `.nextflow.log`, `reports/` and the session cache of this run are. `$GHFC_NGS_RUNS/<COHORT>` for a run started by cohort name. |
+| `launch.slurm_job_id` | string | **not run inside Slurm** | The job running Nextflow itself, for `--submit` runs. `squeue -j` on it is the liveness check a `running` record otherwise lacks. |
+| `launch.host` | string | rarely | The machine Nextflow ran on. |
 | `steps_requested` | array | — | `params.steps` for this run. **Needed to interpret `completion`** — a step that was not requested was not measured. |
 | `completion_measured` | string | — | `after` = the tree was re-scanned once the run finished. `before` = the numbers are from the start of the run (every `failed`-at-validation record, and every `running` record). |
 | `outputs_may_be_incomplete` | bool | — | `true` on a failed run. Nextflow cancels in-flight `publishDir` copies when a run aborts, so outputs this run produced may not have landed before the counts were taken. |
@@ -193,6 +201,10 @@ Two things to handle when reading a failure:
 | `success` | The run finished and Nextflow reported success. Also becomes `last_successful_run`. |
 | `failed` | A validation error, or a task failure. Carries `reason` for the former. |
 | `interrupted` | Never written by the run it describes. A later run found a `running` record from a *different* `run_id` and closed it out. |
+
+**A SIGTERM is recorded.** `scancel --signal=TERM --batch` on a `--submit` job, or `kill` on the
+Nextflow process, makes Nextflow cancel its tasks and run `workflow.onComplete`, which records the
+run as `failed` (checked on 25.10.4). What follows is about the deaths that give it no such chance.
 
 **A `running` record does not mean a run is in progress.** Nextflow's `exit` is a `System.exit`
 with no shutdown hook, so a SLURM walltime kill, a Ctrl-C, or a lost launch node leaves the
@@ -364,6 +376,61 @@ current=$(shasum -a 256 "$(jq -r '.last_successful_run.pedigree.path' "$f")" | c
 jq -r 'select(.last_run.status == "running")
        | "\(.cohort_name) has an unfinished run started \(.last_run.started_at)"' .ghfc-ngs.state.json
 ```
+
+## Live progress: `.ghfc-ngs.progress.json`
+
+While a run is going, the cohort directory also holds `.ghfc-ngs.progress.json`. The state file
+says what the last run did; this file says what the current one is doing. It is written by
+[`lib/RunProgress.groovy`](lib/RunProgress.groovy), atomically like the state file, and
+overwritten by each run. It is not written by `-preview` or `-stub-run`.
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "4ae3b8a3-2715-49e3-a487-9081fb806833",
+  "run_name": "tender_allen",
+  "cohort_name": "EAGER",
+  "started_at": "2026-10-01T14:43:31.2+02:00",
+  "launch_dir": "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/EAGER",
+  "slurm_job_id": "23792765",
+  "host": "maestro-1116",
+  "status": "running",
+  "updated_at": "2026-10-01T14:44:05+02:00",
+  "totals": { "pending": 0, "submitted": 0, "running": 6, "succeeded": 40, "cached": 0,
+              "failed": 0, "ignored": 0, "retries": 0, "total": 46, "completed": 40 },
+  "processes": [
+    { "name": "ALIGNMENT:BWA_MEM2_ALIGN", "pending": 0, "submitted": 0, "running": 6,
+      "succeeded": 40, "cached": 0, "failed": 0, "ignored": 0, "retries": 0,
+      "total": 46, "completed": 40, "terminated": false, "errored": false }
+  ],
+  "completion": {
+    "alignment": { "done": 900, "total": 941, "pct": 95.64 }
+  },
+  "completion_measured_at": "2026-10-01T14:40:00+02:00",
+  "completion_scan_seconds": 2.4
+}
+```
+
+It has two clocks, for two questions:
+
+- **`processes`, every 30 s: what is Nextflow doing?** These are the counters behind the Nextflow
+  console's `ALIGN | 40 of 46` line, read from the session's own statistics. `completed`
+  (succeeded + ignored + cached) is the 40, and `total` is the 46. `pending` counts tasks Nextflow
+  has created but not yet handed to Slurm, for instance beyond `executor.queueSize`. `submitted`
+  counts tasks queued in Slurm, and `running` tasks that have started. `failed` includes the
+  attempts that were retried, which `retries` counts.
+- **`completion`, every 10 min: how far along is the cohort?** The same block as `completion` in a
+  state file record, re-measured against the pedigree with the same existence checks, by a re-scan
+  of the data tree (`completion_scan_seconds` says how long it took). It starts from the plan the run
+  was launched with, and its last version is the completion handler's re-scan.
+
+A process's `total` is **not** how many tasks the process will have in the end. Nextflow only counts
+the tasks it has created so far, and a process's total grows as upstream processes emit. For a
+percentage of the cohort, use `completion`.
+
+`status` is `running` until the completion handler writes `success` or `failed`. A run killed
+without that chance (SIGKILL, a lost node) leaves `running` behind, with an `updated_at` that stops
+moving. A file older than a couple of minutes describes a dead run, and `slurm_job_id` settles it.
 
 ## Extending the schema
 

@@ -40,7 +40,7 @@ include { ANCESTRY } from './workflows/ancestry'
 // does not.
 ghfc_run_state = [terminal_written: false, warned_no_cohort: false,
                   pedigree_file: null, pedigree_data: null, plan: null,
-                  alignment_scan: null, stale_family_clean: null]
+                  alignment_scan: null, stale_family_clean: null, progress: null]
 
 // The cohort directory holds this cohort's params file, its pedigree and its outputs, so it
 // is also where its state file belongs. Null when we cannot know it - params.cohort_name has
@@ -171,6 +171,56 @@ def buildSamplesWithoutCramBlock(plan, scan, Map family_members, int limit = 200
     return block
 }
 
+// Where this run was launched, and from which Slurm job if any. The job ID is what gives a
+// 'running' record the liveness check it otherwise lacks: `squeue -j` either knows it or not.
+def launchInfo() {
+    def host = null
+    try { host = java.net.InetAddress.localHost.hostName } catch (Exception ignored) { }
+    return [
+        dir:          workflow.launchDir?.toString(),
+        slurm_job_id: System.getenv('SLURM_JOB_ID'),
+        host:         host
+    ]
+}
+
+// Start .ghfc-ngs.progress.json: Nextflow's per-process counters every 30 s, and the step
+// completion re-measured against the pedigree every 10 min. See RunProgress and COHORT_STATE.md.
+// Like the state file, never for a rehearsal, and never allowed to take the run down.
+def startRunProgress(plan) {
+    try {
+        if (isRehearsalRun()) return
+        def dir = cohortStateDir()
+        if (!dir) return
+        def pedigree_data = ghfc_run_state.pedigree_data
+        def n_families    = pedigree_data?.families?.size()
+        def n_individuals = pedigree_data?.individuals?.size()
+        def launch = launchInfo()
+        ghfc_run_state.progress = new RunProgress(
+            dir: dir,
+            header: [
+                run_id:       workflow.sessionId?.toString(),
+                run_name:     workflow.runName,
+                cohort_name:  params.cohort_name,
+                started_at:   isoTimestamp(workflow.start),
+                launch_dir:   launch.dir,
+                slurm_job_id: launch.slurm_job_id,
+                host:         launch.host
+            ],
+            // The pedigree the run started with, not a re-read one: an edit made mid-run must
+            // not move the denominator under a run that is still working to the old one
+            rescan: {
+                def p = createAnalysisPlan(pedigree_data.families, pedigree_data.individuals,
+                                           pedigree_data.family_members, true)
+                buildCompletionBlock(p, n_families, n_individuals)
+            },
+            warn: { String msg -> log.warn msg }
+        ).start(buildCompletionBlock(plan, n_families, n_individuals))
+    }
+    catch (Throwable t) {
+        log.warn "Could not start ${RunProgress.FILE_NAME}: ${t}"
+    }
+}
+
 def buildStateRecord(Map opts) {
     // Fall back to whatever the run stashed, so most call sites only have to say what happened
     def pedigree_file = opts.containsKey('pedigree_file') ? opts.pedigree_file : ghfc_run_state.pedigree_file
@@ -201,6 +251,8 @@ def buildStateRecord(Map opts) {
             individuals: n_individuals
         ],
         params_file: params_file ? [path: params_file, sha256: CohortState.sha256(params_file)] : null,
+        // Where the run lives, so a tool can go from a cohort to its log and its Slurm job
+        launch: launchInfo(),
         params_effective_sha256: effectiveParamsSha(),
         steps_requested: pipeline_steps,
         completion_measured: opts.measured,
@@ -447,6 +499,7 @@ workflow {
     // kill or a Ctrl-C, so this marker is what makes such a death visible afterwards: the
     // record stays 'running' forever, and the next run turns it into 'interrupted'.
     recordRunState(status: 'running', measured: 'before')
+    startRunProgress(analysis_plan)
     
     // Create channels for different steps
     def channels = createChannels(analysis_plan, resolved_inputs)
@@ -1989,6 +2042,17 @@ workflow.onComplete {
         plan = ghfc_run_state.plan
         scan = ghfc_run_state.alignment_scan
         measured = 'before'
+    }
+
+    try {
+        // Last word of the live file, with the same re-scan the state file gets below
+        ghfc_run_state.progress?.stop(workflow.success ? 'success' : 'failed',
+            measured == 'after'
+                ? buildCompletionBlock(plan, pedigree_data?.families?.size(), pedigree_data?.individuals?.size())
+                : null)
+    }
+    catch (Throwable t) {
+        log.warn "Could not finish ${RunProgress.FILE_NAME}: ${t}"
     }
 
     recordRunState(

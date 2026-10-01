@@ -148,16 +148,24 @@ class CohortState {
      * that other people's tooling reads while runs are in flight.
      */
     static void write(Path dir, Map state) {
+        writeJsonAtomically(dir, FILE_NAME, TMP_PREFIX, state)
+    }
+
+    /**
+     * The atomic replace behind write(), for any JSON file kept next to the state file -
+     * RunProgress writes .ghfc-ngs.progress.json through it too.
+     */
+    static void writeJsonAtomically(Path dir, String fileName, String tmpPrefix, Map content) {
         Files.createDirectories(dir)
-        def target = dir.resolve(FILE_NAME)
+        def target = dir.resolve(fileName)
 
         // The temp file has to live in the target directory. Files.move can only be atomic
         // within a single filesystem, and $TMPDIR is never the same mount as the project
         // storage, so a temp file anywhere else turns this into a cross-device copy.
-        def tmp = Files.createTempFile(dir, TMP_PREFIX, '.tmp')
+        def tmp = Files.createTempFile(dir, tmpPrefix, '.tmp')
         try {
             tmp.toFile().withWriter('UTF-8') { writer ->
-                writer.write(JsonOutput.prettyPrint(JsonOutput.toJson(state)))
+                writer.write(JsonOutput.prettyPrint(JsonOutput.toJson(content)))
                 writer.write('\n')
             }
             // Shared project storage: under a restrictive umask the file would land 0600 and
