@@ -376,6 +376,7 @@ if [[ -n "$SUBMIT" ]]; then
         echo "export NXF_OPTS=\"-Xms1g -Xmx$HEAD_HEAP\""
         echo "export GHFC_NGS_IN_JOB=1"
         printf 'export NXF_ASSETS=%q\n' "$JOB_ASSETS"
+        printf 'export GHFC_NGS_REVISION=%q\n' "$REVISION"
         printf 'cd %q\n' "$PWD"
         printf 'exec bash -l %q%s\n' "$RUNNER" "$(printf ' %q' "${JOB_ARGS[@]}")"
     } > "$JOB_SCRIPT"
@@ -421,8 +422,9 @@ fi
 if [[ -n "$MIGRATE" ]]; then
     CMD="nextflow run -latest bourgeron-lab/ghfc-ngs/$MIGRATE"
 elif [[ -n "${GHFC_NGS_IN_JOB:-}" ]]; then
-    # The checkout pulled at submit time, as it is: no -latest, which would fetch, and no -r
-    CMD="nextflow run bourgeron-lab/ghfc-ngs"
+    # The checkout pulled at submit time: no -latest, which would fetch. -r only for a revision
+    # other than the default branch, which Nextflow otherwise refuses to run ("stuck on revision")
+    CMD="nextflow run bourgeron-lab/ghfc-ngs${REVISION:+ -r $REVISION}"
 else
     CMD="nextflow run -latest bourgeron-lab/ghfc-ngs${REVISION:+ -r $REVISION}"
 fi
