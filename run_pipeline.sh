@@ -1,6 +1,12 @@
 #!/bin/bash
 
-unset HTTP_PROXY https_proxy http_proxy HTTPS_PROXY
+# Nextflow cannot fetch a pipeline through the cluster proxy ("Text must not be null or empty"),
+# and the login node reaches GitHub without it. A compute node is the opposite: GitHub only
+# through the proxy. So a --submit job keeps it - it runs from code pulled at submit time and
+# never fetches any, and Apptainer may still need the proxy to pull an image.
+if [[ -z "${GHFC_NGS_IN_JOB:-}" ]]; then
+    unset HTTP_PROXY https_proxy http_proxy HTTPS_PROXY
+fi
 
 module load graalvm/ce-java23-23.0.1
 module load apptainer
@@ -13,7 +19,7 @@ ulimit -v unlimited
 ulimit -Sn 65536
 ulimit -u 65536
 export OPENBLAS_NUM_THREADS=1
-export NXF_ASSETS=$HOME/.nextflow/assets
+export NXF_ASSETS="${NXF_ASSETS:-$HOME/.nextflow/assets}"
 
 # Function to display usage
 usage() {
@@ -30,7 +36,10 @@ ARGUMENTS:
                                 Looked up under ./cohorts first, then under
                                 \$GHFC_NGS_COHORTS
                                 (default: $COHORTS_ROOT)
-                                Must be the first argument.
+                                Must be the first argument. Nextflow is then launched
+                                from \$GHFC_NGS_RUNS/COHORT, one directory per cohort
+                                (default: $RUNS_ROOT), so each cohort has its own
+                                .nextflow.log, history, reports and resume target.
 
 OPTIONS:
     --profile PROFILE           Nextflow profile(s) to use (default: slurm,apptainer)
@@ -49,7 +58,20 @@ OPTIONS:
                                 on disk and the steps requested; reports the rest. Combine
                                 with --dry-run to see what it would remove.
     --migrate                   Run migration workflow instead of main pipeline
-    --resume                    Resume previous run
+    --resume [SESSION]          Resume a previous run. With a COHORT and no SESSION, the
+                                cohort's last run (run_id in its .ghfc-ngs.state.json);
+                                otherwise the given session ID or run name, or the last
+                                run of the launch directory.
+    --submit                    Run Nextflow itself as a Slurm job on ghfc, named
+                                ghfc-ngs.COHORT, instead of in this shell. Prints the job
+                                ID and returns. Head job size: \$GHFC_NGS_HEAD_CPUS
+                                (default 2), \$GHFC_NGS_HEAD_MEM (16G), JVM heap
+                                \$GHFC_NGS_HEAD_HEAP (12g). The pipeline is pulled here,
+                                and the job runs that checkout.
+    --here                      Launch from the current directory, not \$GHFC_NGS_RUNS/COHORT
+
+ENVIRONMENT:
+    GHFC_NGS_REVISION           Branch, tag or commit to run instead of main
     --dry-run                   Show what would be executed
     --stub-run                  Run in stub mode (for testing)
     -h, --help                  Show this help message
@@ -70,6 +92,13 @@ EXAMPLES:
     # Resume previous run
     $PROG_NAME --params-file params.yml --resume
 
+    # Run a cohort as a Slurm job, then resume its last run the same way
+    $PROG_NAME CANDY_mpx --submit
+    $PROG_NAME CANDY_mpx --submit --resume
+
+    # Stop a submitted run cleanly: Nextflow cancels its own tasks on SIGTERM
+    scancel --signal=TERM --batch --name=ghfc-ngs.CANDY_mpx
+
     # See what a stale-family clean would delete, then do it
     $PROG_NAME CANDY_mpx --clean-stale-families --dry-run
     $PROG_NAME CANDY_mpx --clean-stale-families
@@ -81,6 +110,25 @@ EOF
 die() {
     echo "ERROR: $*" >&2
     exit 1
+}
+
+# Function to make a path absolute, since the run may be launched from another directory
+abspath() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *)  printf '%s\n' "$PWD/$1" ;;
+    esac
+}
+
+# Function to read last_run.run_id from a cohort's state file; prints nothing if unknown
+last_run_id() {
+    local state="$1/.ghfc-ngs.state.json"
+    [[ -f "$state" ]] || return 0
+    python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1]))["last_run"]["run_id"] or "")
+except Exception:
+    pass' "$state" 2>/dev/null || true
 }
 
 # Function to resolve a cohort name to its parameters file; sets PARAMS_FILE
@@ -95,10 +143,12 @@ resolve_cohort_params() {
     fi
     if [[ -f "$local_dir/$name.params.yml" ]]; then
         PARAMS_FILE="-params-file $local_dir/$name.params.yml"
+        COHORT_DIR="$local_dir"
         return 0
     fi
     if [[ -f "$root_dir/$name.params.yml" ]]; then
         PARAMS_FILE="-params-file $root_dir/$name.params.yml"
+        COHORT_DIR="$root_dir"
         return 0
     fi
     if [[ -d "$local_dir" || -d "$root_dir" ]]; then
@@ -130,9 +180,26 @@ DRY_RUN=""
 STUB_RUN=""
 EXTRA_ARGS=""
 COHORT=""
+COHORT_DIR=""
+RESUME_ID=""
+SUBMIT=""
+HERE=""
 PROG_NAME="ghfc-ngs"
 COHORTS_ROOT="${GHFC_NGS_COHORTS:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts}"
 COHORTS_ROOT="${COHORTS_ROOT%/}"
+RUNS_ROOT="${GHFC_NGS_RUNS:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs}"
+RUNS_ROOT="${RUNS_ROOT%/}"
+# Every run used to be launched from here, so the Nextflow caches of runs from before the move
+# to per-cohort launch directories are found under it
+LEGACY_LAUNCH_DIR="${GHFC_NGS_LEGACY_LAUNCH:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38}"
+HEAD_CPUS="${GHFC_NGS_HEAD_CPUS:-2}"
+HEAD_MEM="${GHFC_NGS_HEAD_MEM:-16G}"
+HEAD_HEAP="${GHFC_NGS_HEAD_HEAP:-12g}"
+# Branch, tag or commit to run instead of the default branch, e.g. to try a branch out
+REVISION="${GHFC_NGS_REVISION:-}"
+
+# Kept verbatim for --submit, which hands the same command line to the Slurm job
+ORIG_ARGS=("$@")
 
 # No arguments at all: there is nothing to run
 if [[ $# -eq 0 ]]; then
@@ -155,33 +222,33 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --config)
-            CONFIG="--config $2"
+            CONFIG="--config $(abspath "$2")"
             shift 2
             ;;
         --params-file)
             [[ $# -ge 2 ]] || die "--params-file requires a FILE argument."
             [[ -f "$2" ]] || die "parameters file not found: $2"
-            PARAMS_FILE="-params-file $2"
+            PARAMS_FILE="-params-file $(abspath "$2")"
             shift 2
             ;;
         --work-dir)
-            WORK_DIR="$2"
+            WORK_DIR="$(abspath "$2")"
             shift 2
             ;;
         --data)
-            DATA="--data $2"
+            DATA="--data $(abspath "$2")"
             shift 2
             ;;
         --scratch)
-            SCRATCH="--scratch $2"
+            SCRATCH="--scratch $(abspath "$2")"
             shift 2
             ;;
         --pedigree)
-            PEDIGREE="--pedigree $2"
+            PEDIGREE="--pedigree $(abspath "$2")"
             shift 2
             ;;
         --ref)
-            REF="--ref $2"
+            REF="--ref $(abspath "$2")"
             shift 2
             ;;
         --ref-name)
@@ -204,6 +271,21 @@ while [[ $# -gt 0 ]]; do
             ;;
         --resume)
             RESUME="-resume"
+            # An optional session: a UUID, or a Nextflow run name such as happy_goldberg
+            if [[ $# -ge 2 && "$2" != -* ]]; then
+                [[ "$2" =~ ^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z]+_[a-z]+)$ ]] \
+                    || die "--resume: '$2' is neither a session ID nor a run name"
+                RESUME_ID="$2"
+                shift
+            fi
+            shift
+            ;;
+        --submit)
+            SUBMIT=1
+            shift
+            ;;
+        --here)
+            HERE=1
             shift
             ;;
         --dry-run)
@@ -234,6 +316,101 @@ if [[ -n "$COHORT" ]]; then
     fi
 fi
 
+# The label of this run: the cohort name, else the params file's cohort_name. It names the
+# Slurm job, which is how a live run is found again
+LABEL="$COHORT"
+if [[ -z "$LABEL" && -n "$PARAMS_FILE" ]]; then
+    LABEL="$(sed -n 's/^cohort_name:[[:space:]]*["'"'"']\{0,1\}\([A-Za-z0-9._-]*\).*/\1/p' "${PARAMS_FILE#-params-file }" | head -1)"
+fi
+JOB_NAME="ghfc-ngs.${LABEL:-run}"
+
+# One launch directory per cohort, unless --here. Paths given on the command line were made
+# absolute above, so moving does not change what they point at.
+if [[ -n "$COHORT" && -z "$HERE" ]]; then
+    LAUNCH_DIR="$RUNS_ROOT/$COHORT"
+else
+    LAUNCH_DIR="$PWD"
+fi
+
+# A second real run of the same cohort would race the first one on every output it publishes.
+# Inside the submitted job, the job itself is the one squeue finds, so it is left out.
+if [[ -n "$LABEL" && -z "$DRY_RUN" ]] && command -v squeue &> /dev/null; then
+    LIVE="$(squeue -h -u "$USER" -n "$JOB_NAME" -o %i 2>/dev/null | grep -vx "${SLURM_JOB_ID:-none}" | head -1 || true)"
+    [[ -z "$LIVE" ]] || die "$JOB_NAME is already queued or running as Slurm job $LIVE. Stop it first: scancel --signal=TERM --batch $LIVE"
+fi
+
+# Hand the very same command line, minus --submit, to a Slurm job, and return
+if [[ -n "$SUBMIT" ]]; then
+    [[ -n "$LABEL" ]] || die "--submit needs a cohort name, or a params file that sets cohort_name"
+    command -v sbatch &> /dev/null || die "--submit: sbatch is not available on $(hostname)"
+    mkdir -p "$LAUNCH_DIR/.submit"
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    # The job runs a copy of this very script, so it runs what was just invoked rather than
+    # whatever main is when it starts. Under the ghfc-ngs wrapper the script arrives via bash -c.
+    RUNNER="$LAUNCH_DIR/.submit/run_pipeline.$STAMP.sh"
+    if [[ -n "${BASH_EXECUTION_STRING:-}" ]]; then
+        printf '%s\n' "$BASH_EXECUTION_STRING" > "$RUNNER"
+    else
+        cp "${BASH_SOURCE[0]}" "$RUNNER"
+    fi
+    JOB_ARGS=()
+    for a in "${ORIG_ARGS[@]}"; do
+        [[ "$a" == "--submit" ]] || JOB_ARGS+=("$a")
+    done
+    # The job starts from the directory the user submitted from, so the arguments mean exactly
+    # what they meant here - relative paths, ./cohorts - and moves to the launch dir itself
+    # bash -l, because `module` only exists in a login shell. exec all the way down - this
+    # script ends in `exec nextflow`, which execs java - so the batch step IS Nextflow, and
+    # `scancel --signal=TERM --batch` reaches it rather than a shell that would die first.
+    # The job's node cannot fetch the pipeline (see the top of this script), so it is fetched
+    # here, into a clone of the cohort's own. It is never shared with another job, and never
+    # moved under a live run - the check above saw to that - and it pins the code the job runs.
+    command -v nextflow &> /dev/null || die "Nextflow is not available. Please load the nextflow module."
+    JOB_ASSETS="$LAUNCH_DIR/.nextflow-assets"
+    echo "Pulling bourgeron-lab/ghfc-ngs${REVISION:+ ($REVISION)} into $JOB_ASSETS"
+    NXF_ASSETS="$JOB_ASSETS" nextflow -q pull bourgeron-lab/ghfc-ngs ${REVISION:+-r "$REVISION"} \
+        || die "could not pull bourgeron-lab/ghfc-ngs"
+    JOB_SCRIPT="$LAUNCH_DIR/.submit/job.$STAMP.sh"
+    {
+        echo '#!/bin/bash'
+        echo "export NXF_OPTS=\"-Xms1g -Xmx$HEAD_HEAP\""
+        echo "export GHFC_NGS_IN_JOB=1"
+        printf 'export NXF_ASSETS=%q\n' "$JOB_ASSETS"
+        printf 'cd %q\n' "$PWD"
+        printf 'exec bash -l %q%s\n' "$RUNNER" "$(printf ' %q' "${JOB_ARGS[@]}")"
+    } > "$JOB_SCRIPT"
+    mkdir -p "$LAUNCH_DIR"
+    JOB_ID="$(sbatch --parsable \
+        -p ghfc --qos=ghfc -c "$HEAD_CPUS" --mem="$HEAD_MEM" \
+        -J "$JOB_NAME" --comment="ghfc-ngs:$LABEL" \
+        -D "$LAUNCH_DIR" -o "$LAUNCH_DIR/ghfc-ngs.%j.log" \
+        "$JOB_SCRIPT")" || die "sbatch failed"
+    echo "Submitted $JOB_NAME as Slurm job $JOB_ID"
+    echo "  launch dir : $LAUNCH_DIR"
+    echo "  console    : $LAUNCH_DIR/ghfc-ngs.$JOB_ID.log"
+    echo "  stop       : scancel --signal=TERM --batch $JOB_ID"
+    exit 0
+fi
+
+mkdir -p "$LAUNCH_DIR"
+cd "$LAUNCH_DIR"
+
+# --resume with a cohort and no session: the cohort's own last run, which a bare -resume in a
+# directory shared by several cohorts would not be
+if [[ -n "$RESUME" && -z "$RESUME_ID" && -n "$COHORT_DIR" ]]; then
+    RESUME_ID="$(last_run_id "$COHORT_DIR")"
+    [[ -z "$RESUME_ID" ]] || echo "Resuming $COHORT's last run, $RESUME_ID"
+fi
+# A run launched before per-cohort launch directories keeps its task cache in the old shared
+# one. Nextflow would open an empty cache here without a word, and re-run everything.
+if [[ "$RESUME_ID" =~ ^[0-9a-f-]{36}$ && ! -d ".nextflow/cache/$RESUME_ID" \
+      && -d "$LEGACY_LAUNCH_DIR/.nextflow/cache/$RESUME_ID" ]]; then
+    echo "Copying the cache of session $RESUME_ID from $LEGACY_LAUNCH_DIR"
+    mkdir -p .nextflow/cache
+    cp -a "$LEGACY_LAUNCH_DIR/.nextflow/cache/$RESUME_ID" ".nextflow/cache/$RESUME_ID"
+fi
+[[ -z "$RESUME_ID" ]] || RESUME="-resume $RESUME_ID"
+
 # Check if Nextflow is available
 if ! command -v nextflow &> /dev/null; then
     die "Nextflow is not available. Please load the nextflow module."
@@ -243,8 +420,11 @@ fi
 # Construct the command
 if [[ -n "$MIGRATE" ]]; then
     CMD="nextflow run -latest bourgeron-lab/ghfc-ngs/$MIGRATE"
+elif [[ -n "${GHFC_NGS_IN_JOB:-}" ]]; then
+    # The checkout pulled at submit time, as it is: no -latest, which would fetch, and no -r
+    CMD="nextflow run bourgeron-lab/ghfc-ngs"
 else
-    CMD="nextflow run -latest bourgeron-lab/ghfc-ngs"
+    CMD="nextflow run -latest bourgeron-lab/ghfc-ngs${REVISION:+ -r $REVISION}"
 fi
 CMD="$CMD -profile $PROFILE"
 
@@ -264,8 +444,10 @@ CMD="$CMD -profile $PROFILE"
 [[ -n "$STUB_RUN" ]] && CMD="$CMD $STUB_RUN"
 [[ -n "$EXTRA_ARGS" ]] && CMD="$CMD $EXTRA_ARGS"
 
+echo "Launch dir: $PWD"
 echo "Executing: $CMD"
 echo ""
 
-# Execute the command
-eval $CMD
+# Execute the command. exec, so that Nextflow takes this shell's place: a signal sent to the
+# runner - scancel --signal=TERM --batch, for a submitted run - then reaches Nextflow itself.
+eval exec $CMD

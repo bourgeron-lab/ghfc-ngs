@@ -152,6 +152,51 @@ per-cohort directory described in [Input Data Structure](#input-data-structure))
 `--params-file` remains available for parameters files outside that layout, and takes precedence
 over a cohort name on the same command line.
 
+A run started by cohort name is launched from its own directory,
+`$GHFC_NGS_RUNS/<NAME>` (default `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/<NAME>`),
+whatever directory you are in. Each cohort therefore has its own `.nextflow.log`, Nextflow history,
+`reports/` and resume target, and a quick `--dry-run` of one cohort no longer rotates another's log
+away. `--here` keeps the old behaviour of launching from the current directory. The work directory
+is unaffected: it is `work_dir` from the parameters file, on scratch, shared by every cohort.
+
+#### Running as a Slurm job
+
+```bash
+./run_pipeline.sh CANDY_mpx --submit
+./run_pipeline.sh CANDY_mpx --submit --resume
+./run_pipeline.sh CANDY_mpx --submit --clean-stale-families
+```
+
+`--submit` runs Nextflow itself as a Slurm job on ghfc instead of in your shell, then returns. The
+job is named `ghfc-ngs.<NAME>`, uses 2 CPUs and 16 GB (`GHFC_NGS_HEAD_CPUS`, `GHFC_NGS_HEAD_MEM`,
+JVM heap `GHFC_NGS_HEAD_HEAP`, default `12g`), and has no time limit, since ghfc has none. Its
+console output goes to `ghfc-ngs.<JOBID>.log` in the launch directory. This replaces running the
+pipeline in tmux on the login node: it survives a disconnect or a login-node reboot, and it can be
+found and stopped by name. Compute nodes can submit jobs, so Nextflow on a node submits its tasks
+exactly as it would from the login node.
+
+A compute node reaches GitHub only through the cluster proxy, and Nextflow cannot fetch a pipeline
+through it. So `--submit` pulls the pipeline on the machine you submit from, into
+`<launch dir>/.nextflow-assets`, and the job runs that checkout without fetching anything. The job
+therefore runs the code of the moment you submitted, not of the moment it started.
+`GHFC_NGS_REVISION=<branch|tag|commit>` runs something other than `main`, with or without `--submit`.
+
+The runner refuses to start a cohort that already has a `ghfc-ngs.<NAME>` job queued or running,
+because two runs of the same cohort would race on every output they publish.
+
+To stop a submitted run, send SIGTERM to Nextflow alone. It cancels its own tasks, records the run
+as `failed` in the cohort state file, and exits:
+
+```bash
+scancel --signal=TERM --batch --name=ghfc-ngs.CANDY_mpx
+```
+
+A plain `scancel` kills Nextflow without giving it that chance, and leaves its tasks running.
+
+While a run is live, the cohort directory holds `.ghfc-ngs.progress.json`. It has the same
+per-process counters as the Nextflow console, plus per-step completion re-measured against the
+pedigree every 10 minutes. See [COHORT_STATE.md](COHORT_STATE.md#live-progress-ghfc-ngsprogressjson).
+
 #### Full Pipeline (Default)
 
 ```bash
@@ -200,8 +245,18 @@ over a cohort name on the same command line.
 #### Resume Failed Runs
 
 ```bash
+./run_pipeline.sh CANDY_mpx --resume
+./run_pipeline.sh CANDY_mpx --resume 6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8
 ./run_pipeline.sh --profile slurm,apptainer --resume --params-file my_params.yml
 ```
+
+With a cohort name and no session, `--resume` resumes that cohort's last run: the `run_id` of
+`last_run` in its `.ghfc-ngs.state.json`. A bare Nextflow `-resume` would resume the last run of the
+launch directory instead, whichever cohort that was. A session ID or a run name (`happy_goldberg`)
+can also be given explicitly. A run from before per-cohort launch directories has its cache in the
+old shared directory (`$GHFC_NGS_LEGACY_LAUNCH`, default `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38`).
+The runner copies that session's cache into the cohort's launch directory before resuming.
+Otherwise Nextflow would open an empty cache without warning and run every task again.
 
 ## Configuration
 
