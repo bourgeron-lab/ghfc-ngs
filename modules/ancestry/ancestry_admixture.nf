@@ -18,6 +18,13 @@ process ANCESTRY_ADMIXTURE {
   reason this step reads gVCF-derived panel genotypes rather than the family's
   common_gt.bcf, which cannot reach that bar.
 
+  Setting ancestry_min_coverage to 0 disables the refusal entirely, so every sample
+  is scored however little of the panel it carries. The coverage is not lost when
+  you do that: Q.tsv's snp_coverage column is the very array the gate thresholds
+  on, per sample, so the missing fraction is 1 - snp_coverage and can be filtered
+  downstream. coverage_threshold in the QC JSON records what the gate was set to,
+  which is what makes a forced run auditable afterwards.
+
   Parameters
   ----------
   fid : val
@@ -33,7 +40,8 @@ process ANCESTRY_ADMIXTURE {
 
   Returns
   -------
-  Tuple of family ID, admixture proportions table, and the QC report
+  Tuple of family ID, admixture proportions table, and the QC report. The table
+  carries snp_coverage per sample alongside the K component columns.
   */
 
   tag "$fid"
@@ -56,7 +64,12 @@ process ANCESTRY_ADMIXTURE {
 
   script:
   out_prefix = "${fid}.${panel_name}"
-  min_coverage_arg = params.ancestry_min_coverage ? "--min-coverage ${params.ancestry_min_coverage}" : ""
+  // Tested for null/empty rather than truthiness on purpose: Groovy reads an unquoted
+  // YAML 0 as Integer 0, which is falsy, so `ancestry_min_coverage: 0` - the value that
+  // disables the coverage gate entirely - would have been silently dropped and the gate
+  // left at its 0.90 default. Only the quoted "0" would have worked.
+  def min_cov = params.ancestry_min_coverage
+  min_coverage_arg = (min_cov == null || min_cov.toString().trim().isEmpty()) ? "" : "--min-coverage ${min_cov}"
 
   """
   set -euo pipefail

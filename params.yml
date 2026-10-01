@@ -97,11 +97,19 @@ ancestry_panel_name: "" # TODO: e.g. apgs_b1.0.0_dp10gq20
 # reference call.
 ancestry_min_dp: 10 # Minimum depth to call a panel site (default: 10)
 ancestry_min_gq: 20 # Minimum genotype quality to call a panel site (default: 20)
-# Optional: lower the 0.90 per-sample coverage floor that admixture enforces. Leave
-# empty unless you accept the documented bias - the trained model treats a missing
-# genotype as homozygous reference, so low coverage skews the proportions rather than
-# erroring.
-ancestry_min_coverage: "" # Empty uses the tool default of 0.90
+# Lower - or remove - the 0.90 per-sample coverage floor that admixture enforces.
+# Empty keeps the tool's 0.90. A value of 0 disables the gate entirely, so every
+# sample is scored however little of the panel it carries.
+#
+# The bias is real and worth understanding before setting this: the trained model has
+# no "missing" state, so an uncalled genotype is read as homozygous reference and a
+# low-coverage sample gets plausible-looking but skewed proportions rather than an
+# error. Disabling the gate does not hide that - Q.tsv's snp_coverage column is the
+# exact per-sample fraction the gate thresholds on, so the missing fraction is
+# 1 - snp_coverage, and coverage_threshold in the admixture QC JSON records what the
+# gate was set to. Filter or flag on snp_coverage downstream rather than trusting
+# every row equally.
+ancestry_min_coverage: "" # Empty uses the tool default of 0.90; 0 disables the gate
 # Optional: a fitted z-score model directory outside the bundle. Empty uses the
 # bundle's own models/<catalog sha256>/.
 #

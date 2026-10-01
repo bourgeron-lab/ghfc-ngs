@@ -693,11 +693,20 @@ Paths use `${P}` as shorthand for `${ancestry_panel_name}`.
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/ancestry/${cohort_name}.${P}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
   - Concatenations of the family tables with a `family_id` column appended
 
+**Per-sample panel coverage lives in `Q.tsv`.** Its `snp_coverage` column is the exact
+per-sample fraction of the LD-pruned panel that was called — the same array `admixture`
+thresholds on — so the missing fraction is `1 - snp_coverage`. That stays true when the
+gate is disabled with `ancestry_min_coverage: 0`, which is what makes forcing the step
+safe to do: every row still says how much data stood behind it, and
+`coverage_threshold` in the QC JSON records the gate that was applied. Filter or flag on
+`snp_coverage` rather than treating all rows alike.
+
 **What to check in the QC reports.** These are the fields that catch a quietly degraded
 result:
 
 - `site_coverage` — the fraction of panel sites present; should be at or near 1.0, since the extraction emits a record for every site
-- `min_per_sample_coverage` — the worst per-sample call rate; must clear 0.90 or `admixture` refuses
+- `min_per_sample_coverage` — the worst per-sample call rate; must clear 0.90 or `admixture` refuses, unless `ancestry_min_coverage` lowers or removes that gate
+- `coverage_threshold` — what the gate was actually set to for this run, so a forced run stays auditable
 - `n_outliers` — samples lying outside the reference panel's coverage in component space, labelled `outlier` rather than assigned a population
 - `median_knn_distance_to_reference` — how much reference data supports these z-scores
 - `distinct_allele_ct` — **expect this to exceed 1, with its warning.** Per-sample missingness genuinely differs between samples, so the raw score sums are not directly comparable between individuals; the adjusted and z-scored tables are what you compare. This is a consequence of recording real coverage instead of assuming every uncalled site is homozygous reference.
