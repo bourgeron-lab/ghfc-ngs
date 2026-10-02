@@ -165,8 +165,9 @@ per-cohort directory described in [Input Data Structure](#input-data-structure))
 over a cohort name on the same command line.
 
 A run started by cohort name is launched from its own directory,
-`$GHFC_NGS_RUNS/<NAME>` (default `/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/<NAME>`),
-whatever directory you are in. Each cohort therefore has its own `.nextflow.log`, Nextflow history,
+`$GHFC_NGS_RUNS/<NAME>`, whatever directory you are in. By default that is `runs/<NAME>` beside
+the `cohorts/` directory the cohort was found in, e.g.
+`/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/<NAME>`, so each project keeps its own. Each cohort therefore has its own `.nextflow.log`, Nextflow history,
 `reports/` and resume target, and a quick `--dry-run` of one cohort no longer rotates another's log
 away. `--here` keeps the old behaviour of launching from the current directory. The work directory
 is unaffected: it is `work_dir` from the parameters file, on scratch, shared by every cohort.
@@ -180,7 +181,9 @@ is unaffected: it is `work_dir` from the parameters file, on scratch, shared by 
 ```
 
 `--submit` runs Nextflow itself as a Slurm job on ghfc instead of in your shell, then returns. The
-job is named `ghfc-ngs.<NAME>`, uses 2 CPUs and 16 GB (`GHFC_NGS_HEAD_CPUS`, `GHFC_NGS_HEAD_MEM`,
+job is named `ghfc-ngs.<PROJECT>.<NAME>`, where `PROJECT` is the last directory of the
+parameters' `data:` (`GHFC-GRCh38`, `SPARK-GRCh38`), since cohort names repeat across projects. It
+uses 2 CPUs and 16 GB (`GHFC_NGS_HEAD_CPUS`, `GHFC_NGS_HEAD_MEM`,
 JVM heap `GHFC_NGS_HEAD_HEAP`, default `12g`), and has no time limit, since ghfc has none. Its
 console output goes to `ghfc-ngs.<JOBID>.log` in the launch directory. This replaces running the
 pipeline in tmux on the login node: it survives a disconnect or a login-node reboot, and it can be
@@ -193,17 +196,27 @@ through it. So `--submit` pulls the pipeline on the machine you submit from, int
 therefore runs the code of the moment you submitted, not of the moment it started.
 `GHFC_NGS_REVISION=<branch|tag|commit>` runs something other than `main`, with or without `--submit`.
 
-The runner refuses to start a cohort that already has a `ghfc-ngs.<NAME>` job queued or running,
+The runner refuses to start a cohort that already has a `ghfc-ngs.<PROJECT>.<NAME>` job queued or
+running,
 because two runs of the same cohort would race on every output they publish.
 
 To stop a submitted run, send SIGTERM to Nextflow alone. It cancels its own tasks, records the run
 as `failed` in the cohort state file, and exits:
 
 ```bash
-scancel --signal=TERM --batch --name=ghfc-ngs.CANDY_mpx
+scancel --signal=TERM --batch --name=ghfc-ngs.GHFC-GRCh38.CANDY_mpx
 ```
 
 A plain `scancel` kills Nextflow without giving it that chance, and leaves its tasks running.
+
+Its tasks are tagged `--comment=ghfc-ngs:<PROJECT>/<NAME>`, so `squeue -O Comment` tells apart the
+tasks of two live runs.
+
+A cohort of another project is run by pointing `GHFC_NGS_COHORTS` at that project's `cohorts/`:
+
+```bash
+GHFC_NGS_COHORTS=/pasteur/helix/projects/ghfc_wgs/WES/SPARK-GRCh38/cohorts ./run_pipeline.sh test --submit
+```
 
 While a run is live, the cohort directory holds `.ghfc-ngs.progress.json`. It has the same
 per-process counters as the Nextflow console, plus per-step completion re-measured against the

@@ -38,8 +38,9 @@ ARGUMENTS:
                                 (default: $COHORTS_ROOT)
                                 Must be the first argument. Nextflow is then launched
                                 from \$GHFC_NGS_RUNS/COHORT, one directory per cohort
-                                (default: $RUNS_ROOT), so each cohort has its own
-                                .nextflow.log, history, reports and resume target.
+                                (default: runs/ beside the cohorts/ directory the cohort
+                                was found in), so each cohort has its own .nextflow.log,
+                                history, reports and resume target.
 
 OPTIONS:
     --profile PROFILE           Nextflow profile(s) to use (default: slurm,apptainer)
@@ -63,7 +64,8 @@ OPTIONS:
                                 otherwise the given session ID or run name, or the last
                                 run of the launch directory.
     --submit                    Run Nextflow itself as a Slurm job on ghfc, named
-                                ghfc-ngs.COHORT, instead of in this shell. Prints the job
+                                ghfc-ngs.PROJECT.COHORT (PROJECT: the last directory
+                                of data:), instead of in this shell. Prints the job
                                 ID and returns. Head job size: \$GHFC_NGS_HEAD_CPUS
                                 (default 2), \$GHFC_NGS_HEAD_MEM (16G), JVM heap
                                 \$GHFC_NGS_HEAD_HEAP (12g). The pipeline is pulled here,
@@ -97,7 +99,10 @@ EXAMPLES:
     $PROG_NAME CANDY_mpx --submit --resume
 
     # Stop a submitted run cleanly: Nextflow cancels its own tasks on SIGTERM
-    scancel --signal=TERM --batch --name=ghfc-ngs.CANDY_mpx
+    scancel --signal=TERM --batch --name=ghfc-ngs.GHFC-GRCh38.CANDY_mpx
+
+    # A cohort of another project
+    GHFC_NGS_COHORTS=/pasteur/helix/projects/ghfc_wgs/WES/SPARK-GRCh38/cohorts $PROG_NAME test --submit
 
     # See what a stale-family clean would delete, then do it
     $PROG_NAME CANDY_mpx --clean-stale-families --dry-run
@@ -187,7 +192,9 @@ HERE=""
 PROG_NAME="ghfc-ngs"
 COHORTS_ROOT="${GHFC_NGS_COHORTS:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts}"
 COHORTS_ROOT="${COHORTS_ROOT%/}"
-RUNS_ROOT="${GHFC_NGS_RUNS:-/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs}"
+# Unset: runs/ next to the cohorts/ directory the cohort was found in, resolved below, so each
+# project (GHFC-GRCh38, SPARK-GRCh38...) keeps its own launch directories
+RUNS_ROOT="${GHFC_NGS_RUNS:-}"
 RUNS_ROOT="${RUNS_ROOT%/}"
 # Every run used to be launched from here, so the Nextflow caches of runs from before the move
 # to per-cohort launch directories are found under it
@@ -322,7 +329,28 @@ LABEL="$COHORT"
 if [[ -z "$LABEL" && -n "$PARAMS_FILE" ]]; then
     LABEL="$(sed -n 's/^cohort_name:[[:space:]]*["'"'"']\{0,1\}\([A-Za-z0-9._-]*\).*/\1/p' "${PARAMS_FILE#-params-file }" | head -1)"
 fi
-JOB_NAME="ghfc-ngs.${LABEL:-run}"
+# The project: the directory the parameters' data: points at, e.g. GHFC-GRCh38 or SPARK-GRCh38,
+# since that is where the outputs go. Cohort names repeat across projects - both have a
+# `test` - so the project is part of the job name and of the tag on every task.
+DATA_DIR="${DATA#--data }"
+if [[ -z "$DATA_DIR" && -n "$PARAMS_FILE" ]]; then
+    DATA_DIR="$(sed -n 's/^data:[[:space:]]*["'"'"']\{0,1\}\([^"'"'"' ]*\).*/\1/p' "${PARAMS_FILE#-params-file }" | head -1)"
+fi
+PROJECT=""
+if [[ -n "$DATA_DIR" ]]; then
+    PROJECT="$(basename "${DATA_DIR%/}")"
+    PROJECT="${PROJECT//[^A-Za-z0-9_-]/_}"
+fi
+JOB_NAME="ghfc-ngs.${PROJECT:+$PROJECT.}${LABEL:-run}"
+JOB_TAG="ghfc-ngs:${PROJECT:+$PROJECT/}${LABEL:-run}"
+
+if [[ -z "$RUNS_ROOT" ]]; then
+    if [[ -n "$COHORT_DIR" ]]; then
+        RUNS_ROOT="$(dirname "$(dirname "$COHORT_DIR")")/runs"
+    else
+        RUNS_ROOT="$(dirname "$COHORTS_ROOT")/runs"
+    fi
+fi
 
 # One launch directory per cohort, unless --here. Paths given on the command line were made
 # absolute above, so moving does not change what they point at.
@@ -335,7 +363,8 @@ fi
 # A second real run of the same cohort would race the first one on every output it publishes.
 # Inside the submitted job, the job itself is the one squeue finds, so it is left out.
 if [[ -n "$LABEL" && -z "$DRY_RUN" ]] && command -v squeue &> /dev/null; then
-    LIVE="$(squeue -h -u "$USER" -n "$JOB_NAME" -o %i 2>/dev/null | grep -vx "${SLURM_JOB_ID:-none}" | head -1 || true)"
+    # ghfc-ngs.<COHORT> too: the name jobs had before the project was part of it
+    LIVE="$(squeue -h -u "$USER" -n "$JOB_NAME,ghfc-ngs.${LABEL}" -o %i 2>/dev/null | grep -vx "${SLURM_JOB_ID:-none}" | head -1 || true)"
     [[ -z "$LIVE" ]] || die "$JOB_NAME is already queued or running as Slurm job $LIVE. Stop it first: scancel --signal=TERM --batch $LIVE"
 fi
 
@@ -386,7 +415,7 @@ if [[ -n "$SUBMIT" ]]; then
     mkdir -p "$LAUNCH_DIR"
     JOB_ID="$(sbatch --parsable \
         -p ghfc --qos=ghfc -c "$HEAD_CPUS" --mem="$HEAD_MEM" \
-        -J "$JOB_NAME" --comment="ghfc-ngs:$LABEL" \
+        -J "$JOB_NAME" --comment="$JOB_TAG" \
         -D "$LAUNCH_DIR" -o "$LAUNCH_DIR/ghfc-ngs.%j.log" \
         "$JOB_SCRIPT")" || die "sbatch failed"
     echo "Submitted $JOB_NAME as Slurm job $JOB_ID"
