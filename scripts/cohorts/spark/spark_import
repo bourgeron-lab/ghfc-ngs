@@ -208,8 +208,11 @@ def check_gvcfs(pedigree, data, n, seed):
         if names.stdout.split() != [barcode]:
             problems.append(f"{barcode}: sample name in the gVCF is {names.stdout.split()}, not "
                             f"[{barcode}] - GLnexus and wombat match samples by that name")
-        # First variant record, not a reference block: those carry MIN_DP and no AD
-        view = subprocess.Popen(['bcftools', 'view', '-H', '-e', 'ALT="<*>"', gvcf],
+        # First variant record, not a reference block: those carry MIN_DP and no AD. A block is
+        # a record whose ONLY alt is <*>. DeepVariant writes <*> as an extra alt on every variant
+        # record too (T -> G,<*>), and bcftools matches ALT="<*>" if any alt is <*>, so a bare
+        # ALT="<*>" exclusion would skip every record in the file.
+        view = subprocess.Popen(['bcftools', 'view', '-H', '-e', 'N_ALT=1 && ALT="<*>"', gvcf],
                                 stdout=subprocess.PIPE, universal_newlines=True)
         first = view.stdout.readline()
         view.kill()
