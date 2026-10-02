@@ -217,10 +217,10 @@ with no shutdown hook, so a SLURM walltime kill, a Ctrl-C, or a lost launch node
 Each step is either `null` or `{done, total, pct}`, where `pct` is `done/total` as a percentage
 rounded to two decimals.
 
-**`null` means unmeasured, not 0%.** Two steps can be null:
+**`null` means unmeasured, not 0%.** Three steps can be null:
 
-- `ancestry` — when `ancestry` is not in `steps_requested`. The pipeline skips that whole part of
-  the planning pass, so there is nothing to report.
+- `ancestry` and `wisecondorx` — when the step is not in `steps_requested`. The pipeline skips
+  that whole part of the planning pass, so there is nothing to report.
 - `extractor` — always. The pipeline has no on-disk completeness check for it.
 
 Other things worth knowing before you quote a number:

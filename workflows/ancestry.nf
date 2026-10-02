@@ -68,18 +68,17 @@ workflow ANCESTRY {
 
     PANEL_EXTRACT(extract_input)
 
-    // Existing per-sample panel genotypes already on disk, restricted to the samples
-    // in the current pedigree. Without that filter the glob picks up every sample
-    // ever processed under params.data, including other cohorts'.
-    existing_sample_panels = channel
-        .fromPath("${params.data}/samples/*/*/*/ancestry/*.panel_gt.${panel_name}.bcf")
-        .map { bcf ->
-            def barcode = bcf.name - ".panel_gt.${panel_name}.bcf"
-            tuple(barcode, bcf, file("${bcf}.csi"))
-        }
-        .filter { barcode, _bcf, csi ->
-            family_members.containsKey(barcode) && csi.exists()
-        }
+    // Existing per-sample panel genotypes of the samples in the current pedigree, and only
+    // those - never another cohort's. need_extract is exactly the pedigree samples whose
+    // panel BCF or its .csi the planner did not find, so the rest have both, at the sharded
+    // path. Built from that rather than by globbing the whole samples/ tree.
+    existing_sample_panels = channel.fromList(
+        family_members.keySet()
+            .findAll { barcode -> !(barcode in need_extract) }
+            .collect { barcode ->
+                def bcf = file("${Sharding.getSampleDir(params.data, barcode)}/ancestry/${barcode}.panel_gt.${panel_name}.bcf")
+                tuple(barcode, bcf, file("${bcf}.csi"))
+            })
 
     // A sample extracted in this run also matches the disk glob once published, so
     // dedupe by barcode - staging both copies would make the family merge count the
@@ -113,13 +112,14 @@ workflow ANCESTRY {
 
     PANEL_MERGE_FAMILY(family_merge_input)
 
-    existing_family_panels = channel
-        .fromPath("${params.data}/families/*/*/*/ancestry/*.panel_gt.${panel_name}.bcf")
-        .map { bcf ->
-            def fid = bcf.name - ".panel_gt.${panel_name}.bcf"
-            tuple(fid, bcf, file("${bcf}.csi"))
-        }
-        .filter { fid, _bcf, csi -> fid in families && csi.exists() }
+    // The current pedigree's families with a panel BCF and its .csi on disk, by path
+    existing_family_panels = channel.fromList(
+        families
+            .collect { fid ->
+                def bcf = file("${Sharding.getFamilyDir(params.data, fid)}/ancestry/${fid}.panel_gt.${panel_name}.bcf")
+                tuple(fid, bcf, file("${bcf}.csi"))
+            }
+            .findAll { _fid, bcf, csi -> bcf.exists() && csi.exists() })
 
     all_family_panels = PANEL_MERGE_FAMILY.out.family_panel_gt
         .mix(existing_family_panels)
