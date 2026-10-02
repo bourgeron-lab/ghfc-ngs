@@ -70,6 +70,13 @@ out=$("${report}" run --process 'GLNEXUS.*' --top 0)
 grep -q '^PYWOMBAT' <<<"${out}" && fail "--process did not filter"
 grep -q '^1 tasks from 2 trace file(s)' <<<"${out}" || fail "--process count: ${out}"
 
+# Old fields alone: nothing says what was asked for, and the comment must still be a comment
+out=$("${report}" run/reports/trace_20260101-100000.txt --suggest)
+grep -Eq '^    memory: 4\.GB    # p99 peak 3\.0 GB over 2 tasks$' <<<"${out}" \
+  || fail "suggestion without asked memory: $(grep '^    memory:' <<<"${out}")"
+grep -E '^ +[a-z_]+: ' <<<"${out}" | grep -Ev '^ +[a-z_]+: [0-9]+\.(GB|h)( |$)' \
+  && fail "a suggested value is not just a number and a unit"
+
 "${report}" nowhere 2>/dev/null && fail "a missing path did not fail"
 
 echo "OK"

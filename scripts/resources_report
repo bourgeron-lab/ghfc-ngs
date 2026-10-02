@@ -282,8 +282,10 @@ def print_suggestion(summaries, patterns, margin):
         base = gb_up(s['peak_p99'], margin)
         hours = max(1, math.ceil(2 * s['time_max'] / 3600)) if s['time_max'] else None
         print(f"  {process}:")
-        print(f"    memory: {base}.GB" + (f"    # was {fmt_memory(s['asked'])}" if s['asked'] else '')
-              + f"; p99 peak {fmt_memory(s['peak_p99'])} over {s['completed']} tasks")
+        # Old traces have no memory column, so there may be nothing to say it "was"
+        notes = [f"was {fmt_memory(s['asked'])}"] if s['asked'] else []
+        notes.append(f"p99 peak {fmt_memory(s['peak_p99'])} over {s['completed']} tasks")
+        print(f"    memory: {base}.GB    # {'; '.join(notes)}")
         if hours:
             print(f"    time: {hours}.h    # twice the longest run, {fmt_duration(s['time_max'])}")
         # Peak of each id over every attempt and config, above what the process now asks
