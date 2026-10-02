@@ -22,7 +22,7 @@ Run with --check N on the cluster (needs bcftools) to confirm, on N gVCFs, that 
 name inside the file is its spid and that variant records carry the DP and AD the family
 BCFs and wombat read.
 
-Stdlib only, so it runs on the login node without an environment.
+Stdlib only, and Python 3.6 compatible, so it runs on the login node without an environment.
 """
 
 import argparse
@@ -198,7 +198,10 @@ def check_gvcfs(pedigree, data, n, seed):
     random.Random(seed).shuffle(barcodes)
     for barcode in barcodes[:n]:
         gvcf = os.path.join(sample_dir(data, barcode), 'deepvariant', f'{barcode}.g.vcf.gz')
-        names = subprocess.run(['bcftools', 'query', '-l', gvcf], capture_output=True, text=True)
+        # stdout/stderr/universal_newlines rather than capture_output/text: the cluster's
+        # python3 is 3.6, which has neither
+        names = subprocess.run(['bcftools', 'query', '-l', gvcf], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, universal_newlines=True)
         if names.returncode != 0:
             problems.append(f"{barcode}: bcftools could not read {gvcf}: {names.stderr.strip()}")
             continue
@@ -207,7 +210,7 @@ def check_gvcfs(pedigree, data, n, seed):
                             f"[{barcode}] - GLnexus and wombat match samples by that name")
         # First variant record, not a reference block: those carry MIN_DP and no AD
         view = subprocess.Popen(['bcftools', 'view', '-H', '-e', 'ALT="<*>"', gvcf],
-                                stdout=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, universal_newlines=True)
         first = view.stdout.readline()
         view.kill()
         view.wait()
