@@ -391,6 +391,17 @@ if ('ancestry' in pipeline_steps) {
     }
 }
 
+// The cohort's `resources:` overrides are only read by sized() in nextflow.config, task by task,
+// so a typo there would surface hours into the run, or - for a key that matches nothing - never
+def resource_check = ResourceOverrides.check(params.get('resources'),
+    ResourceOverrides.processNames(projectDir.toFile()),
+    [memory: params.max_memory, cpus: params.max_cpus, time: params.max_time])
+resource_check.warnings.each { log.warn(it) }
+if (resource_check.errors) {
+    recordFailedRun("invalid resources: ${resource_check.errors.join('; ')}")
+    exit 1, "ERROR: invalid resources in the parameters file:\n  ${resource_check.errors.join('\n  ')}"
+}
+
 /*
 ========================================================================================
     MAIN WORKFLOW

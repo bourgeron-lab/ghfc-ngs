@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+# Self-contained coverage for resources_report.
+#
+# Writes two traces into a fake launch directory - one in the old default fields, one in the
+# extended ones nextflow.config now asks for, sharing a task to prove it is counted once - and
+# asserts the table, the heaviest tasks and the suggested resources: block. Needs only python3.
+#
+#   scripts/resources_report_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+report="${here}/resources_report"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+mkdir -p run/reports
+
+# Old fields: no process, tag, attempt, cpus or memory columns - read from the name
+printf '%s\n' \
+  $'task_id\thash\tnative_id\tname\tstatus\texit\tsubmit\tduration\trealtime\t%cpu\tpeak_rss\tpeak_vmem\trchar\twchar' \
+  $'1\tab/000001\t101\tWOMBAT:PYWOMBAT (F1-rare_high_impact)\tCOMPLETED\t0\t2026-01-01 10:00:00.000\t1m\t50s\t99.0%\t2 GB\t3 GB\t1 MB\t1 MB' \
+  $'2\tab/000002\t102\tWOMBAT:PYWOMBAT (F2-rare_high_impact)\tCOMPLETED\t0\t2026-01-01 10:00:00.000\t1m\t40s\t99.0%\t3 GB\t3 GB\t1 MB\t1 MB' \
+  $'3\tab/000003\t103\tWOMBAT:PYWOMBAT (FAM-42-rare_high_impact)\tFAILED\t137\t2026-01-01 10:00:00.000\t1m\t1m\t99.0%\t7.9 GB\t8 GB\t1 MB\t1 MB' \
+  > run/reports/trace_20260101-100000.txt
+
+# Extended fields. FAM-42 succeeds on its second attempt; F1 is the same run of the same task
+# as above and must not be counted twice; the CACHED row did not run at all.
+printf '%s\n' \
+  $'task_id\thash\tnative_id\tprocess\ttag\tname\tstatus\texit\tattempt\tcpus\tmemory\ttime\tsubmit\tduration\trealtime\t%cpu\tpeak_rss\tpeak_vmem\trchar\twchar' \
+  $'1\tab/000001\t101\tWOMBAT:PYWOMBAT\tF1-rare_high_impact\tWOMBAT:PYWOMBAT (F1-rare_high_impact)\tCOMPLETED\t0\t1\t1\t8 GB\t10d\t2026-01-01 10:00:00.000\t1m\t50s\t99.0%\t2 GB\t3 GB\t1 MB\t1 MB' \
+  $'4\tcd/000004\t104\tWOMBAT:PYWOMBAT\tFAM-42-rare_high_impact\tWOMBAT:PYWOMBAT (FAM-42-rare_high_impact)\tCOMPLETED\t0\t2\t1\t72 GB\t10d\t2026-01-02 10:00:00.000\t2h\t1h 30m\t99.0%\t40 GB\t41 GB\t1 MB\t1 MB' \
+  $'5\tcd/000005\t105\tDEEPVARIANT_FAMILY:GLNEXUS_FAMILY\tF1\tDEEPVARIANT_FAMILY:GLNEXUS_FAMILY (F1)\tCOMPLETED\t0\t1\t4\t50 GB\t10d\t2026-01-02 10:00:00.000\t5m\t4m\t200.0%\t6 GB\t7 GB\t1 MB\t1 MB' \
+  $'6\tcd/000006\t106\tDEEPVARIANT_FAMILY:GLNEXUS_FAMILY\tF2\tDEEPVARIANT_FAMILY:GLNEXUS_FAMILY (F2)\tCACHED\t0\t1\t4\t50 GB\t10d\t-\t-\t-\t-\t-\t-\t-\t-' \
+  > run/reports/trace_20260102-100000.txt
+# And a hundred ordinary families, so that FAM-42 is above the 99th percentile
+for i in $(seq 100 199); do
+  printf '%s\n' $'1'"${i}"$'\tef/000'"${i}"$'\t'"${i}"$'\tWOMBAT:PYWOMBAT\tN'"${i}"$'-rare_high_impact\tWOMBAT:PYWOMBAT (N'"${i}"$'-rare_high_impact)\tCOMPLETED\t0\t1\t1\t8 GB\t10d\t2026-01-02 10:00:00.000\t1m\t30s\t99.0%\t1.5 GB\t2 GB\t1 MB\t1 MB'
+done >> run/reports/trace_20260102-100000.txt
+
+out=$("${report}" run --top 2 --suggest)
+echo "${out}"
+
+grep -q '^105 tasks from 2 trace file(s)' <<<"${out}" || fail "duplicate or cached rows counted"
+pywombat=$(grep '^PYWOMBAT ' <<<"${out}")
+[[ "${pywombat}" =~ ^PYWOMBAT\ +104\ +1\ +1\ +1\ +8\.0\ GB\  ]] || fail "PYWOMBAT counts or asked memory: ${pywombat}"
+[[ "${pywombat}" =~ 40\.0\ GB\ +500%\  ]] || fail "PYWOMBAT max peak or ratio: ${pywombat}"
+glnexus=$(grep '^GLNEXUS_FAMILY ' <<<"${out}")
+[[ "${glnexus}" =~ 50\.0\ GB\ .*\ 50%\  ]] || fail "GLNEXUS_FAMILY CPU use: ${glnexus}"
+
+# The killed attempt is listed, whatever its peak
+grep -Eq '^  FAM-42-rare_high_impact +7\.9 GB of +- .*FAILED exit 137$' <<<"${out}" || fail "killed task not listed"
+
+# Sized for the 99th percentile of completed tasks, with FAM-42 above it read out of its tag
+# as the fid, at its largest peak over both attempts
+suggestion=$(sed -n '/^  PYWOMBAT:/,/^  [A-Z]/p' <<<"${out}")
+grep -Eq '^    memory: 4\.GB    # was 8\.0 GB; p99 peak 3\.0 GB over 103 tasks$' <<<"${suggestion}" || fail "PYWOMBAT suggestion: ${suggestion}"
+grep -q '^    time: 3.h' <<<"${suggestion}" || fail "time suggestion: ${suggestion}"
+grep -q '^    families:$' <<<"${suggestion}" || fail "no families section: ${suggestion}"
+grep -q "^      'FAM-42': { memory: 50.GB }    # peak 40.0 GB, tag FAM-42-rare_high_impact$" <<<"${suggestion}" \
+  || fail "FAM-42 outlier: ${suggestion}"
+[[ $(grep -c "^      '" <<<"${suggestion}") -eq 1 ]] || fail "more outliers than FAM-42: ${suggestion}"
+
+# Only what --process selects
+out=$("${report}" run --process 'GLNEXUS.*' --top 0)
+grep -q '^PYWOMBAT' <<<"${out}" && fail "--process did not filter"
+grep -q '^1 tasks from 2 trace file(s)' <<<"${out}" || fail "--process count: ${out}"
+
+"${report}" nowhere 2>/dev/null && fail "a missing path did not fail"
+
+echo "OK"

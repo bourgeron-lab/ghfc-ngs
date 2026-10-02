@@ -1,15 +1,17 @@
 # The parameters file (`params.yml`)
 
 A cohort's parameters file is the only thing an operator writes to run this pipeline. It is
-a flat YAML mapping — **no nesting anywhere**, every key is a scalar or a list of scalars —
-and it is read by `nextflow run` through `-params-file`.
+a flat YAML mapping — every key is a scalar or a list of scalars, with one exception,
+[`resources`](#resources-per-cohort-cpus-memory-and-time) — and it is read by `nextflow run`
+through `-params-file`.
 
 This document is meant to be usable **next to a parameters file that has no comments**: it
 lists every key the code actually reads, its default, when it is required, and what it
 changes. It also lists the keys that appear in existing parameters files and do nothing, so
 you can recognise them for what they are.
 
-> **The pipeline does not validate key names or types.** There is no JSON schema. An unknown
+> **The pipeline does not validate key names or types** — except inside `resources`, which is
+> checked in full when the run starts. There is no JSON schema. An unknown
 > or misspelled key is accepted in silence, and the code falls back to the default in
 > `nextflow.config` or to `null`. Nothing will tell you that `bin_size` is not `bin`. This is
 > the single most important thing to know when reading a file someone else wrote.
@@ -46,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-52 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+53 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -103,6 +105,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `ref_par1_start` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `ref_par2_end` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `ref_par2_start` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
+| `resources` | always, checked at startup | [`resources`](#resources-per-cohort-cpus-memory-and-time) |
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
@@ -452,10 +455,97 @@ These three are the only keys in the whole file with a **hard requirement check*
 | `apptainer_cache` | dir | `""` | Apptainer image cache. |
 | `singularity_cache` | dir | `""` | Singularity image cache. |
 | `max_memory` | memory string | `'460.GB'` | Per-process memory ceiling. |
-| `max_cpus` | integer | `95` | Per-process CPU ceiling. Also caps GLnexus at `min(4, max_cpus)`. |
+| `max_cpus` | integer | `95` | Per-process CPU ceiling. |
 | `max_time` | duration string | `'240.h'` | Per-process wall-clock ceiling. |
 
-A process asking for more than a ceiling is clamped down to it with a warning, not failed.
+A task asking for more than a ceiling — by default, through `resources`, or after a retry has
+added memory — is clamped down to it, not failed. A `resources` value above a ceiling is also
+warned about when the run starts.
+
+### `resources`: per-cohort cpus, memory and time
+
+The cpus, memory and time of every process have defaults in `nextflow.config`, sized for a WGS
+family. A cohort that needs something else — an exome cohort needs far less, a 40-member
+family far more — says so here rather than in a config file of its own, so that it is part of
+the file every run of the cohort is recorded against.
+
+```yaml
+resources:
+  PYWOMBAT:                    # a process, by name
+    memory: 4.GB               # memory for the first attempt
+    memory_step: 32.GB         # added for each retry
+    time: 4.h
+    families:                  # by fid: an exact id, or a glob with *
+      FAM042: { memory: 200.GB }
+  GLNEXUS_FAMILY:
+    families:
+      FAM042: { memory: 300.GB, cpus: 8 }
+  MAKE_EXAMPLES:
+    samples:                   # by barcode
+      'IP*': { memory: 460.GB }
+  'VEP_ANNOTATION|VEP_MNV_ANNOTATION':   # a regex, like withName
+    cpus: 4
+```
+
+**Settings.** `cpus` (a whole number), `memory` and `memory_step` (with a unit: `8.GB`,
+`500.MB`), `time` (with a unit: `4.h`, `30.m`). Any of them can be given for the process, for
+a glob, or for an id. `families:` applies to the processes that run once per family, keyed by
+`fid`, and `samples:` to those that run once per sample, keyed by `barcode`. A process that
+runs once for the whole cohort (`SNVS_COHORT_MERGE`, `MERGE_WOMBAT`...) only takes the
+process-level settings.
+
+**What wins.** For each setting, the most specific value that is given: an exact id, then the
+first glob that matches it (in the order of the file), then the process, then the default in
+`nextflow.config`. A level that leaves a setting out keeps the one from the level below, so
+`FAM042: { memory: 200.GB }` keeps the process's `cpus`, `time` and `memory_step`. Ids are
+compared as text, so a numeric fid matches whether or not it is quoted.
+
+**Retries.** Memory on attempt *n* is `memory + (n - 1) × memory_step`. Every default keeps
+its retry step — `{ 8.GB * task.attempt }` became `memory 8.GB, memory_step 8.GB` — so a
+cohort that overrides only `memory` still gets more on each retry. `cpus` and `time` do not
+grow. A task killed by its time limit therefore fails again on every retry, so leave a
+generous margin on `time`.
+
+**Process names.** A process key is a name as the process runs, matched in full, or a regex
+matched against the whole name. A process included under another name runs under that name:
+`BAZAM_BWA_MEM2_REALIGN` runs only as `BAZAM_BWA_MEM2_REALIGN_37` and `_38`, so those (or
+`'BAZAM_BWA_MEM2_REALIGN_.*'`) are what an entry has to say. This is the one place where an
+entry differs from a `withName` block in a config file, which matches both.
+
+**Checked before anything runs.** An unknown setting, a process name that matches nothing, a
+setting under the wrong parent, or a value that does not parse stops the run at startup with
+the full list. Nothing else in the parameters file is checked this way.
+
+**Safe to change mid-cohort.** cpus, memory and time are not part of a task's cache key: a
+`-resume` after changing `resources` keeps every task that already succeeded, and the new
+values apply to the rest.
+
+**DeepVariant.** `MAKE_EXAMPLES` shards its work over `deepvariant_threads`, not over its
+cpus. Change one and change the other; see
+[DeepVariant and GLnexus](#deepvariant-and-glnexus).
+
+**Sizing it from the cohort's own runs.** Every run leaves a trace in
+`runs/<COHORT>/reports/`. `scripts/resources_report` reads them all and shows, per process,
+what was asked for against what was used, the tasks killed by a limit, and the families or
+samples that used the most:
+
+```bash
+scripts/resources_report /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/CANDY_mpx --suggest
+```
+
+`--suggest` prints a `resources:` block to review: each process sized to cover 99% of its
+tasks with a 25% margin, and the families and samples above that listed by id. The block is
+printed, never written anywhere.
+
+**Sizing from the data.** A default in `nextflow.config` can follow the size of the task's
+inputs: `memory = sized('memory', { 8.GB + 2.GB * barcodes.size() }, 8.GB)` grows with the
+size of the family, and `nextflow.util.MemoryUnit.of(4 * annotated_parquet.size())` with the
+size of a file. The settings in `resources` still override it.
+
+**Beyond cpus, memory and time.** For anything else — a container, an `errorStrategy` — give
+a config file with `--config FILE`. It is loaded on top of the pipeline's own configuration.
+A `cpus`, `memory` or `time` set in such a file replaces the pipeline's, and `resources` then
+no longer applies to that process.
 
 ## Gotchas
 

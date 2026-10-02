@@ -864,7 +864,7 @@ The pipeline uses the following containers by default:
 ### Default Resource Allocations
 
 - **BWA_MEM2_ALIGN**: 95 CPUs, 460GB RAM, 240h
-- **BAZAM_BWA_MEM2_REALIGN**: 47 CPUs, 230GB RAM, 240h
+- **BAZAM_BWA_MEM2_REALIGN**: 47 CPUs, 320GB RAM (+70GB per retry), 240h
 - **DV_MAKE_EXAMPLES**: 95 CPUs, 460GB RAM, 240h
 - **DV_CALL_VARIANTS**: 95 CPUs, 460GB RAM, 240h
 - **DV_POSTPROCESS_VARIANTS**: 95 CPUs, 460GB RAM, 240h
@@ -874,21 +874,25 @@ The pipeline uses the following containers by default:
 
 ### Resource Tuning
 
-Adjust resources in `nextflow.config`:
+Tune a cohort in its own parameters file rather than in `nextflow.config`: a `resources:`
+block overrides the cpus, memory and time of any process, and within a process those of one
+family or sample, or of every barcode matching a glob:
 
-```groovy
-process {
-    withName: 'BWA_MEM2_ALIGN' {
-        cpus = 64        // Reduce if nodes have fewer cores
-        memory = '250.GB' // Adjust based on available memory
-    }
-    
-    withName: 'GLNEXUS_FAMILY' {
-        cpus = 8         // Scale based on family size
-        memory = '100.GB' // GLnexus can be memory intensive
-    }
-}
+```yaml
+resources:
+  PYWOMBAT:
+    memory: 4.GB
+    families:
+      FAM042: { memory: 200.GB }
+  MAKE_EXAMPLES:
+    samples:
+      'IP*': { memory: 460.GB }
 ```
+
+The block is checked when the run starts, and can be changed between `-resume`s without
+re-running anything. `scripts/resources_report runs/<COHORT> --suggest` compares what a
+cohort's past runs asked for with what they used, and proposes a block. See
+[`resources` in documentation/params.md](documentation/params.md#resources-per-cohort-cpus-memory-and-time).
 
 ## SLURM Configuration
 
