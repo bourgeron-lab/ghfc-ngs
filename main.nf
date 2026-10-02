@@ -843,22 +843,50 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
     ]
 }
 
+// family ID -> its members' barcodes, in pedigree order. Built once, because asking
+// family_members "who is in this family?" once per family is a scan of every individual per
+// family - invisible on a few hundred families, hours of planning on a cohort the size of SPARK.
+def membersByFamily(family_members) {
+    def members_by_family = [:]
+    family_members.each { barcode, fid ->
+        def members = members_by_family[fid]
+        if (members == null) {
+            members = []
+            members_by_family[fid] = members
+        }
+        members.add(barcode)
+    }
+    return members_by_family
+}
+
+// An ordered set rather than a list for every bucket of the plan. Each bucket is asked
+// "is this ID in you?" once per individual or family, both here and in the channel filters,
+// and a list answers that by scanning itself. Insertion order is kept, so every log line and
+// report that joins a bucket reads exactly as it did when these were lists.
+def planBucket() {
+    return new LinkedHashSet()
+}
+
 def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
         // no_cram is every individual with no usable CRAM, whatever the reason and whether or
         // not anything will be scheduled for it. It is the set the input scan probes, which is
         // what lets the run report on samples that nothing would otherwise look at.
-        alignment: [needed: [], existing: [], need_bedgraph: [], no_cram: [], no_cram_with_gvcf: []],
-        deepvariant_sample: [needed: [], existing: []],
-        deepvariant_family: [needed: [], existing: []],
-        annotation: [needed: [], existing: []],
-        snvs_cohort: [needed: [], existing: [], need_bcf_merge: false, need_wombat_merges: [:]],
-        wisecondorx: [needed: [], existing: [], need_npz: [], need_predict: [], need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
-        wombat: [needed: [], existing: [], need_bcf2parquet: [:]],
+        alignment: [needed: planBucket(), existing: planBucket(), need_bedgraph: planBucket(), no_cram: planBucket(), no_cram_with_gvcf: planBucket()],
+        deepvariant_sample: [needed: planBucket(), existing: planBucket()],
+        deepvariant_family: [needed: planBucket(), existing: planBucket()],
+        annotation: [needed: planBucket(), existing: planBucket()],
+        snvs_cohort: [needed: planBucket(), existing: planBucket(), need_bcf_merge: false, need_wombat_merges: [:]],
+        wisecondorx: [needed: planBucket(), existing: planBucket(), need_npz: planBucket(), need_predict: planBucket(), need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
+        wombat: [needed: planBucket(), existing: planBucket(), need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
-        ancestry: [needed: [], existing: [], need_extract: [], need_family_merge: [:], need_family_score: [:], need_cohort_merge: false],
+        ancestry: [needed: planBucket(), existing: planBucket(), need_extract: planBucket(), need_family_merge: [:], need_family_score: [:], need_cohort_merge: false],
         pedigree_drift: [:]
     ]
+
+    def members_by_family = membersByFamily(family_members)
+    // Unset means the default, not "off": asBoolean reads a missing value as false
+    def require_vaf_bedgraph = params.vaf_bedgraph == null ? true : asBoolean(params.vaf_bedgraph)
     
     // Check extractor TSV list
     if (params.extractor_tsvs_list && !params.extractor_tsvs_list.isEmpty()) {
@@ -895,7 +923,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             // the BCF: bcftools is not on the launching node's PATH, and the family's own
             // {FID}.pedigree.tsv is no help because it is rewritten from the current
             // pedigree and so already lists the members the call is missing.
-            def members = family_members.findAll { _barcode, member_fid -> member_fid == fid }.keySet()
+            def members = members_by_family[fid] ?: []
             def without_gvcf = members.findAll { barcode ->
                 !new File("${Sharding.getSampleDir(params.data, barcode)}/deepvariant/${barcode}.g.vcf.gz").exists()
             }.sort()
@@ -992,7 +1020,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
             // A family whose panel BCF predates one of its samples' extractions must
             // be rebuilt, or it would keep a sample that is no longer current
-            def members = family_members.findAll { _barcode, member_fid -> member_fid == fid }.keySet()
+            def members = members_by_family[fid] ?: []
             def member_needs_extract = members.any { barcode -> barcode in plan.ancestry.need_extract }
 
             plan.ancestry.need_family_merge[fid] = !fam_panel_exists || member_needs_extract
@@ -1024,8 +1052,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def vaf_bedgraph_path = "${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz"
         def vaf_bedgraph_tbi_path = "${smp_dir}/sequences/${barcode}.vaf.bedgraph.gz.tbi"
         
-        if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists() && 
-            new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists()) {
+        // Without vaf_bedgraph, the gVCF alone is the sample's output: a cohort imported as gVCFs
+        // has no VCF to build a bedgraph from, so requiring one would send it back to alignment
+        def has_vaf_bedgraph = !require_vaf_bedgraph ||
+            (new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists())
+
+        if (new File(gvcf_path).exists() && new File(gvcf_tbi_path).exists() && has_vaf_bedgraph) {
             plan.deepvariant_sample.existing.add(barcode)
         } else {
             // Only need DeepVariant if the individual's family needs deepvariant_family
@@ -1039,6 +1071,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // Check existing CRAM and bedgraph files (both produced by alignment workflow)
     // CRAM availability and bedgraph availability are tracked separately: a sample with a usable
     // CRAM but no coverage bedgraph only needs MOSDEPTH/TABIX_INDEX, never a full realignment.
+    //
+    // With no alignment input configured at all, a CRAM-less sample with a gVCF is the cohort's
+    // normal state rather than something to look into - an imported gVCF cohort is nothing
+    // but - so those are counted into one line instead of one per sample.
+    def expects_crams = params.fastq_pattern || params.old_cram_37 || params.old_cram_38
+    def gvcf_only_count = 0
     individuals.each { barcode ->
         def smp_dir = Sharding.getSampleDir(params.data, barcode)
         def cram_path = "${smp_dir}/sequences/${barcode}.${params.ref_name}.cram"
@@ -1072,7 +1110,11 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 // gVCF and the ancestry panel extraction reads it directly, so a missing
                 // CRAM here costs nothing but the ability to regenerate coverage bedgraphs.
                 def bedgraph_note = has_bedgraph ? "" : " (its coverage bedgraph is also absent and cannot be regenerated without the CRAM)"
-                if (!quiet) log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
+                if (!expects_crams) {
+                    gvcf_only_count++
+                } else if (!quiet) {
+                    log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
+                }
             } else {
                 // Genuinely stuck: no CRAM, no gVCF, and the family is already called, so
                 // the plan will never schedule anything for this individual and the family's
@@ -1080,6 +1122,9 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 if (!quiet) log.warn "Individual ${barcode} has neither a ${params.ref_name} CRAM nor a gVCF, and family ${family_members[barcode]} is already called - nothing will be scheduled for it and the family's outputs cannot include it. Provide input data for it, or remove it from the pedigree"
             }
         }
+    }
+    if (gvcf_only_count && !quiet) {
+        log.info "${gvcf_only_count} individuals have a gVCF and no ${params.ref_name} CRAM, and no alignment input is configured - nothing downstream needs their CRAMs, but their coverage bedgraphs cannot be generated"
     }
     
     // Check existing WisecondorX NPZ and predict files
@@ -1117,9 +1162,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         
         if (!family_aberrations_exists) {
             // Check if any family members have or will have individual aberrations
-            def family_has_aberrations = individuals.any { barcode ->
-                family_members[barcode] == fid && 
-                (barcode in plan.wisecondorx.existing || barcode in plan.wisecondorx.needed)
+            def family_has_aberrations = (members_by_family[fid] ?: []).any { barcode ->
+                barcode in plan.wisecondorx.existing || barcode in plan.wisecondorx.needed
             }
             
             if (family_has_aberrations) {
@@ -1746,10 +1790,7 @@ def reconcilePlanWithInputs(analysis_plan, resolved_inputs, family_members) {
         errors.add("Blocked by the above - variant calling for ${blocked_samples.size()} individual(s): ${blocked_samples.join(', ')}")
     }
 
-    def members_by_family = [:]
-    family_members.each { barcode, fid ->
-        members_by_family[fid] = (members_by_family[fid] ?: []) + [barcode]
-    }
+    def members_by_family = membersByFamily(family_members)
 
     def fully_blocked = []
     def partly_blocked = []

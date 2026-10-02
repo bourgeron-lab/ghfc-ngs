@@ -46,7 +46,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-50 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+52 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -81,6 +81,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `enable_conda` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `extractor_tsvs_list` | `extractor` | [Extractor](#extractor) |
 | `fastq_pattern` | `alignment` | [Input discovery](#input-discovery) |
+| `glnexus_bed` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `glnexus_config` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `gnomad_file` | `annotation` | [Annotation](#annotation) |
 | `gnomad_filter_field` | `annotation` | [Annotation](#annotation) |
@@ -113,6 +114,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `slurm_account` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `slurm_partition` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `steps` | always — **required** | [`steps`](#steps-the-key-that-decides-everything-else) |
+| `vaf_bedgraph` | always — decides what counts as a called sample | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `vep_config` | `annotation` | [Annotation](#annotation) |
 | `vep_config_name` 📄 | `annotation` and everything downstream | [Annotation](#annotation) |
 | `wisecondorx_binsize` 📄 | `wisecondorx` | [WisecondorX](#wisecondorx) |
@@ -349,12 +351,35 @@ rejected. Set the two together.
 |---|---|---|---|
 | `deepvariant_threads` | integer | `96` | `--num_shards` for the three DeepVariant stages. |
 | `glnexus_config` | string | `"DeepVariant_unfiltered"` | GLnexus preset for joint calling. `DeepVariant` applies quality filters; `gatk` is for GATK gVCFs. |
+| `glnexus_bed` | path | `""` | BED of the ranges to joint-call, passed to GLnexus as `--bed`. Empty calls the whole genome. For exome cohorts. |
+| `vaf_bedgraph` | boolean | `true` | Whether a sample's VAF bedgraph is one of its `deepvariant_sample` outputs. Set `false` for a cohort that arrives as gVCFs only. |
 
 `deepvariant_threads` is **independent of `max_cpus` and of the SLURM allocation**. It exists
 because DeepVariant's throughput is hardware-sensitive, and it overrides the process CPU
 setting without changing what SLURM actually reserves. Setting it above the cores you were
 allocated oversubscribes the node. Keep it, `max_cpus`, and the `withName` blocks in
 `nextflow.config` consistent by hand.
+
+**Exome cohorts and `glnexus_bed`.** A DeepVariant gVCF covers the whole genome with reference
+blocks, so without a BED every off-target call reaches annotation and wombat. Give the capture
+targets padded by the distance you want to keep around them. GLnexus **rejects overlapping
+ranges**, so the BED must be sorted and merged after padding, and if the cohort was captured
+with several kits, use the union:
+
+```bash
+bedtools slop -i targets.bed -g ref.fasta.fai -b 100 | sort -k1,1 -k2,2n | bedtools merge > targets.pad100.bed
+```
+
+The BED is read in place rather than staged, so leaving it empty keeps every existing cohort's
+GLnexus tasks exactly as they were. Changing it does not re-call families that already have a
+`norm.bcf`: like every other setting, it only applies to what is still to be done.
+
+**gVCF-only cohorts and `vaf_bedgraph`.** The VAF bedgraph is built from the per-sample VCF that
+DeepVariant writes next to the gVCF. A cohort imported as gVCFs alone has neither that VCF nor a
+CRAM, so with the default a sample can never count as called: the plan sends every one of them
+back to alignment and the run stops with "Alignment step is required". With `vaf_bedgraph: false`
+a gVCF and its `.tbi` are the whole of `deepvariant_sample`'s output, and a pedigree member with
+no gVCF still fails the run, by name. See [`params_example/SPARK.params.yml`](../params_example/SPARK.params.yml).
 
 ### Annotation
 

@@ -21,7 +21,12 @@ process GLNEXUS_FAMILY {
     
     script:
     def gvcf_list = gvcfs.join(' ')
-    
+    // Read in place rather than staged, like params.ref in NORMALIZE. A whole line or nothing,
+    // so that without it the rendered script - and so the task hash - is exactly what it was.
+    // Only a string counts: a bare --glnexus_bed on the command line arrives as Boolean true.
+    def bed = params.glnexus_bed instanceof CharSequence ? params.glnexus_bed.toString().trim() : ''
+    def bed_line = bed ? "        --bed ${bed} \\\n" : ''
+
     """
     # Create temporary directory for GLnexus
     rm -rf tmp_glnexus_${fid}
@@ -29,7 +34,7 @@ process GLNEXUS_FAMILY {
     # Run GLnexus
     glnexus_cli \\
         --config ${params.glnexus_config ?: 'DeepVariant_unfiltered'} \\
-        --threads ${task.cpus} \\
+${bed_line}        --threads ${task.cpus} \\
         --mem-gbytes ${task.memory.toGiga()} \\
         --dir tmp_glnexus_${fid} \\
         ${gvcf_list} \\

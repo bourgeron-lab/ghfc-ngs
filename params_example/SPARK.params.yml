@@ -1,0 +1,85 @@
+# Parameters for SPARK: whole-exome, imported as DeepVariant v1.4.0 gVCFs, with no CRAM.
+#
+# Only family calling, annotation and wombat can run on gVCFs alone. Alignment, bedgraphs and
+# wisecondorx need the CRAMs; ancestry would fail the admixture coverage gate on exome gVCFs;
+# snvs_cohort is left out until the separately built common-variant cohort file replaces it.
+#
+# Before the first run, lay the gVCFs out and write the pedigree from sample_metadata.tsv:
+#     scripts/cohorts/spark/spark_import --metadata sample_metadata.tsv \
+#         --gvcf-dir <SPARK gVCF download> --data <data below> --check 20
+# Rerun it whenever SPARK releases more samples.
+
+cohort_name: "SPARK"
+
+steps: [
+    "deepvariant_family",
+    "annotation",
+    "wombat",
+  ]
+
+# A data root of its own: SPARK's samples, families and reference never mix with the WGS tree
+data: "" # TODO: e.g. /pasteur/helix/projects/ghfc_wgs/WES/SPARK-GRCh38/
+scratch: "/pasteur/appa/scratch/ghfc"
+work_dir: "" # TODO: e.g. /pasteur/appa/scratch/ghfc/work-spark
+
+# The pedigree is the one spark_import writes, at its default location:
+#     <data>/cohorts/SPARK/SPARK.pedigree.tsv
+
+# The reference SPARK aligned to, not ours. NORMALIZE runs `bcftools norm -c s`, which
+# silently rewrites any REF that disagrees with the fasta, and wombat reads it too.
+ref: "" # TODO: SPARK's GRCh38 fasta (with .fai)
+ref_name: "GRCh38_SPARK"
+
+# The gVCFs are the whole of deepvariant_sample's output: there is no per-sample VCF to build a
+# VAF bedgraph from, and without this every sample would be sent back to alignment
+vaf_bedgraph: false
+
+## Family calling
+# Same preset as the WGS cohorts, so the wombat configs filter both the same way
+glnexus_config: "DeepVariant_unfiltered"
+# Capture targets, padded and merged - GLnexus rejects overlapping ranges. Use the union if
+# the batches were captured with different kits. See documentation/params.md.
+glnexus_bed: "" # TODO: e.g. <data>/references/capture.pad100.merged.bed
+
+## Annotation
+gnomad_file: "/pasteur/appa/scratch/ghfc/scratch-cache/gnomad/gnomad_v4.1_allChroms.bcf"
+# Same field as the WGS cohorts for comparability; an exome or joint AF is the alternative
+gnomad_filter_field: "AF_genomes"
+gnomad_filter_threshold: "0.01"
+
+vep_config: "/pasteur/appa/scratch/ghfc/scratch-cache/GRCh38_112_standard.ini"
+vep_config_name: "VEP_GRCh38_112_standard"
+
+annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/annotations"
+annotation_annotation_list: [
+    "AlphaMissense_hg38.bcf",
+    "cadd_v1.7.indels.grch38.chr.bcf",
+    "cadd_v1.7.snvs.grch38.chr.bcf",
+    "MPC_v2.GRCh38.bcf",
+    "revel.grch38.bcf",
+    "spliceai.indels.grch38.chr.bcf",
+    "spliceai.snvs.ensembl_mane.grch38.110.chr.bcf",
+    "popEVE.GRCh38.bcf",
+    "MISTIC_GRCh38.bcf",
+    "LCR.grch38.bed.gz",
+  ]
+
+## Wombat
+wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat"
+wombat_config_list: [
+    "rare_high_impact.yml",
+    "de_novo_mutations.yml",
+    "rare_coding_mnvs.yml",
+    "rare_homalt.yml",
+    "rare_missense_plp.yml",
+    "rare_spliceai.yml",
+  ]
+
+extractor_tsvs_list: []
+
+## Containers and resources
+apptainer_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
+singularity_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
+max_memory: "460.GB"
+max_cpus: 95
+max_time: "240.h"
