@@ -510,6 +510,11 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
+These exact paths, derived from the pedigree's IDs, are the only places looked at: the
+`samples/` and `families/` trees are never globbed. A file at any other location - a
+misplaced copy, a differently named pedigree, another cohort's samples sharing the data
+directory - is invisible to the run, and never passed to a task.
+
 ## Input Data Structure
 
 The pipeline expects the following directory structure:

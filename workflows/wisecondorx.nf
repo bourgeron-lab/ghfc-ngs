@@ -108,13 +108,17 @@ workflow WISECONDORX {
     
     // Merge family aberrations if needed
     if (need_family_merge && !need_family_merge.isEmpty()) {
-        // Create channel for ALL existing individual chr-prefixed aberrations (not just newly created)
-        all_existing_chr_aberrations = channel
-            .fromPath("${params.data}/samples/*/*/*/svs/wisecondorx/*_aberrations.chr.bed")
-            .map { bed ->
-                def barcode = bed.name.replaceAll(/_aberrations\.chr\.bed$/, '')
-                tuple(barcode, bed)
-            }
+        // Every existing chr-prefixed aberrations file of a member of a family to be merged, not
+        // just the newly created ones. Looked up at the sharded path of each such member rather
+        // than globbed across the whole samples/ tree: the merge below keeps only those families
+        // anyway, so the glob found nothing more, just slowly.
+        all_existing_chr_aberrations = channel.fromList(
+            family_members
+                .findAll { _barcode, fid -> need_family_merge[fid] == true }
+                .collect { barcode, _fid ->
+                    tuple(barcode, file("${Sharding.getSampleDir(params.data, barcode)}/svs/wisecondorx/${barcode}_aberrations.chr.bed"))
+                }
+                .findAll { _barcode, bed -> bed.exists() })
         
         // Mix ALL existing (from disk) with newly created chr-prefixed aberrations.
         // A sample reformatted in this run also matches the disk glob once published, so dedupe by
@@ -146,13 +150,14 @@ workflow WISECONDORX {
     
     // Annotate family aberrations if needed
     if (need_family_annotate && !need_family_annotate.isEmpty()) {
-        // Create channel for existing family aberrations
-        existing_family_aberrations_for_annot = channel
-            .fromPath("${params.data}/families/*/*/*/svs/wisecondorx/*_aberrations.bed")
-            .map { bed ->
-                def fid = bed.name.replaceAll(/_aberrations\.bed$/, '')
-                tuple(fid, bed)
-            }
+        // Existing family aberrations of the families to annotate, by path rather than by glob
+        existing_family_aberrations_for_annot = channel.fromList(
+            need_family_annotate
+                .findAll { _fid, needed -> needed == true }
+                .collect { fid, _needed ->
+                    tuple(fid, file("${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.bed"))
+                }
+                .findAll { _fid, bed -> bed.exists() })
         
         // Mix with newly created family aberrations
         all_family_aberrations_for_annot = existing_family_aberrations_for_annot.mix(family_output)
@@ -174,14 +179,13 @@ workflow WISECONDORX {
     
     // Merge cohort aberrations if needed
     if (need_cohort_merge) {
-        // Existing annotated family aberrations, restricted to the families in the current pedigree.
-        // Without this filter the glob picks up every family ever processed under params.data and
-        // merges unrelated families into this cohort.
-        existing_annotated_family_aberrations = channel
-            .fromPath("${params.data}/families/*/*/*/svs/wisecondorx/*_aberrations.annotated.bed")
-            .filter { bed ->
-                bed.name.replaceAll(/_aberrations\.annotated\.bed$/, '') in families
-            }
+        // Existing annotated family aberrations of the families in the current pedigree, and
+        // only those: every family ever processed under params.data must never be merged into
+        // this cohort. Looked up per family rather than globbed and filtered.
+        existing_annotated_family_aberrations = channel.fromList(
+            families
+                .collect { fid -> file("${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.annotated.bed") }
+                .findAll { bed -> bed.exists() })
 
         // Concat rather than collect-then-mix so the barrier genuinely waits for this run's own
         // ANNOTATE_ABERRATIONS output before the cohort is merged. Dedupe by family in case a
