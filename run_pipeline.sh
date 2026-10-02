@@ -44,7 +44,9 @@ ARGUMENTS:
 
 OPTIONS:
     --profile PROFILE           Nextflow profile(s) to use (default: slurm,apptainer)
-    --config CONFIG             Additional Nextflow config file
+    --config CONFIG             Additional Nextflow config file, loaded on top of the
+                                pipeline's. For a cohort's cpus, memory and time, prefer
+                                resources: in its parameters file (documentation/params.md)
     --params-file FILE          Parameters file (YAML format), overrides COHORT
     --work-dir DIR              Nextflow work directory (default: work)
     --data DIR                  Data directory
@@ -229,7 +231,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --config)
-            CONFIG="--config $(abspath "$2")"
+            # -c, not --config: Nextflow reads any --name as a parameter, so --config only ever
+            # set params.config and the file was never loaded
+            [[ $# -ge 2 ]] || die "--config requires a FILE argument."
+            [[ -f "$2" ]] || die "config file not found: $2"
+            CONFIG="-c $(abspath "$2")"
             shift 2
             ;;
         --params-file)

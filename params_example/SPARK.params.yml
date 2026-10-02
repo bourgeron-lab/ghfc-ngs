@@ -83,3 +83,18 @@ singularity_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-c
 max_memory: "460.GB"
 max_cpus: 95
 max_time: "240.h"
+
+# The defaults in nextflow.config are sized for a WGS family. An exome family's rare variants
+# are a few thousand records, so these jobs need a fraction of that - and at roughly a dozen
+# jobs per family, tens of thousands of families is hundreds of thousands of SLURM jobs, where
+# every core asked for and not used is queue time for the whole cohort. The schema, and how to
+# size a single family or sample, is under `resources` in documentation/params.md.
+resources:
+  GLNEXUS_FAMILY:
+    cpus: 2
+    memory: 8.GB
+    memory_step: 8.GB
+  'VEP_ANNOTATION|VEP_MNV_ANNOTATION':
+    cpus: 4
+    memory: 8.GB
+    memory_step: 8.GB

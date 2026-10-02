@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Compare what a cohort's tasks asked SLURM for with what they used, from its Nextflow traces.
+
+Every run of a cohort leaves a trace in its launch directory, runs/<COHORT>/reports/. This
+reads them all and prints, per process: how many tasks ran, failed, were killed (exit 137,
+140 or 143: the memory or time limit, most of the time) or retried; the memory asked for; the
+peak memory used (p50, p95, max); how much of the CPUs asked for were busy; and the run time.
+Then, per process, the tasks that used the most memory, so that the family or sample behind
+an outlier is in plain view.
+
+    scripts/resources_report runs/CANDY_mpx
+    scripts/resources_report runs/SPARK --process 'PYWOMBAT.*' --suggest
+
+With --suggest it also prints a `resources:` block sized from what was used - review it, then
+paste what you agree with into the cohort's parameters file. It never writes anything.
+
+Traces written before the trace fields were extended have no cpus, memory, attempt or tag
+columns. They still give peak memory and run time; the process and tag are read from the task
+name instead. A CACHED row is a task that did not run, and is skipped.
+
+Stdlib only, and Python 3.6 compatible, so it runs on the login node without an environment.
+"""
+
+import argparse
+import csv
+import glob
+import math
+import os
+import re
+import sys
+from collections import defaultdict
+
+UNITS = {'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3, 'TB': 1024 ** 4, 'PB': 1024 ** 5}
+DURATIONS = {'ms': 0.001, 's': 1, 'm': 60, 'h': 3600, 'd': 86400}
+KILLED = {'137', '140', '143'}
+GB = 1024 ** 3
+
+# Where the modules are, to tell from a task's tag which family or sample it is: a tag such as
+# "${fid}-${wombat_config_name}" is not the fid by itself
+MODULES = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'modules')
+
+
+def parse_memory(text):
+    """Bytes, from a trace value such as '1.2 GB' or a raw byte count; None for '-'."""
+    text = (text or '').strip()
+    if not text or text == '-':
+        return None
+    if re.fullmatch(r'\d+', text):
+        return int(text)
+    m = re.fullmatch(r'([\d.]+)\s*([KMGTP]?B)', text)
+    return float(m.group(1)) * UNITS[m.group(2)] if m else None
+
+
+def parse_duration(text):
+    """Seconds, from a trace value such as '1h 2m 3s' or a raw millisecond count."""
+    text = (text or '').strip()
+    if not text or text == '-':
+        return None
+    if re.fullmatch(r'\d+', text):
+        return int(text) / 1000
+    parts = re.findall(r'([\d.]+)\s*(ms|s|m|h|d)', text)
+    return sum(float(n) * DURATIONS[u] for n, u in parts) if parts else None
+
+
+def parse_percent(text):
+    text = (text or '').strip().rstrip('%')
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def fmt_memory(n):
+    if n is None:
+        return '-'
+    return f"{n / GB:.1f} GB" if n >= GB else f"{n / 1024 ** 2:.0f} MB"
+
+
+def fmt_duration(seconds):
+    if seconds is None:
+        return '-'
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds:.0f}s"
+
+
+def percentile(values, p):
+    """Nearest-rank percentile of a non-empty list."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(p / 100 * len(ordered)) - 1)]
+
+
+def find_traces(paths):
+    traces = []
+    for path in paths:
+        if os.path.isdir(path):
+            found = sorted(glob.glob(os.path.join(path, 'reports', 'trace_*.txt'))
+                           + glob.glob(os.path.join(path, 'trace_*.txt')))
+            if not found:
+                sys.exit(f"ERROR: no trace_*.txt in {path} or {os.path.join(path, 'reports')}")
+            traces.extend(found)
+        elif os.path.isfile(path):
+            traces.append(path)
+        else:
+            sys.exit(f"ERROR: {path} does not exist")
+    return traces
+
+
+def split_name(name):
+    """('PROCESS', 'tag') from a task name such as 'WOMBAT:PYWOMBAT (FAM1-rare)'."""
+    m = re.fullmatch(r'(.*?)(?: \((.*)\))?', name.strip())
+    return m.group(1).split(':')[-1], m.group(2) or ''
+
+
+def read_tasks(traces):
+    tasks = []
+    seen = set()
+    for path in traces:
+        with open(path, newline='') as fh:
+            for row in csv.DictReader(fh, delimiter='\t'):
+                status = row.get('status', '')
+                if status == 'CACHED':
+                    continue
+                key = (row.get('hash'), row.get('native_id'), row.get('submit'))
+                if key in seen:
+                    continue
+                seen.add(key)
+                process, tag = split_name(row.get('name', ''))
+                if row.get('process'):
+                    process = row['process'].split(':')[-1]
+                if row.get('tag') not in (None, '', '-'):
+                    tag = row['tag']
+                cpus = row.get('cpus')
+                tasks.append({
+                    'process': process,
+                    'tag': tag,
+                    'status': status,
+                    'exit': (row.get('exit') or '').strip(),
+                    'attempt': int(row['attempt']) if (row.get('attempt') or '').isdigit() else None,
+                    'cpus': int(cpus) if (cpus or '').isdigit() else None,
+                    'memory': parse_memory(row.get('memory')),
+                    'peak_rss': parse_memory(row.get('peak_rss')),
+                    'realtime': parse_duration(row.get('realtime')),
+                    'pcpu': parse_percent(row.get('%cpu')),
+                })
+    return tasks
+
+
+def tag_patterns(modules_dir):
+    """PROCESS -> (section, regex) where the regex reads the id out of the task's tag.
+
+    The id is the fid or barcode input, whichever the process takes. Its group is greedy and
+    every other one is not, so "${fid}-${wombat_config_name}" reads FAM-1-rare as FAM-1: config
+    names, units and file names are the short part.
+    """
+    patterns = {}
+    if not os.path.isdir(modules_dir):
+        return patterns
+    for root, _dirs, files in os.walk(modules_dir):
+        for name in files:
+            if not name.endswith('.nf'):
+                continue
+            with open(os.path.join(root, name)) as fh:
+                text = fh.read()
+            for block in re.split(r'(?m)^\s*process\s+', text)[1:]:
+                pname = re.match(r'(\w+)', block).group(1)
+                tag = re.search(r'''(?m)^\s*tag\s+["'](.*)["']\s*$''', block)
+                inputs = block.split('output:')[0]
+                id_var = 'fid' if re.search(r'val\(fid\)', inputs) else \
+                    'barcode' if re.search(r'val\(barcode\)', inputs) else None
+                if not tag or not id_var:
+                    continue
+                regex, pos = '', 0
+                for m in re.finditer(r'\$\{(\w+)\}|\$(\w+)', tag.group(1)):
+                    regex += re.escape(tag.group(1)[pos:m.start()])
+                    var = m.group(1) or m.group(2)
+                    regex += f"(?P<{var}>.+)" if var == id_var else '.+?'
+                    pos = m.end()
+                regex += re.escape(tag.group(1)[pos:])
+                if f"(?P<{id_var}>" in regex:
+                    patterns[pname] = ('families' if id_var == 'fid' else 'samples', re.compile(regex + r'\Z'))
+    return patterns
+
+
+def task_id(task, patterns):
+    """(section, id) of a task, or (None, tag) when the tag cannot be read."""
+    # An alias such as BAZAM_BWA_MEM2_REALIGN_37 has its module's tag
+    known = patterns.get(task['process']) or next(
+        (v for k, v in patterns.items() if task['process'].startswith(k + '_')), None)
+    if known:
+        m = known[1].match(task['tag'])
+        if m:
+            return known[0], m.group(1)
+    return None, task['tag']
+
+
+def summarise(tasks):
+    """PROCESS -> summary dict."""
+    by_process = defaultdict(list)
+    for task in tasks:
+        by_process[task['process']].append(task)
+    summaries = {}
+    for process, rows in by_process.items():
+        done = [t for t in rows if t['status'] == 'COMPLETED']
+        peaks = [t['peak_rss'] for t in done if t['peak_rss'] is not None]
+        times = [t['realtime'] for t in done if t['realtime'] is not None]
+        asked = [t['memory'] for t in rows if t['memory'] is not None and t['attempt'] in (1, None)]
+        effs = [t['pcpu'] / (100 * t['cpus']) for t in done if t['pcpu'] is not None and t['cpus']]
+        summaries[process] = {
+            'tasks': len(rows),
+            'completed': len(done),
+            'failed': sum(1 for t in rows if t['status'] == 'FAILED'),
+            'killed': sum(1 for t in rows if t['exit'] in KILLED),
+            'retried': sum(1 for t in rows if (t['attempt'] or 1) > 1),
+            'asked': max(set(asked), key=asked.count) if asked else None,
+            'peak_p50': percentile(peaks, 50) if peaks else None,
+            'peak_p95': percentile(peaks, 95) if peaks else None,
+            'peak_p99': percentile(peaks, 99) if peaks else None,
+            'peak_max': max(peaks) if peaks else None,
+            'cpu_eff': percentile(effs, 50) if effs else None,
+            'time_p95': percentile(times, 95) if times else None,
+            'time_max': max(times) if times else None,
+            'rows': rows,
+        }
+    return summaries
+
+
+def print_table(summaries):
+    header = ['process', 'tasks', 'failed', 'killed', 'retried', 'asked', 'peak p50', 'peak p95',
+              'peak max', 'max/asked', 'cpu busy', 'time p95', 'time max']
+    lines = [header]
+    for process in sorted(summaries):
+        s = summaries[process]
+        ratio = f"{s['peak_max'] / s['asked']:.0%}" if s['asked'] and s['peak_max'] is not None else '-'
+        lines.append([process, str(s['tasks']), str(s['failed']), str(s['killed']), str(s['retried']),
+                      fmt_memory(s['asked']), fmt_memory(s['peak_p50']), fmt_memory(s['peak_p95']),
+                      fmt_memory(s['peak_max']), ratio,
+                      f"{s['cpu_eff']:.0%}" if s['cpu_eff'] is not None else '-',
+                      fmt_duration(s['time_p95']), fmt_duration(s['time_max'])])
+    widths = [max(len(line[i]) for line in lines) for i in range(len(header))]
+    for line in lines:
+        print('  '.join(cell.ljust(w) if i == 0 else cell.rjust(w)
+                        for i, (cell, w) in enumerate(zip(line, widths))))
+
+
+def print_top(summaries, n):
+    for process in sorted(summaries):
+        rows = [t for t in summaries[process]['rows'] if t['peak_rss'] is not None]
+        heavy = [t for t in rows if t['exit'] in KILLED] + \
+            sorted(rows, key=lambda t: t['peak_rss'], reverse=True)[:n]
+        if not heavy:
+            continue
+        print(f"\n{process}")
+        shown = set()
+        for t in heavy:
+            key = (t['tag'], t['attempt'], t['status'], t['peak_rss'])
+            if key in shown:
+                continue
+            shown.add(key)
+            attempt = f" attempt {t['attempt']}" if t['attempt'] else ''
+            print(f"  {t['tag'] or '-':40s} {fmt_memory(t['peak_rss']):>10s} of {fmt_memory(t['memory']):>10s}"
+                  f"  {fmt_duration(t['realtime']):>6s}  {t['status']}{attempt}"
+                  + (f" exit {t['exit']}" if t['exit'] not in ('', '0', '-') else ''))
+
+
+def gb_up(n, margin):
+    """Whole GB, at least 1, above n bytes times margin."""
+    return max(1, math.ceil(n * margin / GB))
+
+
+def print_suggestion(summaries, patterns, margin):
+    """A resources: block: the process sized for its 99th percentile, the tasks above it by id."""
+    print("\n# Suggested from the traces above. Review before pasting into the parameters file:")
+    print("# memory covers 99% of tasks with a margin; the rest are listed by family or sample.")
+    print("resources:")
+    for process in sorted(summaries):
+        s = summaries[process]
+        if s['peak_p99'] is None or s['completed'] == 0:
+            continue
+        base = gb_up(s['peak_p99'], margin)
+        hours = max(1, math.ceil(2 * s['time_max'] / 3600)) if s['time_max'] else None
+        print(f"  {process}:")
+        print(f"    memory: {base}.GB" + (f"    # was {fmt_memory(s['asked'])}" if s['asked'] else '')
+              + f"; p99 peak {fmt_memory(s['peak_p99'])} over {s['completed']} tasks")
+        if hours:
+            print(f"    time: {hours}.h    # twice the longest run, {fmt_duration(s['time_max'])}")
+        # Peak of each id over every attempt and config, above what the process now asks
+        outliers = {}
+        for t in s['rows']:
+            if t['peak_rss'] is None:
+                continue
+            section, ident = task_id(t, patterns)
+            need = gb_up(t['peak_rss'], margin)
+            if need > base and need > outliers.get((section, ident), (0, None))[0]:
+                outliers[(section, ident)] = (need, t)
+        for section in ('families', 'samples', None):
+            items = sorted((k[1], v) for k, v in outliers.items() if k[0] == section)
+            if not items:
+                continue
+            if section:
+                print(f"    {section}:")
+            else:
+                print("    # by tag, which does not say the family or sample: move each under one")
+            for ident, (need, t) in items:
+                note = f"    # peak {fmt_memory(t['peak_rss'])}" + (f", tag {t['tag']}" if t['tag'] != ident else '')
+                entry = f"'{ident}': {{ memory: {need}.GB }}{note}"
+                print(f"      {entry}" if section else f"    #   {entry}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('paths', nargs='+', metavar='PATH',
+                        help='a launch directory (its reports/trace_*.txt are read), or trace files')
+    parser.add_argument('--process', metavar='REGEX', help='only processes whose name matches REGEX')
+    parser.add_argument('--top', type=int, default=5, metavar='N',
+                        help='heaviest tasks to list per process (default: 5; 0 for none)')
+    parser.add_argument('--suggest', action='store_true', help='also print a resources: block to review')
+    parser.add_argument('--margin', type=float, default=1.25,
+                        help='headroom over the peak used by --suggest (default: 1.25)')
+    args = parser.parse_args()
+
+    traces = find_traces(args.paths)
+    tasks = read_tasks(traces)
+    if args.process:
+        wanted = re.compile(args.process)
+        tasks = [t for t in tasks if wanted.fullmatch(t['process'])]
+    if not tasks:
+        sys.exit(f"ERROR: no task that ran in {len(traces)} trace file(s)")
+    print(f"{len(tasks)} tasks from {len(traces)} trace file(s)\n")
+
+    summaries = summarise(tasks)
+    print_table(summaries)
+    if args.top:
+        print_top(summaries, args.top)
+    if args.suggest:
+        print_suggestion(summaries, tag_patterns(MODULES), args.margin)
+
+
+if __name__ == '__main__':
+    main()

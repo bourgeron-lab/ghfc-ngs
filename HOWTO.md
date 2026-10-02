@@ -127,7 +127,9 @@ Several parameters could be tuned, but the default values should be good for Pas
 
 > **Important**
 >
-> the nextflow.config from the github is used by default, but you can override it with the `--config` option of the runner.
+> the nextflow.config from the github is used by default, but you can add to it with the `--config` option of the runner.
+>
+> For a cohort's cpus, memory and time, prefer a `resources:` block in its parameters file: it can size one family or sample, or every barcode matching a glob, and it is checked when the run starts. See [`resources` in documentation/params.md](documentation/params.md#resources-per-cohort-cpus-memory-and-time).
 
 In this file, the user can define the default resources for a process (*e.g.* currently 1 cpu and 4 GB of memory). It is also possible to adjust process-specific requirements.
 
