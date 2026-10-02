@@ -79,7 +79,13 @@ workflow DEEPVARIANT_SAMPLE {
     )
     
     // Generate VAF bedgraphs from VCF files (newly created + existing without VAF)
-    vcfs_for_vaf = POSTPROCESS_VARIANTS.out.vcf.mix(samples_need_vaf_only)
+    // Not at all when vaf_bedgraph is off: the planner then no longer counts the bedgraph as an
+    // output, so nothing would ever look for what this produced
+    def make_vaf_bedgraph = params.vaf_bedgraph == null ? true :
+        !(params.vaf_bedgraph.toString().trim().toLowerCase() in ['', 'false', 'no', '0', 'null'])
+    vcfs_for_vaf = make_vaf_bedgraph
+        ? POSTPROCESS_VARIANTS.out.vcf.mix(samples_need_vaf_only)
+        : Channel.empty()
     VCF2BEDGRAPH_VAF(vcfs_for_vaf)
     
     // Combine newly created outputs with existing ones

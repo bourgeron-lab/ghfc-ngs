@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+# Self-contained coverage for spark_import.
+#
+# Builds a fake SPARK download (empty gVCFs, a metadata file starting with the two real rows
+# of the release), imports it, and asserts the exact pedigree, report and links. Then imports
+# again to prove a rerun changes nothing. Needs only python3.
+#
+#   scripts/cohorts/spark/spark_import_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+spark_import="${here}/spark_import"
+work=$(cd "$(mktemp -d)" && pwd -P)   # physical path: macOS /var is a link to /private/var
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# SP0000003/SP0000002: the first two rows of the real file (a son and his mother, father absent).
+# SF0000010: a quad whose father has no gVCF, so he must vanish and his children become
+#            father-less, and whose second child has an empty asd and an unknown sex.
+# SF0000020: one individual with no gVCF at all - the family must vanish with him.
+# SP0000031: listed under a mother who sits in another family.
+# SP0000099: a gVCF with no metadata row, which is ignored.
+printf '%s\n' \
+  $'spid\tsfid\tfather\tmother\tsex\tasd\tage_m\tbatch\tsequencing_date\tseq_pct_contamination\tseq_het_hom_ratio\tseq_pct_target_20x\tgenotyping\txhmm_batch\tidentical_twins\tin_spark_wgs\tin_searchlight' \
+  $'SP0000003\tSF0000003\t0\tSP0000002\tMale\tTrue\t123\tWES1\t2018-07-27\t0.111\t2.07\t90.0\tGSA-v1\t3\t\tFalse\tFalse' \
+  $'SP0000002\tSF0000003\t0\t0\tFemale\tFalse\t369\tWES1\t2018-08-29\t0.055\t2.41\t97.0\tGSA-v1\t3\t\tFalse\tFalse' \
+  $'SP0000011\tSF0000010\t0\t0\tMale\tFalse\t400\tWES1\t\t\t\t\t\t\t\tFalse\tFalse' \
+  $'SP0000012\tSF0000010\t0\t0\tFemale\tFalse\t400\tWES1\t\t\t\t\t\t\t\tFalse\tFalse' \
+  $'SP0000013\tSF0000010\tSP0000011\tSP0000012\tFemale\tTrue\t100\tWES2\t\t\t\t\t\t\tSP0000014\tFalse\tFalse' \
+  $'SP0000014\tSF0000010\tSP0000011\tSP0000012\t\t\t100\tWES2\t\t\t\t\t\t\tSP0000013\tFalse\tFalse' \
+  $'SP0000021\tSF0000020\t0\t0\tMale\tTrue\t90\tWES1\t\t\t\t\t\t\t\tFalse\tFalse' \
+  $'SP0000031\tSF0000030\t0\tSP0000002\tMale\tTrue\t90\tWES1\t\t\t\t\t\t\t\tFalse\tFalse' \
+  > metadata.tsv
+
+mkdir -p dl/batch1 dl/batch2
+for id in SP0000003 SP0000002 SP0000031; do : > "dl/batch1/${id}.gvcf.gz"; : > "dl/batch1/${id}.gvcf.gz.tbi"; done
+for id in SP0000012 SP0000013 SP0000014 SP0000099; do : > "dl/batch2/${id}.g.vcf.gz"; : > "dl/batch2/${id}.g.vcf.gz.tbi"; done
+rm dl/batch2/SP0000014.g.vcf.gz.tbi   # an unindexed gVCF is linked but reported
+
+out=$("${spark_import}" --metadata metadata.tsv --gvcf-dir dl --data data --cohort SPARK)
+echo "${out}"
+
+expected=$'FID\tbarcode\tfather\tmother\tsex\tphenotype
+SF0000003\tSP0000002\t0\t0\t2\t1
+SF0000003\tSP0000003\t0\tSP0000002\t1\t2
+SF0000010\tSP0000012\t0\t0\t2\t1
+SF0000010\tSP0000013\t0\tSP0000012\t2\t2
+SF0000010\tSP0000014\t0\tSP0000012\t0\t0
+SF0000030\tSP0000031\t0\t0\t1\t2'
+[[ "$(cat data/cohorts/SPARK/SPARK.pedigree.tsv)" == "${expected}" ]] \
+  || fail "pedigree differs:"$'\n'"$(diff <(echo "${expected}") data/cohorts/SPARK/SPARK.pedigree.tsv)"
+
+grep -q $'^SP0000011\tSF0000010\tno gVCF$' data/cohorts/SPARK/SPARK.import_dropped.tsv || fail "SP0000011 not reported"
+grep -q $'^SP0000021\tSF0000020\tno gVCF$' data/cohorts/SPARK/SPARK.import_dropped.tsv || fail "SP0000021 not reported"
+grep -q 'SP0000031: mother SP0000002 is in family SF0000003' <<<"${out}" || fail "cross-family parent not noted"
+grep -q 'have members from more than one batch, e.g. SF0000010' <<<"${out}" || fail "split batch not noted"
+grep -q '1 gVCFs have no metadata row' <<<"${out}" || fail "unlisted gVCF not reported"
+grep -q '1 gVCFs have no .tbi' <<<"${out}" || fail "missing index not reported"
+
+# Sharded exactly as lib/Sharding.groovy: last character, then the one before it
+link=data/samples/3/0/SP0000003/deepvariant/SP0000003.g.vcf.gz
+[[ -L "${link}" && "$(readlink "${link}")" == "${work}/dl/batch1/SP0000003.gvcf.gz" ]] || fail "gVCF link wrong: ${link}"
+[[ -L "${link}.tbi" && "$(readlink "${link}.tbi")" == "${work}/dl/batch1/SP0000003.gvcf.gz.tbi" ]] || fail "index link wrong"
+[[ -L data/samples/4/1/SP0000014/deepvariant/SP0000014.g.vcf.gz ]] || fail "unindexed gVCF not linked"
+[[ ! -e data/samples/4/1/SP0000014/deepvariant/SP0000014.g.vcf.gz.tbi ]] || fail "index invented for SP0000014"
+[[ ! -e data/samples/9/9/SP0000099 ]] || fail "gVCF without metadata was linked"
+
+# A rerun is a no-op
+before=$(cd data && find . | sort; cat cohorts/SPARK/SPARK.pedigree.tsv)
+out=$("${spark_import}" --metadata metadata.tsv --gvcf-dir dl --data data --cohort SPARK)
+after=$(cd data && find . | sort; cat cohorts/SPARK/SPARK.pedigree.tsv)
+[[ "${before}" == "${after}" ]] || fail "rerun changed the tree"
+grep -q 'links: 0 created, 11 already in place' <<<"${out}" || fail "rerun reported: ${out}"
+grep -q '0 added, 0 removed' <<<"${out}" || fail "rerun pedigree diff: ${out}"
+
+# A link pointing somewhere else is never replaced, and fails the run
+rm data/samples/3/0/SP0000003/deepvariant/SP0000003.g.vcf.gz
+ln -s /elsewhere data/samples/3/0/SP0000003/deepvariant/SP0000003.g.vcf.gz
+if "${spark_import}" --metadata metadata.tsv --gvcf-dir dl --data data --cohort SPARK > out.txt; then
+  fail "conflicting link did not fail the run"
+fi
+[[ "$(readlink data/samples/3/0/SP0000003/deepvariant/SP0000003.g.vcf.gz)" == /elsewhere ]] || fail "conflicting link replaced"
+
+# A dry run writes nothing
+"${spark_import}" --metadata metadata.tsv --gvcf-dir dl --data dry --cohort SPARK --dry-run > /dev/null
+[[ ! -e dry ]] || fail "dry run wrote files"
+
+echo "spark_import: all checks passed"

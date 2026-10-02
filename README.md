@@ -69,6 +69,18 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 steps: ["extractor"]  # Requires existing data and extractor_tsvs_list
 ```
 
+**Cohort Received as gVCFs Only (e.g. exomes, no CRAM):**
+```bash
+steps: ["deepvariant_family", "annotation", "wombat"]
+vaf_bedgraph: false        # the gVCF alone counts as a called sample
+glnexus_bed: "targets.bed" # exomes: joint-call the capture targets only
+```
+Each gVCF must sit at `samples/{S1}/{S2}/<barcode>/deepvariant/<barcode>.g.vcf.gz` with its
+`.tbi`, and the pedigree may only list individuals that have one. A member without one is sent
+to alignment, and with no CRAM to align from, the run stops. For SPARK,
+[`scripts/cohorts/spark/spark_import`](scripts/cohorts/spark/spark_import) builds both from the
+download and `sample_metadata.tsv`; see [`params_example/SPARK.params.yml`](params_example/SPARK.params.yml).
+
 **Incremental Analysis:**
 - Start with `alignment` only, then add `deepvariant_sample` when ready
 - Pipeline automatically detects existing files and resumes from where it left off

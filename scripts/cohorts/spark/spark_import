@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Lay SPARK's DeepVariant gVCFs out as a ghfc-ngs cohort, and write its pedigree from them.
+
+SPARK arrives as one gVCF per individual and a sample_metadata.tsv, with no CRAM. ghfc-ngs
+wants each gVCF at
+
+    <data>/samples/<S1>/<S2>/<spid>/deepvariant/<spid>.g.vcf.gz   (+ .tbi)
+
+and a six-column pedigree at <data>/cohorts/<cohort>/<cohort>.pedigree.tsv. This builds both,
+and is safe to run again whenever SPARK releases more samples: links that already point at the
+right file are left alone, and the pedigree is rewritten from the current set of gVCFs.
+
+The pedigree only lists individuals that have a gVCF. That is not tidiness: the pipeline treats
+a pedigree member with no gVCF as something to align and call, and with no CRAM to align from
+it stops the run. Everyone left out is listed, with the reason, in the report next to it.
+
+    scripts/cohorts/spark/spark_import \\
+        --metadata sample_metadata.tsv --gvcf-dir /path/to/spark/gvcfs \\
+        --data /pasteur/.../WES/SPARK-GRCh38 [--cohort SPARK] [--dry-run]
+
+Run with --check N on the cluster (needs bcftools) to confirm, on N gVCFs, that the sample
+name inside the file is its spid and that variant records carry the DP and AD the family
+BCFs and wombat read.
+
+Stdlib only, so it runs on the login node without an environment.
+"""
+
+import argparse
+import csv
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter, defaultdict
+
+GVCF_SUFFIXES = ('.g.vcf.gz', '.gvcf.gz')
+PEDIGREE_HEADER = ['FID', 'barcode', 'father', 'mother', 'sex', 'phenotype']
+SEX = {'male': '1', 'female': '2'}
+# ASD status is the phenotype. Anything that is not a clear True/False is unknown, not
+# unaffected - an unaffected call would make the individual a control in every wombat config.
+PHENOTYPE = {'true': '2', 'false': '1'}
+MISSING_PHENOTYPE = '0'
+
+
+def shards(identifier):
+    """The two shard directories of an ID. Must stay identical to lib/Sharding.groovy."""
+    stripped = re.sub(r'[-._]', '', identifier)
+    if len(stripped) < 2:
+        raise ValueError(f"ID '{identifier}' is too short to shard")
+    return stripped[-1].upper(), stripped[-2].upper()
+
+
+def sample_dir(data, barcode):
+    s1, s2 = shards(barcode)
+    return os.path.join(data, 'samples', s1, s2, barcode)
+
+
+def find_gvcfs(gvcf_dir, id_regex):
+    """spid -> [gVCF path, ...], scanning gvcf_dir recursively."""
+    pattern = re.compile(id_regex)
+    found = defaultdict(list)
+    for root, _dirs, files in os.walk(gvcf_dir, followlinks=True):
+        for name in files:
+            if not name.endswith(GVCF_SUFFIXES):
+                continue
+            match = pattern.search(name)
+            if match:
+                found[match.group(1)].append(os.path.join(root, name))
+    return found
+
+
+def find_index(gvcf):
+    """The tabix index next to a gVCF, under either naming SPARK might use."""
+    candidates = [gvcf + '.tbi']
+    for suffix in GVCF_SUFFIXES:
+        if gvcf.endswith(suffix):
+            candidates.append(gvcf[:-len('.gz')] + '.tbi')
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def read_metadata(path):
+    with open(path, newline='') as fh:
+        reader = csv.DictReader(fh, delimiter='\t')
+        missing = [col for col in ('spid', 'sfid', 'father', 'mother', 'sex', 'asd')
+                   if col not in (reader.fieldnames or [])]
+        if missing:
+            sys.exit(f"ERROR: {path} has no column(s) {', '.join(missing)}")
+        return [{k: (v or '').strip() for k, v in row.items() if k is not None} for row in reader]
+
+
+def build_pedigree(rows, gvcfs):
+    """Return (pedigree rows, dropped [(spid, sfid, reason)], notes [str])."""
+    dropped = []
+    notes = []
+
+    seen = {}
+    for row in rows:
+        spid = row['spid']
+        if not spid:
+            dropped.append(('', row.get('sfid', ''), 'no spid'))
+            continue
+        if spid in seen:
+            dropped.append((spid, row['sfid'], f"duplicate row (kept the one in family {seen[spid]['sfid']})"))
+            continue
+        seen[spid] = row
+
+    kept = {}
+    for spid, row in seen.items():
+        if not row['sfid'] or row['sfid'] == '0':
+            dropped.append((spid, row['sfid'], 'no family ID'))
+        elif spid not in gvcfs:
+            dropped.append((spid, row['sfid'], 'no gVCF'))
+        elif len(gvcfs[spid]) > 1:
+            dropped.append((spid, row['sfid'], 'several gVCFs: ' + ', '.join(sorted(gvcfs[spid]))))
+        else:
+            kept[spid] = row
+
+    def parent(row, column):
+        pid = row[column]
+        if not pid or pid == '0':
+            return '0'
+        if pid not in kept:
+            # Wombat and slivar resolve parents against the pedigree's own rows, so a parent
+            # with no gVCF has to become a founder edge rather than a dangling ID
+            return '0'
+        if kept[pid]['sfid'] != row['sfid']:
+            notes.append(f"{row['spid']}: {column} {pid} is in family {kept[pid]['sfid']}, not "
+                         f"{row['sfid']} - set to 0")
+            return '0'
+        return pid
+
+    pedigree = []
+    for spid, row in kept.items():
+        pedigree.append([
+            row['sfid'], spid,
+            parent(row, 'father'), parent(row, 'mother'),
+            SEX.get(row['sex'].lower(), '0'),
+            PHENOTYPE.get(row['asd'].lower(), MISSING_PHENOTYPE),
+        ])
+    # Grouped by family, so the pipeline's per-family extraction reads contiguous rows
+    pedigree.sort(key=lambda r: (r[0], r[1]))
+
+    twins = sorted({row['identical_twins'] for row in kept.values() if row.get('identical_twins')})
+    if twins:
+        notes.append(f"{len(twins)} identical-twin annotation(s) kept as given (identical_twins column)")
+    batches = defaultdict(set)
+    for row in kept.values():
+        if row.get('batch'):
+            batches[row['sfid']].add(row['batch'])
+    split = sorted(fid for fid, b in batches.items() if len(b) > 1)
+    if split:
+        notes.append(f"{len(split)} families have members from more than one batch, e.g. "
+                     f"{', '.join(split[:5])}")
+    return pedigree, dropped, notes
+
+
+def link(target, link_path, dry_run, stats, conflicts):
+    """Symlink link_path -> target, without ever replacing something that is not ours."""
+    target = os.path.abspath(target)
+    if os.path.islink(link_path):
+        if os.path.realpath(link_path) == os.path.realpath(target):
+            stats['unchanged'] += 1
+            return
+        conflicts.append(f"{link_path} already links to {os.readlink(link_path)}, not {target}")
+        return
+    if os.path.exists(link_path):
+        conflicts.append(f"{link_path} exists and is not a link - left alone")
+        return
+    stats['created'] += 1
+    if not dry_run:
+        os.makedirs(os.path.dirname(link_path), exist_ok=True)
+        os.symlink(target, link_path)
+
+
+def write_tsv(path, header, rows, dry_run):
+    if dry_run:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', newline='') as fh:
+        writer = csv.writer(fh, delimiter='\t', lineterminator='\n')
+        writer.writerow(header)
+        writer.writerows(rows)
+    os.replace(tmp, path)
+
+
+def check_gvcfs(pedigree, data, n, seed):
+    """Spot-check N linked gVCFs with bcftools. Returns a list of problems."""
+    if not shutil.which('bcftools'):
+        return ['--check needs bcftools on PATH']
+    problems = []
+    barcodes = [row[1] for row in pedigree]
+    random.Random(seed).shuffle(barcodes)
+    for barcode in barcodes[:n]:
+        gvcf = os.path.join(sample_dir(data, barcode), 'deepvariant', f'{barcode}.g.vcf.gz')
+        names = subprocess.run(['bcftools', 'query', '-l', gvcf], capture_output=True, text=True)
+        if names.returncode != 0:
+            problems.append(f"{barcode}: bcftools could not read {gvcf}: {names.stderr.strip()}")
+            continue
+        if names.stdout.split() != [barcode]:
+            problems.append(f"{barcode}: sample name in the gVCF is {names.stdout.split()}, not "
+                            f"[{barcode}] - GLnexus and wombat match samples by that name")
+        # First variant record, not a reference block: those carry MIN_DP and no AD
+        view = subprocess.Popen(['bcftools', 'view', '-H', '-e', 'ALT="<*>"', gvcf],
+                                stdout=subprocess.PIPE, text=True)
+        first = view.stdout.readline()
+        view.kill()
+        view.wait()
+        if not first:
+            problems.append(f"{barcode}: no variant record found")
+            continue
+        fields = first.rstrip('\n').split('\t')
+        fmt = fields[8].split(':')
+        for key in ('GT', 'GQ', 'DP', 'AD'):
+            if key not in fmt:
+                problems.append(f"{barcode}: variant records have FORMAT {fields[8]}, without "
+                                f"{key} - the family BCF query reads GT:DP:GQ:AD")
+                break
+        if not fields[0].startswith('chr'):
+            problems.append(f"{barcode}: contig '{fields[0]}' has no 'chr' prefix - check it "
+                            f"against ref, gnomAD and the VEP cache")
+    return problems
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('--metadata', required=True, help='SPARK sample_metadata.tsv')
+    parser.add_argument('--gvcf-dir', required=True, help='directory holding the gVCFs (searched recursively)')
+    parser.add_argument('--data', required=True, help='ghfc-ngs data root for this cohort')
+    parser.add_argument('--cohort', default='SPARK', help='cohort name (default: SPARK)')
+    parser.add_argument('--id-regex', default=r'^(SP[0-9A-Za-z]+?)[._]',
+                        help='regex whose first group is the spid in a gVCF file name '
+                             '(default: %(default)s)')
+    parser.add_argument('--index', action='store_true',
+                        help='run tabix for gVCFs that have no .tbi, writing it next to the link')
+    parser.add_argument('--check', type=int, default=0, metavar='N',
+                        help='spot-check N gVCFs with bcftools after linking')
+    parser.add_argument('--seed', type=int, default=0, help='seed for picking --check samples')
+    parser.add_argument('--dry-run', action='store_true', help='report only; write nothing')
+    args = parser.parse_args()
+
+    data = os.path.abspath(args.data)
+    cohort_dir = os.path.join(data, 'cohorts', args.cohort)
+    pedigree_path = os.path.join(cohort_dir, f'{args.cohort}.pedigree.tsv')
+    report_path = os.path.join(cohort_dir, f'{args.cohort}.import_dropped.tsv')
+
+    rows = read_metadata(args.metadata)
+    gvcfs = find_gvcfs(args.gvcf_dir, args.id_regex)
+    pedigree, dropped, notes = build_pedigree(rows, gvcfs)
+
+    in_metadata = {row['spid'] for row in rows}
+    unlisted = sorted(set(gvcfs) - in_metadata)
+
+    stats = Counter()
+    conflicts = []
+    no_index = []
+    for _fid, barcode, *_rest in pedigree:
+        gvcf = gvcfs[barcode][0]
+        dest = os.path.join(sample_dir(data, barcode), 'deepvariant', f'{barcode}.g.vcf.gz')
+        link(gvcf, dest, args.dry_run, stats, conflicts)
+        index = find_index(gvcf)
+        if index:
+            link(index, dest + '.tbi', args.dry_run, stats, conflicts)
+        elif os.path.exists(dest + '.tbi'):
+            stats['unchanged'] += 1
+        elif args.index and not args.dry_run:
+            subprocess.run(['tabix', '-p', 'vcf', dest], check=True)
+            stats['indexed'] += 1
+        else:
+            no_index.append(barcode)
+
+    previous = set()
+    if os.path.exists(pedigree_path):
+        with open(pedigree_path) as fh:
+            previous = {line.split('\t')[1] for line in fh if line.strip() and not line.startswith('FID\t')}
+    current = {row[1] for row in pedigree}
+
+    write_tsv(pedigree_path, PEDIGREE_HEADER, pedigree, args.dry_run)
+    write_tsv(report_path, ['spid', 'sfid', 'reason'], dropped, args.dry_run)
+
+    families = {row[0] for row in pedigree}
+    verb = 'would write' if args.dry_run else 'wrote'
+    print(f"{len(rows)} metadata rows, {sum(len(v) for v in gvcfs.values())} gVCFs found")
+    print(f"pedigree: {verb} {len(pedigree)} individuals in {len(families)} families to {pedigree_path}")
+    if previous:
+        print(f"  vs the existing pedigree: {len(current - previous)} added, {len(previous - current)} removed")
+    reasons = Counter(reason.split(' (')[0].split(':')[0] for _s, _f, reason in dropped)
+    print(f"dropped: {len(dropped)} ({', '.join(f'{n} {r}' for r, n in reasons.most_common()) or 'none'})"
+          + (f" - {verb} {report_path}" if dropped else ''))
+    print(f"links: {stats['created']} {'to create' if args.dry_run else 'created'}, "
+          f"{stats['unchanged']} already in place" + (f", {stats['indexed']} indexed" if stats['indexed'] else ''))
+    for note in notes:
+        print(f"note: {note}")
+    if unlisted:
+        print(f"warning: {len(unlisted)} gVCFs have no metadata row and were ignored, e.g. {', '.join(unlisted[:5])}")
+    if no_index:
+        print(f"warning: {len(no_index)} gVCFs have no .tbi - the pipeline will not see them until they "
+              f"are indexed (rerun with --index), e.g. {', '.join(no_index[:5])}")
+    if conflicts:
+        print(f"warning: {len(conflicts)} existing paths left alone:")
+        for conflict in conflicts[:20]:
+            print(f"  {conflict}")
+
+    problems = []
+    if args.check and not args.dry_run:
+        problems = check_gvcfs(pedigree, data, args.check, args.seed)
+        print(f"check: {min(args.check, len(pedigree))} gVCFs spot-checked, {len(problems)} problem(s)")
+        for problem in problems:
+            print(f"  {problem}")
+
+    sys.exit(1 if conflicts or problems else 0)
+
+
+if __name__ == '__main__':
+    main()
