@@ -4,7 +4,8 @@
 #
 # Builds a fake SPARK download (empty gVCFs, a metadata file starting with the two real rows
 # of the release), imports it, and asserts the exact pedigree, report and links. Then imports
-# again to prove a rerun changes nothing. Needs only python3.
+# again to prove a rerun changes nothing. Needs only python3; --check is tested too where
+# bcftools, bgzip and tabix are on PATH.
 #
 #   scripts/cohorts/spark/spark_import_test
 
@@ -88,5 +89,47 @@ fi
 # A dry run writes nothing
 "${spark_import}" --metadata metadata.tsv --gvcf-dir dl --data dry --cohort SPARK --dry-run > /dev/null
 [[ ! -e dry ]] || fail "dry run wrote files"
+
+# --check against real gVCFs, only where bcftools is available. The records are in the exact
+# shape DeepVariant writes them: every variant record carries <*> as an extra alt (G,<*>),
+# which is what a filter that only looks for <*> gets wrong.
+if command -v bcftools > /dev/null && command -v bgzip > /dev/null && command -v tabix > /dev/null; then
+  mkdir -p chk/dl
+  make_gvcf() { # spid, sample name in the file, variant record FORMAT:values
+    {
+      printf '%s\n' '##fileformat=VCFv4.2' '##contig=<ID=chr1,length=248956422>' \
+        '##ALT=<ID=*,Description="Represents any possible alternative allele">' \
+        '##FILTER=<ID=PASS,Description="All filters passed">' \
+        '##INFO=<ID=END,Number=1,Type=Integer,Description="End position">' \
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">' \
+        '##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">' \
+        '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">' \
+        '##FORMAT=<ID=MIN_DP,Number=1,Type=Integer,Description="Minimum DP">' \
+        '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">' \
+        '##FORMAT=<ID=VAF,Number=A,Type=Float,Description="Variant allele fraction">' \
+        '##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled likelihoods">'
+      printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "$2"
+      printf 'chr1\t69436\t.\tT\t<*>\t0\t.\tEND=69439\tGT:GQ:MIN_DP:PL\t0/0:48:16:0,48,479\n'
+      printf 'chr1\t69440\t.\tT\tG,<*>\t38.8\tPASS\t.\t%b\n' "$3"   # %b: $3 carries a \t
+      printf 'chr1\t69441\t.\tA\t<*>\t0\t.\tEND=69466\tGT:GQ:MIN_DP:PL\t0/0:48:16:0,48,479\n'
+    } | bgzip -c > "chk/dl/$1.gvcf.gz"
+    tabix -p vcf "chk/dl/$1.gvcf.gz"
+  }
+  make_gvcf SP0000003 SP0000003 'GT:GQ:DP:AD:VAF:PL\t1/1:36:17:0,17,0:1,0:38,39,0,990,990,990'
+  make_gvcf SP0000002 WRONGNAME 'GT:GQ:DP:AD:VAF:PL\t0/1:36:17:8,9,0:0.5,0:38,0,39,990,990,990'
+  make_gvcf SP0000004 SP0000004 'GT:GQ:PL\t0/1:36:38,0,39,990,990,990'
+  printf 'spid\tsfid\tfather\tmother\tsex\tasd\nSP0000003\tSF1\t0\tSP0000002\tMale\tTrue\nSP0000002\tSF1\t0\t0\tFemale\tFalse\nSP0000004\tSF1\t0\t0\tMale\tFalse\n' > chk/m.tsv
+
+  if "${spark_import}" --metadata chk/m.tsv --gvcf-dir chk/dl --data chk/data --check 10 > chk/out.txt; then
+    fail "--check passed with a misnamed gVCF and one without DP"
+  fi
+  grep -q 'check: 3 gVCFs spot-checked, 2 problem(s)' chk/out.txt || fail "--check counted: $(cat chk/out.txt)"
+  grep -q "SP0000002: sample name in the gVCF is \['WRONGNAME'\]" chk/out.txt || fail "misnamed gVCF not caught"
+  grep -q 'SP0000004: variant records have FORMAT GT:GQ:PL, without DP' chk/out.txt || fail "missing DP not caught"
+  ! grep -q 'SP0000003' chk/out.txt || fail "a good DeepVariant gVCF was reported: $(grep SP0000003 chk/out.txt)"
+  ! grep -q 'no variant record found' chk/out.txt || fail "G,<*> variant records were skipped as reference blocks"
+else
+  echo "bcftools/bgzip/tabix not on PATH - skipping the --check tests"
+fi
 
 echo "spark_import: all checks passed"
