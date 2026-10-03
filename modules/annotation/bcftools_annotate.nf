@@ -53,7 +53,9 @@ process BCFTOOLS_ANNOTATE {
   base_name = vcf.baseName.replaceAll(/\.vcf$/, '')
   output_bcf = "${base_name}.annotated.bcf"
   
-  // Build the annotation command chain
+  // Build the annotation command chain. Each pass reindexes input.bcf with -f: without it,
+  // bcftools refuses to replace an index that is not older than the file, to the second, and
+  // a quick pass (a BED mark-sites over an exome) finishes within the second of the last index.
   def annotation_commands = annotation_list.collect { annot_file ->
     // Check if file is bed.gz or bcf
     def is_bed = annot_file.endsWith('.bed.gz')
@@ -76,7 +78,7 @@ process BCFTOOLS_ANNOTATE {
         input.bcf
       
       mv tmp_annotated.bcf input.bcf
-      bcftools index input.bcf
+      bcftools index -f input.bcf
       """
     } else {
       // Handle BCF files
@@ -90,7 +92,7 @@ process BCFTOOLS_ANNOTATE {
         input.bcf
       
       mv tmp_annotated.bcf input.bcf
-      bcftools index input.bcf
+      bcftools index -f input.bcf
       """
     }
   }.join('\n\n')
