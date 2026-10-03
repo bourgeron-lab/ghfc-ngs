@@ -403,8 +403,9 @@ if ('ancestry' in pipeline_steps) {
 }
 
 // The cohort's `resources:` overrides are only read by sized() in nextflow.config, task by task,
-// so a typo there would surface hours into the run, or - for a key that matches nothing - never
-def resource_check = ResourceOverrides.check(params.get('resources'),
+// so a typo there would surface hours into the run, or - for a key that matches nothing - never.
+// containsKey first: reading an unset params key, even with get(), logs a warning every run.
+def resource_check = ResourceOverrides.check(params.containsKey('resources') ? params.resources : null,
     ResourceOverrides.processNames(projectDir.toFile()),
     [memory: params.max_memory, cpus: params.max_cpus, time: params.max_time])
 resource_check.warnings.each { log.warn(it) }
