@@ -8,10 +8,11 @@ steps: [
     "deepvariant_family",
     "annotation",
     "snvs_cohort",
+    "wombat_cohort",
     "wisecondorx",
     "wombat",
     # "ancestry",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"

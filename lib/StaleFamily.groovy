@@ -79,26 +79,31 @@ class StaleFamily {
      * exist, so nothing would rebuild them on their own - they would keep data from a call set
      * that no longer exists, indefinitely.
      *
+     * Grouped by the steps a run needs to rebuild them, as [steps: [...], paths: [...]]: a group
+     * is only safe to delete when every one of its steps is requested. The wisecondorx BED sits
+     * with the common-variant BCF, which is where the check for it has always been.
+     *
      * The cohort *ancestry* tables are not here: their `need_cohort_merge` is driven by the
      * per-family scores, so they already rebuild themselves.
      */
-    static List<String> cohortOutputs(String data, String cohortName, String vepConfigName,
-                                      List<String> wombatConfigNames, boolean includeWisecondorx) {
+    static List<Map> cohortOutputs(String data, String cohortName, String vepConfigName,
+                                   List<String> wombatConfigNames, boolean includeWisecondorx) {
         def cohort_dir = "${data}/cohorts/${cohortName}"
-        def paths = []
 
-        paths << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf".toString()
-        paths << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf.csi".toString()
-
-        configNames(wombatConfigNames).each { cfg ->
-            paths << "${cohort_dir}/wombat/${cohortName}.rare.${vepConfigName}.annotated.${cfg}.results.tsv".toString()
-        }
-
+        def common = []
+        common << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf".toString()
+        common << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf.csi".toString()
         if (includeWisecondorx) {
-            paths << "${cohort_dir}/svs/wisecondorx/${cohortName}_aberrations.bed".toString()
+            common << "${cohort_dir}/svs/wisecondorx/${cohortName}_aberrations.bed".toString()
         }
 
-        return paths
+        def wombat = configNames(wombatConfigNames).collect { cfg ->
+            "${cohort_dir}/wombat/${cohortName}.rare.${vepConfigName}.annotated.${cfg}.results.tsv".toString()
+        }
+
+        def groups = [[steps: ['annotation', 'snvs_cohort'], paths: common]]
+        if (wombat) groups << [steps: ['annotation', 'wombat', 'wombat_cohort'], paths: wombat]
+        return groups
     }
 
     /**
