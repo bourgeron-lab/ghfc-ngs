@@ -1,8 +1,9 @@
 # Parameters for SPARK: whole-exome, imported as DeepVariant v1.4.0 gVCFs, with no CRAM.
 #
-# Only family calling, annotation and wombat can run on gVCFs alone. Alignment, bedgraphs and
-# wisecondorx need the CRAMs; ancestry would fail the admixture coverage gate on exome gVCFs;
-# snvs_cohort is left out until the separately built common-variant cohort file replaces it.
+# Only family calling, annotation and wombat can run on gVCFs alone, and wombat_cohort merges
+# the wombat tables. Alignment, bedgraphs and wisecondorx need the CRAMs; ancestry would fail
+# the admixture coverage gate on exome gVCFs; snvs_cohort, the common-variant merge of every
+# family, is left out until the separately built common-variant cohort file replaces it.
 #
 # Before the first run, lay the gVCFs out and write the pedigree from sample_metadata.tsv:
 #     scripts/cohorts/spark/spark_import --metadata sample_metadata.tsv \
@@ -15,6 +16,7 @@ steps: [
     "deepvariant_family",
     "annotation",
     "wombat",
+    "wombat_cohort",
   ]
 
 # A data root of its own: SPARK's samples, families and reference never mix with the WGS tree

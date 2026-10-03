@@ -88,7 +88,7 @@ across many cohorts into one list without losing track of which is which.
   },
   "steps_requested": [
     "alignment", "deepvariant_sample", "deepvariant_family",
-    "annotation", "snvs_cohort", "wisecondorx", "wombat"
+    "annotation", "snvs_cohort", "wisecondorx", "wombat", "wombat_cohort"
   ],
   "completion_measured": "after",
   "outputs_may_be_incomplete": false,
@@ -101,6 +101,7 @@ across many cohorts into one list without losing track of which is which.
     "wisecondorx":        { "done": 850, "total": 941, "pct": 90.33 },
     "ancestry":           null,
     "snvs_cohort":        { "done": 1, "total": 1, "pct": 100.0 },
+    "wombat_cohort":      { "done": 1, "total": 1, "pct": 100.0 },
     "extractor":          null
   },
   "samples_without_cram": {
@@ -230,7 +231,10 @@ Other things worth knowing before you quote a number:
   so an individual blocked upstream appears in neither, and their sum understates the cohort.
 - **`alignment` counts CRAMs.** A sample whose CRAM exists but whose coverage bedgraph is missing
   still counts as done — only the bedgraph is regenerated, never the alignment.
-- **`snvs_cohort` is cohort-level**: `done` is 0 or 1 out of 1, not a count of families.
+- **`snvs_cohort` and `wombat_cohort` are cohort-level**: `done` is 0 or 1 out of 1, not a
+  count of families. `snvs_cohort` is the common-variant BCF, and `wombat_cohort` is every
+  wombat config's cohort table. A record written before `wombat_cohort` existed counted both
+  under `snvs_cohort`.
 - **`completion_measured: "before"` means the numbers predate the run.** A validation failure and
   a `running` record both report the tree as it was at launch.
 
@@ -238,7 +242,7 @@ Other things worth knowing before you quote a number:
 | --- | --- |
 | `alignment`, `deepvariant_sample`, `wisecondorx` | `pedigree.individuals` |
 | `deepvariant_family`, `annotation`, `wombat`, `ancestry` | `pedigree.families` |
-| `snvs_cohort` | 1 |
+| `snvs_cohort`, `wombat_cohort` | 1 |
 
 ## Samples without a CRAM
 
@@ -308,8 +312,9 @@ requested, or the run died before it could run.
   refused: no input data, an unindexed CRAM, or a step missing from `steps`. Fix that and run
   again with the same flag.
 - **`cohort_outputs_stale`** names cohort merges that are now wrong but were left in place
-  because this run could not rebuild them — `annotation` and `snvs_cohort` must both be in
-  `steps`. They still contain data from call sets that no longer exist.
+  because this run could not rebuild them. The common-variant BCF needs `annotation` and
+  `snvs_cohort` in `steps`, and the cohort wombat tables need `annotation`, `wombat` and
+  `wombat_cohort`. They still contain data from call sets that no longer exist.
 - **`rehearsal` is always `false` here.** A `-preview` or `-stub-run` deletes nothing and
   writes no state file at all, so a record describing a rehearsal cannot exist.
 - **`errors`** is normally empty. An entry means a file could not be deleted; if it names a

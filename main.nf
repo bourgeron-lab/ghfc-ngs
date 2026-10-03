@@ -16,6 +16,7 @@ include { DEEPVARIANT_SAMPLE } from './workflows/deepvariant_sample'
 include { DEEPVARIANT_FAMILY } from './workflows/deepvariant_family'
 include { ANNOTATION } from './workflows/annotation'
 include { SNVS_COHORT } from './workflows/snvs_cohort'
+include { WOMBAT_COHORT } from './workflows/wombat_cohort'
 include { WISECONDORX } from './workflows/wisecondorx'
 include { WOMBAT } from './workflows/wombat'
 include { EXTRACTOR } from './workflows/extractor'
@@ -101,6 +102,7 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
         snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
+        wombat_cohort:      CohortState.progress(plan.wombat_cohort.existing.contains('cohort') ? 1 : 0, 1),
         // The plan does no existence check for extractor at all, so there is no honest number
         extractor:          null
     ]
@@ -372,15 +374,21 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'snvs_cohort', 'wisecondorx', 'wombat', 'extractor', 'ancestry']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
     exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
+}
+
+// snvs_cohort used to merge the wombat tables too. A parameters file written then still lists
+// only snvs_cohort, and would stop refreshing its cohort wombat tables without a word.
+if ('snvs_cohort' in pipeline_steps && !('wombat_cohort' in pipeline_steps) && params.wombat_config_list) {
+    log.warn "snvs_cohort no longer merges the wombat tables into cohort tables: add wombat_cohort to steps for that"
 }
 
 // The ancestry step reads its panel and weights from paths that have no sensible
@@ -659,11 +667,7 @@ workflow {
     
     // Run cohort common variants merge if needed and allowed
     if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in pipeline_steps) {
-        def merge_tasks = []
-        if (analysis_plan.snvs_cohort.need_bcf_merge) merge_tasks.add("BCF merge")
-        def wombat_merge_count = analysis_plan.snvs_cohort.need_wombat_merges?.count { k, v -> v == true } ?: 0
-        if (wombat_merge_count > 0) merge_tasks.add("Wombat merge (${wombat_merge_count} configs)")
-        log.info "Running cohort: ${merge_tasks.join(' and ')}..."
+        log.info "Running cohort: common variants BCF merge..."
         
         // Get all available common filtered BCFs (existing + newly created)
         if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in pipeline_steps) {
@@ -674,15 +678,24 @@ workflow {
             all_available_common_bcfs = channels.existing_common_filtered_bcfs
         }
         
+        SNVS_COHORT(all_available_common_bcfs,
+                    analysis_plan.snvs_cohort.need_bcf_merge,
+                    families,
+                    analysis_plan.annotation.needed)
+    }
+    
+    // Run the cohort wombat merges if needed and allowed
+    if (analysis_plan.wombat_cohort.needed.size() > 0 && 'wombat_cohort' in pipeline_steps) {
+        def wombat_merge_count = analysis_plan.wombat_cohort.need_merges.count { k, v -> v == true }
+        log.info "Running cohort: wombat merge (${wombat_merge_count} configs)..."
+        
         // Get all available Wombat files (existing + newly created)
         all_available_wombat_files = channels.existing_wombat_files.mix(wombat_output ?: Channel.empty())
         
-        SNVS_COHORT(all_available_common_bcfs, all_available_wombat_files,
-                    analysis_plan.snvs_cohort.need_bcf_merge, 
-                    analysis_plan.snvs_cohort.need_wombat_merges,
-                    families,
-                    analysis_plan.annotation.needed,
-                    analysis_plan.wombat.needed)
+        WOMBAT_COHORT(all_available_wombat_files,
+                      analysis_plan.wombat_cohort.need_merges,
+                      families,
+                      analysis_plan.wombat.needed)
     }
     
     // Run WisecondorX predict if needed and allowed
@@ -890,7 +903,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         deepvariant_sample: [needed: planBucket(), existing: planBucket()],
         deepvariant_family: [needed: planBucket(), existing: planBucket()],
         annotation: [needed: planBucket(), existing: planBucket()],
-        snvs_cohort: [needed: planBucket(), existing: planBucket(), need_bcf_merge: false, need_wombat_merges: [:]],
+        snvs_cohort: [needed: planBucket(), existing: planBucket(), need_bcf_merge: false],
+        wombat_cohort: [needed: planBucket(), existing: planBucket(), need_merges: [:]],
         wisecondorx: [needed: planBucket(), existing: planBucket(), need_npz: planBucket(), need_predict: planBucket(), need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
         wombat: [needed: planBucket(), existing: planBucket(), need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
@@ -991,31 +1005,20 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
-    // Check existing cohort files (common BCF and Wombat TSVs)
+    // Check the existing cohort common BCF
     def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
     
     def cohort_bcf_exists = new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()
     
-    // Check wombat cohort files for each config
-    plan.snvs_cohort.need_wombat_merges = [:]
-    if (params.wombat_config_list && !params.wombat_config_list.isEmpty()) {
-        params.wombat_config_list.each { config_file ->
-            def config_name = config_file.replaceAll(/\.ya?ml$/, '')
-            def cohort_wombat_path = "${params.data}/cohorts/${params.cohort_name}/wombat/${params.cohort_name}.rare.${params.vep_config_name}.annotated.${config_name}.results.tsv"
-            plan.snvs_cohort.need_wombat_merges[config_name] = !new File(cohort_wombat_path).exists()
-        }
-    }
-    
-    if (cohort_bcf_exists && !plan.snvs_cohort.need_wombat_merges.any { k, v -> v == true }) {
+    if (cohort_bcf_exists) {
         plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
     } else {
         // Need cohort merge if any families have common filtered BCFs or will create them
         def families_with_common_bcfs = plan.annotation.existing + plan.annotation.needed
         if (families_with_common_bcfs.size() > 0) {
             plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
-            // Track what needs to be generated
-            plan.snvs_cohort.need_bcf_merge = !cohort_bcf_exists
+            plan.snvs_cohort.need_bcf_merge = true
         }
     }
     
@@ -1267,6 +1270,21 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
         }
     }
+
+    // Check the existing cohort wombat tables, one per config. Like the cohort BCF, a table that
+    // exists is not rebuilt when families are added - delete it to have it merged again.
+    (params.wombat_config_list ?: []).each { config_file ->
+        def config_name = config_file.replaceAll(/\.ya?ml$/, '')
+        def cohort_wombat_path = "${params.data}/cohorts/${params.cohort_name}/wombat/${params.cohort_name}.rare.${params.vep_config_name}.annotated.${config_name}.results.tsv"
+        plan.wombat_cohort.need_merges[config_name] = !new File(cohort_wombat_path).exists()
+    }
+    if (plan.wombat_cohort.need_merges) {
+        if (!plan.wombat_cohort.need_merges.any { k, v -> v == true }) {
+            plan.wombat_cohort.existing.add('cohort')  // Single cohort entry
+        } else if (plan.wombat.existing || plan.wombat.needed) {
+            plan.wombat_cohort.needed.add('cohort')  // Single cohort entry
+        }
+    }
     
     return plan
 }
@@ -1292,8 +1310,9 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
+    WOMBAT_COHORT: ${'wombat_cohort' in pipeline_steps ? "cohort wombat merges due: ${analysis_plan.wombat_cohort.need_merges.count { _k, v -> v == true }}" : 'Skipped (step not requested)'}
     == Common Variants ==
-    SNVS_COHORT: common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'} - wombat cohort merges due: ${analysis_plan.snvs_cohort.need_wombat_merges?.count { _k, v -> v == true } ?: 0}
+    SNVS_COHORT: ${'snvs_cohort' in pipeline_steps ? "common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == SVs Calling ==
     WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
@@ -1318,11 +1337,11 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.annotation.needed) {
         log.info "Families needing annotation (gnomAD annotation, filtering, and VEP): ${analysis_plan.annotation.needed.join(', ')}"
     }
-    if (analysis_plan.snvs_cohort.need_bcf_merge) {
+    if (analysis_plan.snvs_cohort.need_bcf_merge && 'snvs_cohort' in pipeline_steps) {
         log.info "Cohort needing common variant merge: Yes"
     }
-    def due_wombat_merges = analysis_plan.snvs_cohort.need_wombat_merges?.findAll { _k, v -> v == true }?.keySet()
-    if (due_wombat_merges) {
+    def due_wombat_merges = analysis_plan.wombat_cohort.need_merges.findAll { _k, v -> v == true }.keySet()
+    if (due_wombat_merges && 'wombat_cohort' in pipeline_steps) {
         log.info "Cohort wombat merges needed for: ${due_wombat_merges.join(', ')}"
     }
     if (analysis_plan.ancestry.needed) {
@@ -1515,36 +1534,38 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
     }
 
     // The cohort merges keep data from call sets that no longer exist, and the plan only
-    // checks that they exist - so nothing would ever rebuild them. But deleting them when
-    // this run cannot re-merge is worse than leaving them: SNVS_COHORT would rebuild from
-    // whatever families happen to be annotated right now and write a *new* wrong file with a
-    // fresh timestamp, which looks current and is not.
+    // checks that they exist - so nothing would ever rebuild them. But deleting one when this
+    // run cannot re-merge it is worse than leaving it: the merge would rebuild from whatever
+    // families happen to be done right now and write a *new* wrong file with a fresh
+    // timestamp, which looks current and is not. Each merge is rebuilt by its own steps.
     if (report.families_cleaned) {
-        def can_remerge = ['annotation', 'snvs_cohort'].every { step -> step in pipeline_steps }
-        def cohort_paths = StaleFamily.cohortOutputs(params.data as String, params.cohort_name as String,
-                                                     params.vep_config_name as String,
-                                                     wombat_configs, with_wisecondorx)
-        if (can_remerge) {
-            def deleted = []
-            def failed = [:]
-            log.info "Cohort ${params.cohort_name}: ${verb} the cohort merges, which contain data from the call sets just removed"
-            cohort_paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
-            failed.each { path, why ->
-                log.warn "Could not delete ${path}: ${why}"
-                report.errors.add("cohort: ${path}: ${why}".toString())
-            }
-            report.cohort_outputs_deleted = deleted.collect { new File(it).name }
-        } else {
-            def present = cohort_paths.findAll { new File(it).exists() }
-            report.cohort_outputs_stale = present.collect { new File(it).name }
-            if (present) {
-                log.warn """The cohort merges below still contain data from the call sets just removed, and were
-    left in place because this run cannot rebuild them - 'annotation' and 'snvs_cohort' must
-    both be in steps. Add them and run again, or delete these by hand once the families are
+        def deleted = []
+        def stale = []
+        StaleFamily.cohortOutputs(params.data as String, params.cohort_name as String,
+                                  params.vep_config_name as String,
+                                  wombat_configs, with_wisecondorx).each { group ->
+            if (group.steps.every { step -> step in pipeline_steps }) {
+                def failed = [:]
+                log.info "Cohort ${params.cohort_name}: ${verb} the cohort merges rebuilt by ${group.steps.join(', ')}, which contain data from the call sets just removed"
+                group.paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
+                failed.each { path, why ->
+                    log.warn "Could not delete ${path}: ${why}"
+                    report.errors.add("cohort: ${path}: ${why}".toString())
+                }
+            } else {
+                def present = group.paths.findAll { new File(it).exists() }
+                stale.addAll(present)
+                if (present) {
+                    log.warn """The cohort merges below still contain data from the call sets just removed, and were
+    left in place because this run cannot rebuild them - ${group.steps.collect { "'${it}'" }.join(', ')} must
+    all be in steps. Add them and run again, or delete these by hand once the families are
     re-annotated:
       ${present.join('\n      ')}"""
+                }
             }
         }
+        report.cohort_outputs_deleted = deleted.collect { new File(it).name }
+        report.cohort_outputs_stale = stale.collect { new File(it).name }
     }
 
     def n_clean = report.families_cleaned.size()
@@ -1596,8 +1617,8 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     // never touches the normalized or annotated call sets, so `steps: ["ancestry"]`
     // must not be blocked by families that have no norm.bcf yet. Every steps list
     // that includes one of the consumers below behaves exactly as before.
-    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'snvs_cohort', 'extractor']
-    def annotation_consumers = ['annotation', 'wombat', 'snvs_cohort']
+    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'extractor']
+    def annotation_consumers = ['annotation', 'wombat', 'wombat_cohort', 'snvs_cohort']
 
     // Check if deepvariant_family is needed but not available
     if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in pipeline_steps) &&
@@ -1610,6 +1631,13 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         annotation_consumers.any { step -> step in pipeline_steps }) {
         errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
+
+    // A cohort wombat table is only merged from every family's table, so without the wombat
+    // step a family that has none would only make the merge skip itself with a warning
+    if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in pipeline_steps) && 'wombat_cohort' in pipeline_steps &&
+        analysis_plan.wombat_cohort.needed) {
+        errors.add("Wombat step is required for ${analysis_plan.wombat.needed.size()} families but not included in steps parameter")
+    }
     
     if (errors) {
         log.error """
@@ -1619,7 +1647,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor, ancestry
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")
@@ -1953,7 +1981,7 @@ def createChannels(analysis_plan, resolved_inputs) {
         [fid, bcf, file("${bcf}.csi")]
     })
 
-    // Create channel for existing Wombat files (output from wombat, used by snvs_cohort)
+    // Create channel for existing Wombat files (output from wombat, used by wombat_cohort)
     if (params.wombat_config_list && !params.wombat_config_list.isEmpty()) {
         channels.existing_wombat_files = Channel.fromList(params.wombat_config_list)
             .map { config_file ->

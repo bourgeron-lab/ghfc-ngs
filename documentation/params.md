@@ -181,12 +181,12 @@ its configuration, and so cannot be changed by anything that happens during the 
 ## `steps`: the key that decides everything else
 
 ```yaml
-steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "snvs_cohort"]
+steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort"]
 ```
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these nine:
+the command line. Every entry must be one of these ten:
 
 | Step | Produces |
 |---|---|
@@ -195,7 +195,8 @@ the command line. Every entry must be one of these nine:
 | `deepvariant_family` | Joint family calls via GLnexus, normalised, plus per-family pedigrees |
 | `annotation` | gnomAD frequencies, the rare/common split, VEP, and extra bcftools annotations |
 | `wombat` | PyWombat filtering of the annotated BCF, one TSV per config |
-| `snvs_cohort` | Cohort-level merge of common variants and of the wombat results |
+| `wombat_cohort` | Every family's wombat TSV concatenated into one cohort table per config |
+| `snvs_cohort` | Cohort-level merge of every family's common variants into one BCF |
 | `wisecondorx` | CNV/SV calling, per sample then merged per family and per cohort |
 | `extractor` | Specific variants pulled out of family BCFs, wombat TSVs or gVCFs |
 | `ancestry` | Ancestry components, admixture and polygenic scores, per family and per cohort |
@@ -212,8 +213,19 @@ missing prerequisite is only an error when something in *this* run would consume
 - `alignment` and `deepvariant_sample` are checked unconditionally — if any individual needs
   them and they are not listed, the run fails.
 - `deepvariant_family` is only demanded when one of `deepvariant_family`, `annotation`,
-  `wombat`, `snvs_cohort` or `extractor` is listed.
-- `annotation` is only demanded when one of `annotation`, `wombat` or `snvs_cohort` is listed.
+  `wombat`, `wombat_cohort`, `snvs_cohort` or `extractor` is listed.
+- `annotation` is only demanded when one of `annotation`, `wombat`, `wombat_cohort` or
+  `snvs_cohort` is listed.
+- `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due. A cohort
+  table is only ever merged from every family's table, never from part of the cohort.
+
+`snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
+and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
+longer produced.
+
+Both cohort merges only check that their output exists. A cohort table or BCF built before
+families were added stays as it is until you delete it, and the next run then merges it again
+from every family.
 
 This is why `steps: ["ancestry"]` runs happily on a cohort whose annotation is incomplete:
 ancestry reads gVCFs directly and never touches the normalised or annotated call sets.
@@ -225,7 +237,7 @@ ancestry reads gVCFs directly and never touches the normalised or annotated call
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the nine above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the ten above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
@@ -630,7 +642,7 @@ annotation keys are read.
 This is the shape of the two files in [`params_example/`](../params_example/).
 
 ```yaml
-steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "snvs_cohort", "wisecondorx"]
+steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx"]
 
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
 scratch: "/pasteur/appa/scratch/ghfc"
