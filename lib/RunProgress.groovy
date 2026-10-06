@@ -9,7 +9,10 @@ import java.nio.file.Path
  *    observer, which is what the console renders, every `writeEveryMs`.
  *  - per step, done/total against the pedigree, from the same existence checks as the state
  *    file's `completion` block. That re-scan touches the filesystem for every individual and
- *    family, so it runs every `rescanEveryMs` only.
+ *    family, so it runs every `rescanEveryMs` only, on a thread of its own: on SPARK-GRCh38
+ *    (142,357 individuals) one pass outlasted 28 minutes, and the counters must keep coming
+ *    meanwhile. A pass also waits RESCAN_SPACING times its own duration before the next one,
+ *    so a slow tree is not re-scanned back to back.
  *
  * The first answers "what is Nextflow doing", the second "how far along is the cohort". The
  * process totals cannot answer the second: Nextflow only counts the tasks it has created so far,
@@ -24,6 +27,7 @@ class RunProgress {
     static final String FILE_NAME = '.ghfc-ngs.progress.json'
     static final String TMP_PREFIX = '.ghfc-ngs.progress.'
     static final int SCHEMA_VERSION = 1
+    static final int RESCAN_SPACING = 3
 
     private final Path dir
     private final Map header
@@ -36,9 +40,10 @@ class RunProgress {
     private volatile Map completion = null
     private volatile String completionMeasuredAt = null
     private volatile Double completionSeconds = null
+    private volatile String scanStartedAt = null
     private volatile boolean stopped = false
-    private long lastRescan = 0
     private Thread thread
+    private Thread scanner
 
     /**
      * @param opts.dir           the cohort directory
@@ -62,10 +67,9 @@ class RunProgress {
     /** Seed the step counts with the plan the run starts from, then refresh in the background. */
     RunProgress start(Map initialCompletion) {
         setCompletion(initialCompletion, null)
-        lastRescan = System.currentTimeMillis()
         writeNow('running', false)
-        // A daemon, so a run that ends without reaching stop() - an `exit`, a kill - is never
-        // held open by it
+        // Daemons, so a run that ends without reaching stop() - an `exit`, a kill - is never
+        // held open by them
         thread = Thread.startDaemon('ghfc-ngs-progress') {
             while (!stopped) {
                 try {
@@ -74,11 +78,23 @@ class RunProgress {
                 catch (InterruptedException ignored) {
                     break
                 }
-                if (stopped) break
-                if (rescan && System.currentTimeMillis() - lastRescan >= rescanEveryMs) {
-                    rescanNow()
-                }
                 if (!stopped) writeNow('running', false)
+            }
+        }
+        if (rescan) {
+            scanner = Thread.startDaemon('ghfc-ngs-progress-rescan') {
+                long wait = rescanEveryMs
+                while (!stopped) {
+                    try {
+                        Thread.sleep(wait)
+                    }
+                    catch (InterruptedException ignored) {
+                        break
+                    }
+                    if (stopped) break
+                    long took = rescanNow()
+                    wait = Math.max(rescanEveryMs, RESCAN_SPACING * took)
+                }
             }
         }
         return this
@@ -91,22 +107,30 @@ class RunProgress {
     void stop(String status, Map finalCompletion) {
         stopped = true
         thread?.interrupt()
+        // Not waited for: a pass over a large tree may have minutes to go, and its result
+        // would only be overwritten by the completion handler's own re-scan below
+        scanner?.interrupt()
+        scanStartedAt = null
         if (finalCompletion != null) setCompletion(finalCompletion, null)
         writeNow(status, true)
     }
 
-    void rescanNow() {
+    /** One re-scan; returns how long it took, in ms. */
+    long rescanNow() {
         long t0 = System.currentTimeMillis()
+        scanStartedAt = now()
         try {
             def block = rescan.call()
-            setCompletion(block, (System.currentTimeMillis() - t0) / 1000.0d)
+            // A pass that ends after stop() describes the tree before the final one does
+            if (!stopped) setCompletion(block, (System.currentTimeMillis() - t0) / 1000.0d)
         }
         catch (Throwable t) {
-            warn.call("Could not re-scan outputs for ${FILE_NAME}: ${t}")
+            if (!stopped) warn.call("Could not re-scan outputs for ${FILE_NAME}: ${t}")
         }
         finally {
-            lastRescan = System.currentTimeMillis()
+            scanStartedAt = null
         }
+        return System.currentTimeMillis() - t0
     }
 
     private void setCompletion(Map block, Double seconds) {
@@ -141,6 +165,8 @@ class RunProgress {
         out.completion = completion
         out.completion_measured_at = completionMeasuredAt
         out.completion_scan_seconds = completionSeconds
+        // Set while a re-scan is under way: `completion` is then older than this
+        out.completion_scan_started_at = scanStartedAt
         return out
     }
 

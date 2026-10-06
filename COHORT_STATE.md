@@ -412,7 +412,8 @@ overwritten by each run. It is not written by `-preview` or `-stub-run`.
     "alignment": { "done": 900, "total": 941, "pct": 95.64 }
   },
   "completion_measured_at": "2026-10-01T14:40:00+02:00",
-  "completion_scan_seconds": 2.4
+  "completion_scan_seconds": 2.4,
+  "completion_scan_started_at": null
 }
 ```
 
@@ -426,7 +427,10 @@ It has two clocks, for two questions:
   attempts that were retried, which `retries` counts.
 - **`completion`, every 10 min: how far along is the cohort?** The same block as `completion` in a
   state file record, re-measured against the pedigree with the same existence checks, by a re-scan
-  of the data tree (`completion_scan_seconds` says how long it took). It starts from the plan the run
+  of the data tree (`completion_scan_seconds` says how long it took). The re-scan runs on its own
+  thread, so it never holds up the process counters, and the next one waits at least three times
+  as long as the last took: on SPARK-GRCh38, 142,357 individuals, one pass takes over half an hour.
+  `completion_scan_started_at` is set while a pass is under way, and is `null` otherwise. It starts from the plan the run
   was launched with, and its last version is the completion handler's re-scan.
 
 A process's `total` is **not** how many tasks the process will have in the end. Nextflow only counts
