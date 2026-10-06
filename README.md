@@ -51,7 +51,7 @@ This pipeline provides a comprehensive analysis framework for whole-genome seque
 
 **Complete SNV/INDEL Analysis:**
 ```bash
-steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "snvs_cohort"]
+steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort"]
 ```
 
 **CNV/SV Analysis Only:**
@@ -61,7 +61,7 @@ steps: ["alignment", "wisecondorx"]
 
 **Full Analysis (SNVs + SVs):**
 ```bash
-steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "snvs_cohort", "wisecondorx"]
+steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx"]
 ```
 
 **Variant Extraction from Lists:**
@@ -254,7 +254,7 @@ pedigree every 10 minutes. See [COHORT_STATE.md](COHORT_STATE.md#live-progress-g
 ./run_pipeline.sh --profile slurm,apptainer --steps "alignment,wisecondorx" --params-file my_params.yml
 
 # Full pipeline (alignment through annotation and Wombat)
-./run_pipeline.sh --profile slurm,apptainer --steps "alignment,deepvariant_sample,deepvariant_family,annotation,wombat,snvs_cohort,wisecondorx" --params-file my_params.yml
+./run_pipeline.sh --profile slurm,apptainer --steps "alignment,deepvariant_sample,deepvariant_family,annotation,wombat,wombat_cohort,snvs_cohort,wisecondorx" --params-file my_params.yml
 ```
 
 #### Testing and Debugging
@@ -296,7 +296,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports nine main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports ten main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -305,7 +305,8 @@ The pipeline supports nine main steps that must be explicitly listed in the `ste
 - **`deepvariant_family`**: Family-based joint calling using GLnexus, followed by normalization and pedigree extraction. Produces family VCF/BCF files and family-specific pedigree files.
 - **`annotation`**: Multi-step annotation workflow including gnomAD frequency annotation, rare/common variant filtering, VEP annotation, and additional bcftools annotations. Produces separate rare and common variant files.
 - **`wombat`**: PyWombat variant filtering and prioritization using custom YAML configurations. Converts BCF to TSV and runs user-defined filtering rules.
-- **`snvs_cohort`**: Cohort-level merging of common variants and Wombat results across all families.
+- **`wombat_cohort`**: Concatenates every family's Wombat results into one cohort table per configuration.
+- **`snvs_cohort`**: Merges every family's common variants into one cohort-level BCF. It used to merge the Wombat results as well; list `wombat_cohort` for those.
 - **`wisecondorx`**: CNV/SV calling using WisecondorX. Includes NPZ conversion, prediction, family/cohort merging, and gene annotation.
 - **`extractor`**: Extract specific variants from TSV lists across family BCFs, Wombat outputs, or individual gVCFs. Supports GRCh37→GRCh38 liftover.
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
@@ -316,7 +317,8 @@ The pipeline supports nine main steps that must be explicitly listed in the `ste
 - `deepvariant_family` requires gVCF files (triggers `deepvariant_sample` if missing)
 - `deepvariant_sample` requires CRAM files (triggers `alignment` if missing)
 - `wombat` requires annotated BCF files (triggers `annotation` if missing)
-- `snvs_cohort` requires common filtered BCFs and/or Wombat outputs (triggers upstream steps if missing)
+- `wombat_cohort` requires every family's Wombat outputs (triggers `wombat` if missing)
+- `snvs_cohort` requires common filtered BCFs (triggers `annotation` if missing)
 - `wisecondorx` requires CRAM files (triggers `alignment` if missing)
 - `extractor` requires normalized BCFs, Wombat outputs, or gVCFs depending on extraction mode
 - `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
@@ -375,13 +377,18 @@ Supports multiple configuration files for different filtering strategies (e.g., 
 
 **Outputs:** TSV.gz file (BCF converted), filtered TSV files (one per config)
 
+#### Wombat Cohort Workflow
+
+Concatenates the Wombat filtered results of every family into one table per configuration. A
+table is only written once every family has its own, never from part of the cohort.
+
+**Outputs:** Cohort-level Wombat TSV files
+
 #### SNVs Cohort Workflow
 
-Cohort-level merging of results:
-1. **Common variants merge** - Merge common variant BCFs across all families
-2. **Wombat results merge** - Concatenate Wombat filtered results across families
+Merges the common variant BCFs of every family into one cohort-level BCF.
 
-**Outputs:** Cohort-level common variant BCF, cohort-level Wombat TSV files
+**Outputs:** Cohort-level common variant BCF
 
 #### WisecondorX Workflow
 
@@ -689,11 +696,14 @@ All sample and family output paths include two shard levels (`{S1}/{S2}`) comput
 - **PyWombat filtered results**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
   - One file per configuration in `wombat_config_list`
 
+### Wombat Cohort Outputs
+
+- **Cohort Wombat results**: `${data}/cohorts/${cohort_name}/wombat/${cohort_name}.rare.${vep_config_name}.annotated.${config_name}.results.tsv`
+  - One file per configuration in `wombat_config_list`
+
 ### SNVs Cohort Outputs
 
 - **Cohort common variants BCF**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf`
-- **Cohort Wombat results**: `${data}/cohorts/${cohort_name}/wombat/${cohort_name}.rare.${vep_config_name}.annotated.${config_name}.results.tsv`
-  - One file per configuration in `wombat_config_list`
 
 ### WisecondorX Outputs
 
@@ -765,8 +775,9 @@ DEEPVARIANT_SAMPLE: 1 individuals done and 2 to do
 DEEPVARIANT_FAMILY: 0 families done and 2 to do
 ANNOTATION: 0 families done and 2 to do
 WOMBAT: 0 families done and 2 to do
+WOMBAT_COHORT: cohort wombat merges due: 1
 == Common Variants ==
-SNVS_COHORT: common variants cohort bcf merge: Yes - wombat cohort merges due: 1
+SNVS_COHORT: common variants cohort bcf merge: Yes
 == SVs Calling ==
 WISECONDORX PREDICT: 0 individuals done and 3 to do
 == Ancestry / PGS ==
@@ -819,7 +830,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, snvs_cohort, wisecondorx, wombat, extractor
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
 ```
 
 ### Custom Configuration
@@ -971,7 +982,7 @@ glnexus_config: "DeepVariant_unfiltered"  # Default
 7. **WisecondorX reference missing**: Ensure `wisecondorx_reference` points to valid NPZ reference file
 8. **gnomAD annotation failures**: Verify `gnomad_file` path exists and is properly indexed (.csi file)
 9. **VEP failures**: Check `vep_config` INI file exists and VEP cache is properly configured
-10. **Cohort merge failures**: Ensure `cohort_name` is set when running `snvs_cohort` or `wisecondorx` workflows
+10. **Cohort merge failures**: Ensure `cohort_name` is set when running `snvs_cohort`, `wombat_cohort` or `wisecondorx` workflows
 
 ### Debug Information
 
@@ -1056,7 +1067,7 @@ bcftools view -O z -o output.vcf.gz input.bcf
 
 ### Cohort Name Requirement
 
-When running `snvs_cohort` or generating cohort-level outputs, the `cohort_name` parameter is required to name the output directory and files.
+When running `snvs_cohort`, `wombat_cohort` or generating cohort-level outputs, the `cohort_name` parameter is required to name the output directory and files.
 
 ## Citation
 
