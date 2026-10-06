@@ -51,6 +51,9 @@ process SNVS_COHORT_MERGE {
   """
   set -euo pipefail
 
+  # sort spills to TMPDIR on large lists; the host value (e.g. /local/scratch/tmp) is not mounted in the container
+  export TMPDIR=\$(pwd)
+
   # Create temporary file list for bcftools merge (inputs live in their own directory)
   # find, not ls: a large cohort expands the glob past the kernel argument limit
   find input_bcfs -maxdepth 1 -name '*.bcf' | sort > bcf_file_list.txt
