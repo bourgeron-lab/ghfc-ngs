@@ -56,20 +56,27 @@ process MERGE_WOMBAT {
   output_tsv = "${cohort_name}.rare.${vep_config_name}.annotated.${wombat_config_name}.${output_name}.tsv"
 
   """
+  set -euo pipefail
+
   # List all matching TSV files (sorted for consistency)
   # New pattern: {FID}.rare.{vep_config_name}.annotated.{wombat_config_name}.tsv
-  ls -1 *.annotated.${wombat_config_name}.tsv | sort -u > file_list.txt
-  
+  # find, not ls: a large cohort expands the glob past the kernel argument limit
+  find . -maxdepth 1 -name '*.annotated.${wombat_config_name}.tsv' -printf '%f\\n' | sort -u > file_list.txt
+
+  # Refuse to publish an empty cohort file over an existing one
+  if [ ! -s file_list.txt ]; then
+    echo "ERROR: no family Wombat TSV files were staged for cohort ${cohort_name}" >&2
+    exit 1
+  fi
+
   # Get the first file to extract the header
   first_file=\$(head -n 1 file_list.txt)
-  
+
   # Write header from first file
   head -n 1 "\${first_file}" > ${output_tsv}
-  
-  # Concatenate all files, skipping their headers
-  while IFS= read -r file; do
-    tail -n +2 "\${file}" >> ${output_tsv}
-  done < file_list.txt
+
+  # Concatenate all files, skipping their headers (xargs batches the list under the argument limit)
+  xargs -d '\\n' tail -q -n +2 < file_list.txt >> ${output_tsv}
   """
 
   stub:

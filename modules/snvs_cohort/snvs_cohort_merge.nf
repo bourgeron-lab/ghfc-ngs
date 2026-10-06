@@ -52,7 +52,8 @@ process SNVS_COHORT_MERGE {
   set -euo pipefail
 
   # Create temporary file list for bcftools merge (inputs live in their own directory)
-  ls input_bcfs/*.bcf > bcf_file_list.txt
+  # find, not ls: a large cohort expands the glob past the kernel argument limit
+  find input_bcfs -maxdepth 1 -name '*.bcf' | sort > bcf_file_list.txt
 
   if [ ! -s bcf_file_list.txt ]; then
     echo "ERROR: no family BCF files were staged for cohort ${cohort_name}" >&2

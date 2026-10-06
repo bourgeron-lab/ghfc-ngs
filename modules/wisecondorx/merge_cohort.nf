@@ -50,8 +50,9 @@ process MERGE_COHORT_ABERRATIONS {
   SORT_OPTS="-T \${TMPDIR} -S 4G"
 
   # List all BED files (sorted for consistency)
-  # Tolerate a non-matching glob here so the explicit check below reports it clearly
-  ls -1 *_aberrations.annotated.bed 2>/dev/null | sort -u > file_list.txt || true
+  # find, not ls: a large cohort expands the glob past the kernel argument limit.
+  # No match leaves the list empty, which the explicit check below reports clearly
+  find . -maxdepth 1 -name '*_aberrations.annotated.bed' -printf '%f\\n' | sort -u > file_list.txt
 
   # Refuse to publish an empty cohort file over an existing one
   if [ ! -s file_list.txt ]; then
