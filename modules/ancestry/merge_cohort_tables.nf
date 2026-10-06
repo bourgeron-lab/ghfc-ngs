@@ -52,8 +52,9 @@ process ANCESTRY_COHORT_MERGE {
   """
   set -euo pipefail
 
-  # Tolerate a non-matching glob so the explicit check below reports it clearly
-  ls -1 input_tables/*.${table_kind}.tsv 2>/dev/null | sort > file_list.txt || true
+  # find, not ls: a large cohort expands the glob past the kernel argument limit.
+  # No match leaves the list empty, which the explicit check below reports clearly
+  find input_tables -maxdepth 1 -name '*.${table_kind}.tsv' | sort > file_list.txt
 
   if [ ! -s file_list.txt ]; then
     echo "ERROR: no family ${table_kind} tables were staged for cohort ${cohort_name}" >&2
