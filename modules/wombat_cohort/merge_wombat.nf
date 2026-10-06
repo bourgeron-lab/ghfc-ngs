@@ -58,6 +58,9 @@ process MERGE_WOMBAT {
   """
   set -euo pipefail
 
+  # sort spills to TMPDIR on large lists; the host value (e.g. /local/scratch/tmp) is not mounted in the container
+  export TMPDIR=\$(pwd)
+
   # List all matching TSV files (sorted for consistency)
   # New pattern: {FID}.rare.{vep_config_name}.annotated.{wombat_config_name}.tsv
   # find, not ls: a large cohort expands the glob past the kernel argument limit

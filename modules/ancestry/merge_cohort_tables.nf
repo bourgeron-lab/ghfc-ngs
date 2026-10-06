@@ -52,6 +52,9 @@ process ANCESTRY_COHORT_MERGE {
   """
   set -euo pipefail
 
+  # sort spills to TMPDIR on large lists; the host value (e.g. /local/scratch/tmp) is not mounted in the container
+  export TMPDIR=\$(pwd)
+
   # find, not ls: a large cohort expands the glob past the kernel argument limit.
   # No match leaves the list empty, which the explicit check below reports clearly
   find input_tables -maxdepth 1 -name '*.${table_kind}.tsv' | sort > file_list.txt

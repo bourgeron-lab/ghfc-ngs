@@ -49,6 +49,9 @@ process MERGE_DNM {
   """
   set -euo pipefail
 
+  # sort spills to TMPDIR on large lists; the host value (e.g. /local/scratch/tmp) is not mounted in the container
+  export TMPDIR=\$(pwd)
+
   # List all unique DNM TSV files (sorted for consistency)
   # find, not ls: a large cohort expands the glob past the kernel argument limit
   find . -maxdepth 1 -name '*.dnm.tsv' -printf '%f\\n' | sort -u > file_list.txt
