@@ -17,6 +17,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 - **Cohort-level merging** for common variants and Wombat results
 - **Variant extraction** from custom TSV lists with liftover support
 - **Genetic ancestry and polygenic scores** per family and per cohort, projected onto a global reference panel
+- **Runs of homozygosity and inbreeding** (F_ROH) per individual, scored against ancestry-matched reference genomes, with genes in ROH
 - **Unit merging** for samples with multiple sequencing runs
 - **SLURM integration** with configurable resource allocation
 - **Container support** via Apptainer/Singularity
@@ -310,6 +311,7 @@ The pipeline supports ten main steps that must be explicitly listed in the `step
 - **`wisecondorx`**: CNV/SV calling using WisecondorX. Includes NPZ conversion, prediction, family/cohort merging, and gene annotation.
 - **`extractor`**: Extract specific variants from TSV lists across family BCFs, Wombat outputs, or individual gVCFs. Supports GRCh37→GRCh38 liftover.
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
+- **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
 
 **Step Dependencies:**
 
@@ -322,6 +324,7 @@ The pipeline supports ten main steps that must be explicitly listed in the `step
 - `wisecondorx` requires CRAM files (triggers `alignment` if missing)
 - `extractor` requires normalized BCFs, Wombat outputs, or gVCFs depending on extraction mode
 - `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
+- `roh` requires the ancestry step's family panel and ancestry table (needs `ancestry` in `steps` if they are missing). Like `ancestry` it never reads the call sets, so `steps: ["ancestry", "roh"]` runs on its own
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -459,6 +462,56 @@ modules/ancestry/scripts/panel_genotype_test
 
 **Outputs:** Per-sample panel genotype BCF and call-rate stats, family panel genotype BCF, per-family PCs / ancestry labels / admixture proportions / raw, adjusted and z-scored PGS with a QC JSON per command, and the cohort-level concatenation of each table
 
+#### ROH / Inbreeding Workflow
+
+Runs of homozygosity (ROH) and genomic inbreeding per individual, and a cohort-level aggregate:
+1. **Calling and scoring** - Per family, with `ancestry-pgs roh` on the family panel the ancestry step built:
+   - BCFtools/RoH at the 1.04 M catalog sites, with each member's ancestry-matched allele frequencies and a genetic map
+   - F_ROH, split by segment length
+   - the parents' kinship
+   - genes in ROH
+2. **Cohort merge** - Concatenate the family tables, and count ROH islands among the cohort's founders
+
+**Why not `common_gt.bcf`.** ROH calling reads homozygosity from the genotypes it is
+given. `common_gt.bcf` holds only sites where someone in the family carries an alt allele,
+so most of the hom-ref evidence is absent, and how much is absent depends on family size:
+about 43% of panel sites are missing for a trio and 72% for a singleton. F_ROH would then
+differ between a singleton and a trio child with the same genome. The ancestry panel is
+genotyped from gVCFs, where a covered site with no variant is a real `0/0`, so it has
+none of this. The tool refuses a sample whose hom-ref calls fall far below what its allele
+frequencies predict.
+
+**Reading the results.** In `froh.tsv`:
+- `froh_1.5mb` is the conventional F_ROH: the length of ROH ≥ 1.5 Mb over the autosomal length the panel covers (McQuillan et al. 2008).
+- `f_short`, `f_intermediate` and `f_long` split it by segment length (< 1.5, 1.5–10 and ≥ 10 cM). A segment from a common ancestor *g* generations back averages about 100/(2*g*) cM. Short segments therefore reflect population history (LD, bottlenecks, endogamy), and long ones the parents' own relatedness (Pemberton et al. 2012; Ceballos et al. 2018).
+- Each value comes with its percentile among unrelated 1kGP+HGDP reference individuals of the same ancestry region (`pct_*`).
+- `homozygosity_pattern` summarises that comparison as `recent`, `population`, both or `typical`.
+- `froh_category` applies the published thresholds of Yengo et al. (2019) and the ACMG standard (Gonzales et al. 2022): `first-cousin-like` > 0.03, `second-degree-like` > 0.10, `first-degree-like` > 0.17.
+- `upd_candidate_chrom` flags an isolated block of long ROH on one chromosome, which suggests uniparental isodisomy rather than inbreeding.
+- For a child whose parents are both sequenced, `parents_kinship` (KING-robust) is the expected F, a check independent of the child's own ROH.
+
+Detecting a probable first-degree parental relationship can reveal incest. Handle these
+findings under an explicit institutional policy (ACMG points to consider, Rehder et al. 2013).
+
+**Genes and hotspots.** `roh_genes.tsv` lists every gene overlapping a ROH of at least
+`roh_min_gene_roh_mb` (1 Mb), using the gencode BEDs of `annotation_gencode`. Each row
+gives the fraction of the gene in the ROH and in the reference ROH hotspots of the
+individual's region. Hotspots, or ROH islands, are 100 kb windows homozygous in many
+outbred people, and are less informative for a recessive hypothesis. The cohort's own
+islands are in `roh_windows.tsv`.
+
+Results do not depend on cohort composition. Frequencies, reference distributions and
+hotspots all come from the bundle, and each member is called on its own. The cohort
+tables are exact concatenations, apart from the founders-only window count.
+
+The cohort merge ships with a self-contained test that needs only `python3`:
+
+```bash
+modules/roh/scripts/roh_cohort_merge_test
+```
+
+**Outputs:** Per family: per-individual inbreeding table, ROH segments, genes in ROH, pairwise kinship (families of two or more), QC JSON. Per cohort: their concatenations and the founders' ROH window counts.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -514,6 +567,8 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Panel genotype files (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
 - **Ancestry/PGS tables (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
 - **Ancestry/PGS tables (cohort)**: `${data}/cohorts/${cohort_name}/ancestry/${cohort_name}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
+- **ROH tables (family)**: `${data}/families/{S1}/{S2}/${FID}/roh/${FID}.${ancestry_panel_name}.{froh,roh}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
+- **ROH tables (cohort)**: `${data}/cohorts/${cohort_name}/roh/${cohort_name}.${ancestry_panel_name}.{froh,roh,roh_windows}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -609,6 +664,12 @@ data/
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_adjusted.tsv    # Ancestry-adjusted
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.pgs_zscore.tsv      # Z-scored
 │                   └── FID001.apgs_b1.0.0_dp10gq20.*.qc.json           # One QC report per command
+│               └── roh/
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.froh.tsv            # Inbreeding per individual
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.roh.tsv             # ROH segments
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.roh_genes.tsv       # Genes in ROH >= 1 Mb
+│                   ├── FID001.apgs_b1.0.0_dp10gq20.kinship.tsv         # Pairwise KING kinship
+│                   └── FID001.apgs_b1.0.0_dp10gq20.roh.qc.json
 ├── cohorts/                       # Cohort-specific directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── COHORT_NAME.pedigree.tsv                 # Family structure (required)
@@ -627,6 +688,8 @@ data/
 │           ├── apgs_b1.0.0_dp10gq20.regions.tsv.gz  # bcftools targets file
 │           ├── apgs_b1.0.0_dp10gq20.bundle.json     # Reference bundle check
 │           └── COHORT_NAME.apgs_b1.0.0_dp10gq20.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv
+│       └── roh/
+│           └── COHORT_NAME.apgs_b1.0.0_dp10gq20.{froh,roh,roh_genes,kinship,roh_windows}.tsv
 └── extractor/                     # Extractor outputs (if TSV lists provided)
     └── VARIANT_LIST/
         ├── VARIANT_LIST.extracted.tsv               # Extracted variants
@@ -752,6 +815,23 @@ result:
 - `distinct_allele_ct` — **expect this to exceed 1, with its warning.** Per-sample missingness genuinely differs between samples, so the raw score sums are not directly comparable between individuals; the adjusted and z-scored tables are what you compare. This is a consequence of recording real coverage instead of assuming every uncalled site is homozygous reference.
 - `n_traits_constant` — catalog columns carrying no non-zero weight at any scored site, emitted as `nan` rather than a number
 
+### ROH / Inbreeding Outputs
+
+Paths use `${P}` as shorthand for `${ancestry_panel_name}`.
+
+- **Family tables**: `${data}/families/{S1}/{S2}/${FID}/roh/${FID}.${P}.{froh,roh,roh_genes,kinship}.tsv`
+  - `froh` - one row per individual: F_ROH at 0.5/1.5/5/10 Mb, F by length class, reference percentiles, `homozygosity_pattern`, `froh_category`, `upd_candidate_chrom`, parents and their kinship
+  - `roh` - one row per segment ≥ 0.5 Mb: coordinates, Mb, cM, class, fraction in reference hotspots
+  - `roh_genes` - genes overlapping ROH ≥ `roh_min_gene_roh_mb`; written only when `annotation_gencode` is set
+  - `kinship` - KING-robust kinship for every pair; absent for a singleton
+- **Family QC report**: `${data}/families/{S1}/{S2}/${FID}/roh/${FID}.${P}.roh.qc.json`
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/roh/${cohort_name}.${P}.{froh,roh,roh_genes,kinship}.tsv`, the family tables with a `family_id` column, and `${cohort_name}.${P}.roh_windows.tsv`, the number of founders in ROH per 100 kb window, pooled and per region
+
+**What to check in the QC report:**
+- `site_coverage` - should be 1.0 on a panel from the ancestry step
+- `homref_observed_over_expected` - per sample, 1.00–1.11 on gVCF-genotyped data. The command refuses below 0.75 and warns below 0.90; a trio's `common_gt.bcf`-style input sits near 0.6.
+- the `warnings` list - samples with a call rate under 0.90 are flagged `qc_pass=false` in `froh.tsv`. They are still scored: a missing site thins the evidence but does not bias it.
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -830,7 +910,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh
 ```
 
 ### Custom Configuration

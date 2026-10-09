@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+
+"""Concatenate the family ROH tables into cohort tables, and count ROH islands.
+
+Reads every <FID>.<panel>.<kind>.tsv in a directory, for kind in froh, roh,
+roh_genes and kinship, and writes <cohort>.<panel>.<kind>.tsv with a family_id
+column appended. froh and roh must be present for every family; roh_genes and
+kinship are optional per family (a singleton has no kinship table, and the gene
+table is only written when gene BEDs are configured), so an absent kind is simply
+not written.
+
+Concatenation is exact: every value in these tables is computed per family against
+the reference bundle, so a sample's row is the same whether its family was scored
+alone or in a cohort run.
+
+It also writes <cohort>.<panel>.roh_windows.tsv: per 100 kb window, how many of the
+cohort's founders - individuals whose father and mother are both absent from their
+family's input - have a ROH there, pooled and per ancestry region. Founders only,
+so a family does not count its shared segments several times over. This is the
+cohort's own view of ROH islands, next to the reference hotspots the per-family
+tables already carry; only windows with at least one founder in ROH are written.
+"""
+
+import argparse
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+KINDS = ("froh", "roh", "roh_genes", "kinship")
+REQUIRED = ("froh", "roh")
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def family_tables(indir, panel, kind):
+    suffix = f".{panel}.{kind}.tsv"
+    out = {}
+    for p in sorted(Path(indir).iterdir()):
+        if p.name.endswith(suffix):
+            out[p.name[: -len(suffix)]] = p
+    return out
+
+
+def concat(tables, out_path):
+    header, n = None, 0
+    with open(out_path, "w") as fo:
+        for fid, p in tables.items():
+            with open(p) as fh:
+                h = fh.readline().rstrip("\n")
+                if header is None:
+                    header = h
+                    fo.write(f"{h}\tfamily_id\n")
+                elif h != header:
+                    die(f"{p.name} has different columns from the other {out_path.name} "
+                        f"inputs: tables from different tool versions have been mixed")
+                for line in fh:
+                    if line.strip():
+                        fo.write(f"{line.rstrip(chr(10))}\t{fid}\n")
+                        n += 1
+    return n
+
+
+def windows(froh_tables, roh_tables, window, out_path):
+    founders = {}                       # (fid, iid) -> region
+    for fid, p in froh_tables.items():
+        with open(p) as fh:
+            h = fh.readline().rstrip("\n").split("\t")
+            i = {c: j for j, c in enumerate(h)}
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if f[i["father"]] == "." and f[i["mother"]] == ".":
+                    founders[(fid, f[i["IID"]])] = f[i["region"]]
+    n_group = defaultdict(int)
+    for region in founders.values():
+        n_group["ALL"] += 1
+        n_group[region] += 1
+    counts = defaultdict(int)          # (group, chrom, window index) -> founders
+    for fid, p in roh_tables.items():
+        hit = defaultdict(set)         # iid -> {(chrom, k)}
+        with open(p) as fh:
+            h = fh.readline().rstrip("\n").split("\t")
+            i = {c: j for j, c in enumerate(h)}
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if (fid, f[i["IID"]]) not in founders:
+                    continue
+                start, end = int(f[i["start"]]), int(f[i["end"]])
+                for k in range((start - 1) // window, (end - 1) // window + 1):
+                    hit[f[i["IID"]]].add((f[i["chrom"]], k))
+        for iid, keys in hit.items():
+            region = founders[(fid, iid)]
+            for chrom, k in keys:
+                counts[("ALL", chrom, k)] += 1
+                counts[(region, chrom, k)] += 1
+
+    def order(key):
+        group, chrom, k = key
+        c = chrom.removeprefix("chr")
+        return (group != "ALL", group, (0, int(c)) if c.isdigit() else (1, c), k)
+
+    with open(out_path, "w") as fo:
+        fo.write("group\tchrom\tstart\tend\tn_founders_in_roh\tn_founders\tfreq\n")
+        for key in sorted(counts, key=order):
+            group, chrom, k = key
+            n = counts[key]
+            fo.write(f"{group}\t{chrom}\t{k * window}\t{(k + 1) * window}\t{n}\t"
+                     f"{n_group[group]}\t{n / n_group[group]:.4g}\n")
+    return len(founders), len(counts)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--input-dir", required=True)
+    ap.add_argument("--cohort", required=True)
+    ap.add_argument("--panel", required=True)
+    ap.add_argument("--window", type=int, default=100_000)
+    a = ap.parse_args()
+
+    tables = {k: family_tables(a.input_dir, a.panel, k) for k in KINDS}
+    for k in REQUIRED:
+        if not tables[k]:
+            die(f"no family {k} tables were staged for cohort {a.cohort}")
+    if set(tables["froh"]) != set(tables["roh"]):
+        die("the froh and roh tables were staged for different families: "
+            + ", ".join(sorted(set(tables["froh"]) ^ set(tables["roh"]))[:10]))
+
+    for k in KINDS:
+        if not tables[k]:
+            print(f"Cohort {a.cohort} {k}: no family tables, not written")
+            continue
+        out = Path(f"{a.cohort}.{a.panel}.{k}.tsv")
+        n = concat(tables[k], out)
+        print(f"Cohort {a.cohort} {k}: {n} rows from {len(tables[k])} families")
+        if k == "froh" and n == 0:
+            die("merged froh table has no data rows")
+
+    n_founders, n_windows = windows(tables["froh"], tables["roh"], a.window,
+                                    Path(f"{a.cohort}.{a.panel}.roh_windows.tsv"))
+    print(f"Cohort {a.cohort} roh_windows: {n_windows} group-windows with ROH "
+          f"among {n_founders} founders")
+
+
+if __name__ == "__main__":
+    main()

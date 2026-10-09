@@ -100,6 +100,7 @@ across many cohorts into one list without losing track of which is which.
     "wombat":             { "done": 290, "total": 314, "pct": 92.36 },
     "wisecondorx":        { "done": 850, "total": 941, "pct": 90.33 },
     "ancestry":           null,
+    "roh":                null,
     "snvs_cohort":        { "done": 1, "total": 1, "pct": 100.0 },
     "wombat_cohort":      { "done": 1, "total": 1, "pct": 100.0 },
     "extractor":          null
@@ -218,9 +219,9 @@ with no shutdown hook, so a SLURM walltime kill, a Ctrl-C, or a lost launch node
 Each step is either `null` or `{done, total, pct}`, where `pct` is `done/total` as a percentage
 rounded to two decimals.
 
-**`null` means unmeasured, not 0%.** Three steps can be null:
+**`null` means unmeasured, not 0%.** Four steps can be null:
 
-- `ancestry` and `wisecondorx` — when the step is not in `steps_requested`. The pipeline skips
+- `ancestry`, `roh` and `wisecondorx` — when the step is not in `steps_requested`. The pipeline skips
   that whole part of the planning pass, so there is nothing to report.
 - `extractor` — always. The pipeline has no on-disk completeness check for it.
 
@@ -241,7 +242,7 @@ Other things worth knowing before you quote a number:
 | Step | Denominator |
 | --- | --- |
 | `alignment`, `deepvariant_sample`, `wisecondorx` | `pedigree.individuals` |
-| `deepvariant_family`, `annotation`, `wombat`, `ancestry` | `pedigree.families` |
+| `deepvariant_family`, `annotation`, `wombat`, `ancestry`, `roh` | `pedigree.families` |
 | `snvs_cohort`, `wombat_cohort` | 1 |
 
 ## Samples without a CRAM

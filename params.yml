@@ -122,6 +122,20 @@ ancestry_min_coverage: "" # Empty uses the tool default of 0.90; 0 disables the 
 # has changed since the fit is refused rather than adjusted with a stale model.
 ancestry_model: "" # Empty uses the model shipped inside the reference bundle
 
+# ROH / inbreeding configuration (step "roh")
+# Calls runs of homozygosity on the ancestry step's family panel - genotyped from gVCFs, so
+# a covered site with no variant is a real 0/0 - against ancestry_reference, which must
+# carry the roh/ tier (added with ancestry-pgs bundle/add_roh_tier.py). Needs the ancestry
+# step's outputs, from an earlier run or from this one.
+#
+# Outputs are named by ancestry_panel_name like the ancestry outputs. Adding the roh/ tier
+# to a bundle changes no ancestry result, so it does not call for a new label; to recompute
+# ROH alone, delete the families' roh/ directories.
+#
+# Genes in ROH are taken from <annotation_annotation_path>/gencode/<annotation_gencode>
+# .{symbol,ensg}.genes.bed.gz; without annotation_gencode no gene table is written.
+roh_min_gene_roh_mb: 1.0 # Only ROH at least this long are intersected with genes (default: 1.0)
+
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
 liftover_chain: "/pasteur/helix/projects/ghfc_wgs/references/liftover/hg19ToHg38.over.chain.gz" # Chain file for GRCh37 to GRCh38 liftover

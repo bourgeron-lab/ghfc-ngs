@@ -112,9 +112,12 @@ workflow ANCESTRY {
 
     PANEL_MERGE_FAMILY(family_merge_input)
 
-    // The current pedigree's families with a panel BCF and its .csi on disk, by path
+    // The current pedigree's families with a panel BCF and its .csi on disk, by path. A
+    // family being re-merged is left out: its file on disk is the stale panel, and since this
+    // list is emitted before any merge finishes, `unique` below would keep it over the new one.
     existing_family_panels = channel.fromList(
         families
+            .findAll { fid -> need_family_merge[fid] != true }
             .collect { fid ->
                 def bcf = file("${Sharding.getFamilyDir(params.data, fid)}/ancestry/${fid}.panel_gt.${panel_name}.bcf")
                 tuple(fid, bcf, file("${bcf}.csi"))
