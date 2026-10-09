@@ -107,6 +107,15 @@ flowchart TB
         anc_concat --> anc_cohort
     end
 
+    subgraph roh [**ROH and inbreeding**]
+        direction TB
+        roh_call["ancestry-pgs roh (bcftools roh, region AF + genetic map)"]
+        roh_family["families/**{FID}**/roh/**{FID}**.**{panel}**.{froh,roh,roh_genes,kinship}.tsv"]:::of
+        roh_concat["concatenate family tables + founders' ROH windows"]
+        roh_cohort["cohorts/**{cohort}**/roh/**{cohort}**.**{panel}**.*.tsv"]:::oc
+        roh_call --> roh_family --> roh_concat --> roh_cohort
+    end
+
     subgraph expansionhunter [**Expansion Hunter**]
         direction TB
         ehr_call["expansion hunter call"]
@@ -127,6 +136,8 @@ flowchart TB
     alignment ==> deepvariant
     deepvariant ==> glnexus
     deepvariant ==> ancestry
+    anc_family_bcf ==> roh_call
+    anc_family_tsv ==> roh_call
     glnexus ==> annotation
     annotation_common_gt ==> snps
 

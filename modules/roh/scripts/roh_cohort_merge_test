@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+# Self-contained check of roh_cohort_merge.
+#
+# Two synthetic families - a trio and a singleton - in the layout ROH_CALL publishes.
+# Asserts that every table is concatenated with its family_id, that the kinship table
+# a singleton lacks does not block the merge, that the window count uses founders only
+# (the trio child's ROH, shared with nobody, must not appear), and that mismatched
+# headers are refused. Needs only python3.
+#
+#   modules/roh/scripts/roh_cohort_merge_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+merge="${here}/roh_cohort_merge"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+mkdir in
+
+P=apgs_test
+froh_header='IID	region	froh_1.5mb	father	mother'
+roh_header='IID	chrom	start	end	length_mb'
+
+printf '%s\nKID\tEUR\t0.07\tDAD\tMUM\nDAD\tEUR\t0.002\t.\t.\nMUM\tEUR\t0.001\t.\t.\n' "${froh_header}" > in/FAM1.${P}.froh.tsv
+printf '%s\nKID\tchr2\t1000001\t9000000\t8\nDAD\tchr1\t150001\t420000\t0.27\n' "${roh_header}" > in/FAM1.${P}.roh.tsv
+printf 'IID1\tIID2\tn_sites\tibs0\tkinship\nDAD\tMUM\t1000\t0.1\t0.01\n' > in/FAM1.${P}.kinship.tsv
+printf '%s\nSOLO\tAFR\t0.0\t.\t.\n' "${froh_header}" > in/FAM2.${P}.froh.tsv
+printf '%s\nSOLO\tchr1\t180001\t260000\t0.08\n' "${roh_header}" > in/FAM2.${P}.roh.tsv
+
+python3 "${merge}" --input-dir in --cohort C --panel "${P}" > log.txt
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+
+check "froh has 4 rows and a family_id column" \
+    '[ "$(tail -n +2 C.${P}.froh.tsv | wc -l | tr -d " ")" = 4 ] && head -1 C.${P}.froh.tsv | grep -q "family_id$"'
+check "the singleton is tagged with its family" \
+    'grep -q "^SOLO.*FAM2$" C.${P}.froh.tsv'
+check "kinship merged from the trio alone" \
+    '[ "$(tail -n +2 C.${P}.kinship.tsv | wc -l | tr -d " ")" = 1 ]'
+check "no roh_genes table written when none was staged" \
+    '[ ! -e C.${P}.roh_genes.tsv ]'
+check "the child's ROH on chr2 is not counted (founders only)" \
+    '! grep -q "chr2" C.${P}.roh_windows.tsv'
+check "window chr1:100-200 kb holds DAD and SOLO: 2 of 3 founders" \
+    'grep -q "^ALL	chr1	100000	200000	2	3	0.6667$" C.${P}.roh_windows.tsv'
+check "window chr1:400-500 kb holds DAD only" \
+    'grep -q "^ALL	chr1	400000	500000	1	3	0.3333$" C.${P}.roh_windows.tsv'
+check "per-region counts use the region's founders" \
+    'grep -q "^AFR	chr1	200000	300000	1	1	1$" C.${P}.roh_windows.tsv'
+
+mkdir bad && cp in/* bad/
+printf 'IID\tregion\tsomething_else\tfather\tmother\nX\tEUR\t1\t.\t.\n' > bad/FAM3.${P}.froh.tsv
+printf '%s\n' "${roh_header}" > bad/FAM3.${P}.roh.tsv
+check "mismatched headers are refused" \
+    '! python3 "${merge}" --input-dir bad --cohort B --panel "${P}" >/dev/null 2>&1'
+
+[ "${fail}" -eq 0 ] && echo "roh_cohort_merge: all checks passed" || echo "roh_cohort_merge: FAILURES"
+exit "${fail}"

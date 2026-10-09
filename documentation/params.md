@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-53 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+54 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -61,15 +61,15 @@ program can see is in this table. A key that is not here is not read by anything
 | `ancestry_min_dp` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `ancestry_min_gq` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `ancestry_model` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
-| `ancestry_panel_name` 📄 | `ancestry` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
-| `ancestry_reference` | `ancestry` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
+| `ancestry_panel_name` 📄 | `ancestry`, `roh` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
+| `ancestry_reference` | `ancestry`, `roh` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `annotation_annotation_list` | `annotation` | [Annotation](#annotation) |
-| `annotation_annotation_path` | `annotation`, `wisecondorx` | [Annotation](#annotation) |
+| `annotation_annotation_path` | `annotation`, `wisecondorx`, `roh` | [Annotation](#annotation) |
 | `annotation_dnm_min_callrate` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `annotation_dnm_min_DP` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `annotation_dnm_min_GQ` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `annotation_dnm_min_VAF` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
-| `annotation_gencode` | `wisecondorx` | [Annotation](#annotation) |
+| `annotation_gencode` | `wisecondorx`, `roh` | [Annotation](#annotation) |
 | `apptainer_cache` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
 | `bazam` | `alignment`, realignment only | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `bin` 📄 | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
@@ -106,6 +106,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `ref_par2_end` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `ref_par2_start` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `resources` | always, checked at startup | [`resources`](#resources-per-cohort-cpus-memory-and-time) |
+| `roh_min_gene_roh_mb` | `roh` | [ROH and inbreeding](#roh-and-inbreeding) |
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
@@ -200,6 +201,7 @@ the command line. Every entry must be one of these ten:
 | `wisecondorx` | CNV/SV calling, per sample then merged per family and per cohort |
 | `extractor` | Specific variants pulled out of family BCFs, wombat TSVs or gVCFs |
 | `ancestry` | Ancestry components, admixture and polygenic scores, per family and per cohort |
+| `roh` | Runs of homozygosity and inbreeding (F_ROH) per individual, genes in ROH, per family and per cohort |
 
 ### The rule that catches people out
 
@@ -218,6 +220,8 @@ missing prerequisite is only an error when something in *this* run would consume
   `snvs_cohort` is listed.
 - `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due. A cohort
   table is only ever merged from every family's table, never from part of the cohort.
+- `ancestry` is demanded by `roh` for families with no family panel or ancestry table on disk
+  under the current `ancestry_panel_name`.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -228,7 +232,8 @@ families were added stays as it is until you delete it, and the next run then me
 from every family.
 
 This is why `steps: ["ancestry"]` runs happily on a cohort whose annotation is incomplete:
-ancestry reads gVCFs directly and never touches the normalised or annotated call sets.
+ancestry reads gVCFs directly and never touches the normalised or annotated call sets. The same
+holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` writes.
 
 ### Failures you will see
 
@@ -237,8 +242,9 @@ ancestry reads gVCFs directly and never touches the normalised or annotated call
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the ten above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the eleven above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
+| `ERROR: the 'roh' step requires ...` | `roh` listed without `ancestry_reference` and `ancestry_panel_name` |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
 
@@ -409,7 +415,7 @@ no gVCF still fails the run, by name. See [`params_example/SPARK.params.yml`](..
 | `annotation_annotation_list` | list of filenames | *no default* | Files inside that directory, applied with `bcftools annotate`. Names only, not paths. |
 | `annotation_gencode` | string | *no default* | Gencode basename used to annotate **WisecondorX** aberrations with genes and exons. |
 
-Despite its prefix, `annotation_gencode` belongs to the `wisecondorx` step, not to `annotation`.
+Despite its prefix, `annotation_gencode` belongs to the `wisecondorx` and `roh` steps, not to `annotation`.
 `annotation_annotation_path` is shared by both.
 
 ### WisecondorX
@@ -458,7 +464,20 @@ pointing at a different file, which must exist.
 
 These three are the only keys in the whole file with a **hard requirement check**: listing
 `ancestry` in `steps` without `ancestry_reference`, `ancestry_catalog` and
-`ancestry_panel_name` aborts the run before any work starts.
+`ancestry_panel_name` aborts the run before any work starts. Listing `roh` without
+`ancestry_reference` and `ancestry_panel_name` does too.
+
+### ROH and inbreeding
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `roh_min_gene_roh_mb` | number | `1.0` | Only ROH at least this long are intersected with genes. |
+
+`roh` has no keys of its own beyond this one:
+- **Reference.** It calls against `ancestry_reference`, which must carry the roh/ tier (ancestry-pgs `bundle/add_roh_tier.py`; bundle ≥ 1.1.0).
+- **Inputs.** It reads the ancestry step's family panel and ancestry table, named by `ancestry_panel_name`.
+- **Output names.** Its outputs carry `ancestry_panel_name` too. Adding the roh/ tier changes no ancestry result, so it needs no new label. To recompute ROH alone, delete the families' `roh/` directories.
+- **Gene table.** It is written only when `annotation_gencode` and `annotation_annotation_path` are both set, from `<annotation_annotation_path>/gencode/<annotation_gencode>.{symbol,ensg}.genes.bed.gz`, the same files `wisecondorx` annotates with.
 
 ### Containers and resources
 

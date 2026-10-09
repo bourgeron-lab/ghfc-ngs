@@ -21,6 +21,7 @@ include { WISECONDORX } from './workflows/wisecondorx'
 include { WOMBAT } from './workflows/wombat'
 include { EXTRACTOR } from './workflows/extractor'
 include { ANCESTRY } from './workflows/ancestry'
+include { ROH } from './workflows/roh'
 
 /*
 ========================================================================================
@@ -99,6 +100,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // its empty lists mean "unmeasured", not "nothing done"
         ancestry:           ('ancestry' in pipeline_steps)
                                 ? CohortState.progress(plan.ancestry.existing.size(), n_families)
+                                : null,
+        // Same rule: planned only when requested
+        roh:                ('roh' in pipeline_steps)
+                                ? CohortState.progress(plan.roh.existing.size(), n_families)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
         snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
@@ -374,11 +379,11 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -399,6 +404,23 @@ if ('ancestry' in pipeline_steps) {
     if (missing_ancestry_params) {
         recordFailedRun("ancestry step is missing ${missing_ancestry_params.join(', ')}")
         exit 1, "ERROR: the 'ancestry' step requires ${missing_ancestry_params.join(', ')} to be set"
+    }
+}
+
+// roh reads the ancestry step's family panel and labels, named by the panel label, and calls
+// against the same bundle - which must carry the roh/ tier. The PGS catalog is not needed.
+if ('roh' in pipeline_steps) {
+    def missing_roh_params = ['ancestry_reference', 'ancestry_panel_name']
+        .findAll { key -> !params[key] }
+    if (missing_roh_params) {
+        recordFailedRun("roh step is missing ${missing_roh_params.join(', ')}")
+        exit 1, "ERROR: the 'roh' step requires ${missing_roh_params.join(', ')} to be set"
+    }
+    // Otherwise every family's ROH_CALL would fail on it, one task at a time
+    def roh_sites = "${params.ancestry_reference}/roh/sites.tsv.gz"
+    if (!new File(roh_sites).exists()) {
+        recordFailedRun("ancestry_reference has no roh/ tier")
+        exit 1, "ERROR: the 'roh' step needs the reference bundle's roh/ tier, and ${roh_sites} does not exist. Add it with ancestry-pgs bundle/add_roh_tier.py (bundle >= 1.1.0)"
     }
 }
 
@@ -793,6 +815,8 @@ workflow {
     // and no variant is 0/0 rather than absent. A family's own common_gt.bcf carries
     // only its variant sites - around 57% of the panel for a trio - which is below
     // what admixture accepts and enough to distort the projected PCs.
+    ancestry_family_panels = Channel.empty()
+    ancestry_family_labels = Channel.empty()
     if ((analysis_plan.ancestry.needed.size() > 0 ||
          analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in pipeline_steps) {
 
@@ -821,6 +845,50 @@ workflow {
             analysis_plan.ancestry.need_family_merge,
             analysis_plan.ancestry.need_family_score,
             analysis_plan.ancestry.need_cohort_merge
+        )
+        ancestry_family_panels = ANCESTRY.out.family_panel_gt
+        ancestry_family_labels = ANCESTRY.out.family_ancestry
+    }
+
+    // Run ROH / inbreeding if needed and allowed.
+    //
+    // Calls on the ancestry step's family panel, for the same reason ancestry reads gVCFs: ROH
+    // calling reads homozygosity from hom-ref sites, which common_gt.bcf does not carry. A
+    // family the ancestry step rebuilds in this run takes that run's panel and label; every
+    // other family reads its own from disk.
+    if ((analysis_plan.roh.needed.size() > 0 ||
+         analysis_plan.roh.need_cohort_merge) && 'roh' in pipeline_steps) {
+
+        def roh_tasks = []
+        if (analysis_plan.roh.needed.size() > 0) {
+            roh_tasks.add("calling for ${analysis_plan.roh.needed.size()} families")
+        }
+        if (analysis_plan.roh.need_cohort_merge) {
+            roh_tasks.add("cohort table merge")
+        }
+        log.info "Running ROH/inbreeding: ${roh_tasks.join(', ')}..."
+
+        def roh_panel_name = params.ancestry_panel_name
+        def roh_from_ancestry = analysis_plan.roh.from_ancestry
+        roh_disk_inputs = Channel.fromList(
+            analysis_plan.roh.needed
+                .findAll { fid -> !(fid in roh_from_ancestry) }
+                .collect { fid ->
+                    def dir = "${Sharding.getFamilyDir(params.data, fid)}/ancestry"
+                    def bcf = file("${dir}/${fid}.panel_gt.${roh_panel_name}.bcf")
+                    tuple(fid, bcf, file("${bcf}.csi"), file("${dir}/${fid}.${roh_panel_name}.ancestry.tsv"))
+                })
+        roh_ancestry_inputs = ancestry_family_panels
+            .filter { fid, _bcf, _csi -> fid in roh_from_ancestry }
+            .join(ancestry_family_labels)
+
+        ROH(
+            roh_disk_inputs.mix(roh_ancestry_inputs),
+            pedigree_file,
+            pedigree_data.families,
+            analysis_plan.roh.needed,
+            analysis_plan.roh.need_cohort_merge,
+            rohGeneBeds()
         )
     }
 }
@@ -895,6 +963,23 @@ def planBucket() {
     return new LinkedHashSet()
 }
 
+// The gene BEDs the ROH step intersects with, from the annotation's gencode settings, as
+// [symbol BED, ID BED]. Both empty when gencode is not configured, and then no gene table is
+// written or expected. containsKey first: reading an unset params key logs a warning.
+def rohGeneBeds() {
+    def gencode = params.containsKey('annotation_gencode') ? params.annotation_gencode : null
+    def path = params.containsKey('annotation_annotation_path') ? params.annotation_annotation_path : null
+    if (!gencode || !path) return ['', '']
+    return ["${path}/gencode/${gencode}.symbol.genes.bed.gz".toString(),
+            "${path}/gencode/${gencode}.ensg.genes.bed.gz".toString()]
+}
+
+// The per-family ROH tables whose presence means a family is done. The kinship table is left
+// out: a singleton has none.
+def rohFamilyTableKinds() {
+    return ['froh', 'roh'] + (rohGeneBeds()[0] ? ['roh_genes'] : [])
+}
+
 def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
         // no_cram is every individual with no usable CRAM, whatever the reason and whether or
@@ -910,6 +995,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         wombat: [needed: planBucket(), existing: planBucket(), need_bcf2parquet: [:]],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
         ancestry: [needed: planBucket(), existing: planBucket(), need_extract: planBucket(), need_family_merge: [:], need_family_score: [:], need_cohort_merge: false],
+        // from_ancestry: families whose panel or labels the ancestry step rebuilds in this run, so
+        // their ROH inputs come from that run rather than disk. blocked: families with no ancestry
+        // outputs on disk and no ancestry step to make them.
+        roh: [needed: planBucket(), existing: planBucket(), from_ancestry: planBucket(), blocked: planBucket(), need_cohort_merge: false],
         pedigree_drift: [:]
     ]
 
@@ -1073,6 +1162,44 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
         plan.ancestry.need_cohort_merge = !cohort_tables_exist ||
             plan.ancestry.need_family_score.any { _fid, needed -> needed == true }
+    }
+
+    // Check existing ROH outputs. They are computed from the ancestry step's family panel and
+    // labels, so a family the ancestry step rebuilds in this run is re-called too: its old ROH
+    // tables describe a panel or an ancestry label that is about to change. Named by the
+    // ancestry panel label for the same reason, which also pins the bundle and its roh/ tier.
+    if ('roh' in pipeline_steps) {
+        def panel_name = params.ancestry_panel_name
+        def kinds = rohFamilyTableKinds()
+
+        families.each { fid ->
+            def fam_dir = Sharding.getFamilyDir(params.data, fid)
+            def ancestry_redo = plan.ancestry.need_family_merge[fid] == true ||
+                                plan.ancestry.need_family_score[fid] == true
+            def outputs_exist = kinds.every { kind ->
+                new File("${fam_dir}/roh/${fid}.${panel_name}.${kind}.tsv").exists()
+            }
+            if (outputs_exist && !ancestry_redo) {
+                plan.roh.existing.add(fid)
+                return
+            }
+            plan.roh.needed.add(fid)
+            if (ancestry_redo) {
+                plan.roh.from_ancestry.add(fid)
+                return
+            }
+            def panel_bcf = "${fam_dir}/ancestry/${fid}.panel_gt.${panel_name}.bcf"
+            def inputs_exist = new File(panel_bcf).exists() && new File("${panel_bcf}.csi").exists() &&
+                new File("${fam_dir}/ancestry/${fid}.${panel_name}.ancestry.tsv").exists()
+            if (!inputs_exist) {
+                plan.roh.blocked.add(fid)
+            }
+        }
+
+        def cohort_tables_exist = (kinds + ['roh_windows']).every { kind ->
+            new File("${params.data}/cohorts/${params.cohort_name}/roh/${params.cohort_name}.${panel_name}.${kind}.tsv").exists()
+        }
+        plan.roh.need_cohort_merge = !cohort_tables_exist || plan.roh.needed.size() > 0
     }
 
     // Check existing individual gVCF files and VAF bedgraphs (both outputs of deepvariant_sample)
@@ -1318,6 +1445,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
+    ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
     == Other ==
     EXTRACTOR: ${analysis_plan.extractor.tsv_count > 0 ? "${analysis_plan.extractor.tsv_count} TSV files to process on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples" : 'Skipped (no TSV files provided)'}
     ========================================================================================
@@ -1347,6 +1475,9 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.ancestry.needed) {
         log.info "Families needing ancestry/PGS: ${analysis_plan.ancestry.needed.join(', ')}"
+    }
+    if (analysis_plan.roh.needed) {
+        log.info "Families needing ROH/inbreeding: ${analysis_plan.roh.needed.join(', ')}"
     }
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
@@ -1633,6 +1764,12 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
 
+    // roh reads the ancestry step's outputs and nothing else, so it is blocked exactly when they
+    // are absent and this run will not make them
+    if (analysis_plan.roh.blocked.size() > 0 && 'roh' in pipeline_steps) {
+        errors.add("Ancestry step is required for ${analysis_plan.roh.blocked.size()} families before ROH can be called (no family panel or ancestry table under the label ${params.ancestry_panel_name}) but not included in steps parameter")
+    }
+
     // A cohort wombat table is only merged from every family's table, so without the wombat
     // step a family that has none would only make the merge skip itself with a warning
     if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in pipeline_steps) && 'wombat_cohort' in pipeline_steps &&
@@ -1648,7 +1785,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")
