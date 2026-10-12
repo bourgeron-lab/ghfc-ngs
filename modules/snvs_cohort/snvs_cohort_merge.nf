@@ -29,7 +29,7 @@ process SNVS_COHORT_MERGE {
     mode: 'copy',
     pattern: "${cohort_name}.common_gt.bcf*"
 
-  container 'docker://staphb/bcftools:latest'
+  container 'docker://staphb/bcftools:1.24'
   
   label 'cohort_merge'
 
