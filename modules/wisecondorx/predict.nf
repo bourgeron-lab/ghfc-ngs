@@ -22,4 +22,9 @@ process PREDICT {
     """
     wisecondorx predict ${npz} ${reference} ${barcode} --bed ${params.wisecondorx_predict_args}
     """
+
+    stub:
+    """
+    touch ${barcode}_aberrations.bed ${barcode}_statistics.txt ${barcode}_segments.bed ${barcode}_bins.bed
+    """
 }

@@ -31,7 +31,7 @@ class StaleFamily {
      *  - `str/expansionhunter/` - it does not come from the joint call. Its family files are
      *    rebuilt whenever a member is called, and a member missing from them is one with no
      *    CRAM, which gets called, and its family rebuilt, as soon as it has one.
-     *  - `*.dnm.*` - DNM_EXTRACTION is included by no workflow, so nothing would regenerate
+     *  - `*.dnm.*` - left by DNM_EXTRACTION, since removed, so nothing would regenerate
      *    them. A file left stale is recoverable; a file deleted that nothing rebuilds is not.
      *  - `extractor/` - the plan does no completeness check for it, so deleting would not
      *    cause a rebuild either.

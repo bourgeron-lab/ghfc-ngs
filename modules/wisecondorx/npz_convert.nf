@@ -18,4 +18,9 @@ process NPZ_CONVERT {
     """
     wisecondorx convert ${cram} ${barcode}.${params.wisecondorx_binsize}.npz --reference ${ref} --binsize ${params.wisecondorx_binsize}
     """
+
+    stub:
+    """
+    touch ${barcode}.${params.wisecondorx_binsize}.npz
+    """
 }

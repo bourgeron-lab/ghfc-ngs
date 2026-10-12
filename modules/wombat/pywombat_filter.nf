@@ -13,4 +13,10 @@ process PYWOMBAT_FILTER {
         --bcf ${norm_bcf} --fasta ${params.ref} \
         -o ${fid}.rare.${vep_config_name}.filtered.${wombat_config_name} -v
     """
+
+    stub:
+    """
+    touch ${fid}.rare.${vep_config_name}.filtered.${wombat_config_name}.tsv
+    touch ${fid}.rare.${vep_config_name}.filtered.${wombat_config_name}.to_annotate.vcf
+    """
 }

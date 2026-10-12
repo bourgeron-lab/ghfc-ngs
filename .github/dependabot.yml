@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keeps the actions used by .github/workflows current; one grouped PR a week at most
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

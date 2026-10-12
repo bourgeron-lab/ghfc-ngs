@@ -151,4 +151,9 @@ process PROCESS_FAM_TSV {
     
     print(f"Found {len(found_df)} variant matches, {len(notfound_df)} not found")
     """
+
+    stub:
+    """
+    touch ${fid}.${original_filename}.fam_tsv.found.tsv ${fid}.${original_filename}.fam_tsv.notfound.tsv
+    """
 }

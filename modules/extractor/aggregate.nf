@@ -59,4 +59,9 @@ process AGGREGATE {
     n_notfound, n_notfound_rows = aggregate_files('*.fam_tsv.notfound.tsv', f"{original_filename}.fam_tsv.notfound.tsv", 'notfound')
     print(f"Aggregated {n_notfound} fam_tsv.notfound files with {n_notfound_rows} total rows")
     """
+
+    stub:
+    """
+    touch ${original_filename}.summary.tsv ${original_filename}.fam_tsv.found.tsv ${original_filename}.fam_tsv.notfound.tsv
+    """
 }

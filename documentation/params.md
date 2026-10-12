@@ -653,8 +653,8 @@ than tune them.
 
 | Key(s) | Why it does nothing |
 |---|---|
-| `annotation_dnm_min_callrate`, `annotation_dnm_min_DP`, `annotation_dnm_min_GQ`, `annotation_dnm_min_VAF` | Read only by the `DNM_EXTRACTION` process, which is **defined but never invoked** by any workflow. The de novo thresholds in effect are whatever a wombat config specifies. |
-| `ref_par1_start`, `ref_par1_end`, `ref_par2_start`, `ref_par2_end` | Same: the pseudo-autosomal coordinates are only consumed by `DNM_EXTRACTION`. |
+| `annotation_dnm_min_callrate`, `annotation_dnm_min_DP`, `annotation_dnm_min_GQ`, `annotation_dnm_min_VAF` | Were read only by the `DNM_EXTRACTION` process, which no workflow ever invoked and which has been removed. The de novo thresholds in effect are whatever a wombat config specifies. |
+| `ref_par1_start`, `ref_par1_end`, `ref_par2_start`, `ref_par2_end` | Same: the pseudo-autosomal coordinates were only consumed by the removed `DNM_EXTRACTION`. |
 | `slurm_account`, `slurm_partition` | SLURM options are hardcoded in the `clusterOptions` strings in `nextflow.config`. Change them there. |
 | `bin_size` | Present in both files in `params_example/`. The code reads `bin`. Those cohorts silently run with `bin = 1000`. |
 | `oldref`, `cram4realignment_pattern` | Superseded by `old_ref_37` / `old_ref_38`. |

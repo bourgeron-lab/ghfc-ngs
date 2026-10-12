@@ -103,4 +103,9 @@ process PROCESS_IND_GVCF {
     found_count = result_df['gvcf_FILTER'].notna().sum()
     print(f"Found {found_count}/{len(result_df)} variants in gVCF for {barcode}")
     """
+
+    stub:
+    """
+    touch ${barcode}.${original_filename}.ind_gvcf.tsv
+    """
 }
