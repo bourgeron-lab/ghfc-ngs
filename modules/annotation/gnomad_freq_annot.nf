@@ -30,7 +30,7 @@ process GNOMAD_FREQ_ANNOT {
 
   // No publishDir - this is an intermediate file kept only in work directory
 
-  container 'docker://staphb/bcftools:latest'
+  container 'docker://staphb/bcftools:1.24'
   
   label 'gnomad_annotation'
 

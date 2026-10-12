@@ -38,7 +38,7 @@ process BCFTOOLS_ANNOTATE {
     mode: 'copy',
     pattern: "*.annotated.bcf*"
 
-  container 'docker://staphb/bcftools:latest'
+  container 'docker://staphb/bcftools:1.24'
   
   label 'bcftools_annotate'
 

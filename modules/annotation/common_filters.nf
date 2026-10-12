@@ -35,7 +35,7 @@ process COMMON_FILTERS {
     mode: 'copy',
     pattern: "${fid}.common_gt.bcf*"
 
-  container 'docker://staphb/bcftools:latest'
+  container 'docker://staphb/bcftools:1.24'
   
   label 'common_filtering'
 
