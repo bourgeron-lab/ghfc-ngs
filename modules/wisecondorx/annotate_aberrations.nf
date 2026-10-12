@@ -36,7 +36,7 @@ process ANNOTATE_ABERRATIONS {
     mode: 'copy',
     pattern: "${fid}_aberrations.annotated.bed"
 
-  container 'docker://staphb/bedtools:latest'
+  container 'docker://staphb/bedtools:2.31.1'
   
   label 'annotate_aberrations'
 

@@ -35,8 +35,6 @@ process VEP_ANNOTATION {
     mode: 'copy',
     pattern: "*.${params.vep_config_name}.vcf.gz*"
 
-  container 'ensemblorg/ensembl-vep:release_110.1'
-  
   label 'vep'
 
   input:

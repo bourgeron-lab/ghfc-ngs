@@ -37,7 +37,7 @@ process GNOMAD_FREQ_FILTER {
     mode: 'copy',
     pattern: "${fid}.{rare.vcf.gz*,common.bcf*}"
 
-  container 'docker://staphb/bcftools:latest'
+  container 'docker://staphb/bcftools:1.24'
   
   label 'gnomad_filtering'
 

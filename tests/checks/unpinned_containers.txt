@@ -1,7 +1,3 @@
 # Container images used without a version tag, kept only so CI accepts them until they are
 # pinned. config_refs.py fails on any unpinned image not listed here, and on any entry here that
 # is no longer used unpinned - so this list can only shrink. Do not add to it: pin the image.
-fcliquet/vcf2bedgraph:latest
-staphb/bcftools:latest
-staphb/bedtools:latest
-staphb/htslib:latest

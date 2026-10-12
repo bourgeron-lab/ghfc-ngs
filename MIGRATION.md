@@ -67,7 +67,7 @@ The migration processes use the following resources on SLURM:
 
 - **VCF to BCF Conversion**: 2 CPUs, 8 GB memory, 4 hours
 - **Cleanup**: 1 CPU, 2 GB memory, 1 hour
-- **Container**: `staphb/bcftools:latest` (via Apptainer)
+- **Container**: `staphb/bcftools:1.24` (via Apptainer)
 
 These settings are defined in `nextflow.config` and can be overridden if needed.
 
