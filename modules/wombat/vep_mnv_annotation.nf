@@ -21,4 +21,9 @@ process VEP_MNV_ANNOTATION {
         --tab \
         --force_overwrite
     """
+
+    stub:
+    """
+    touch ${fid}.mnv_annotations.${wombat_config_name}.tsv
+    """
 }

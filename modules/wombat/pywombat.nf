@@ -25,4 +25,9 @@ process PYWOMBAT {
     echo "===="
     wombat filter ${annotated_parquet} -p ${pedigree} -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref} -v
     """
+
+    stub:
+    """
+    touch ${fid}.rare.${vep_config_name}.annotated.${wombat_config_name}.tsv
+    """
 }

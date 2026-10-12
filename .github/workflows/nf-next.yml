@@ -1,0 +1,51 @@
+name: Nextflow next (advisory)
+
+# How far the pipeline is from the newest Nextflow and its strict syntax parser, the default
+# from 26.04 on. Never required for a merge: it reports, in the job summary, so the gap can be
+# closed before the cluster upgrades rather than after.
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: nextflow lint (latest, strict parser)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install the latest Nextflow
+        run: |
+          curl -fsSL https://get.nextflow.io -o "${RUNNER_TEMP}/nextflow"
+          chmod +x "${RUNNER_TEMP}/nextflow"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+      - name: Lint
+        env:
+          NXF_SYNTAX_PARSER: v2
+        run: |
+          nextflow -version
+          set +e
+          nextflow lint main.nf migrate.nf workflows modules nextflow.config -o concise > lint.txt 2>&1
+          status=$?
+          set -e
+          cat lint.txt
+          {
+            echo "### nextflow lint, $(nextflow -version 2>&1 | grep -o 'version [0-9.]*')"
+            echo
+            echo "$(grep -c '^Error' lint.txt || true) errors, $(grep -c '^Warn' lint.txt || true) warnings (exit status ${status})."
+            echo
+            echo '```'
+            grep '^Error' lint.txt || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"

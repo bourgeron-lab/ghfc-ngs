@@ -143,4 +143,9 @@ process PROCESS_FAM_BCF {
     
     print(f"Found {len(found_df)} variant matches in BCF, {len(notfound_df)} not found")
     """
+
+    stub:
+    """
+    touch ${fid}.${original_filename}.fam_bcf.found.tsv ${fid}.${original_filename}.fam_bcf.notfound.tsv
+    """
 }

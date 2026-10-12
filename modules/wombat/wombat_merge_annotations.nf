@@ -19,4 +19,9 @@ process WOMBAT_MERGE_ANNOTATIONS {
         --annotations ${vep_annotations} \
         -o ${fid}.rare.${vep_config_name}.annotated.${wombat_config_name} -v
     """
+
+    stub:
+    """
+    touch ${fid}.rare.${vep_config_name}.annotated.${wombat_config_name}.tsv
+    """
 }

@@ -1,0 +1,177 @@
+name: CI
+
+# Every pull request to main, and main itself, must pass this. Branch protection requires only
+# the final `ci-ok` job, which fails if any other job failed: a job skipped by its path filter
+# then never blocks a merge, and adding a job here needs no change to the protection rule.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (shellcheck, ruff, actionlint, hadolint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: shellcheck and ruff
+        run: tests/lint.sh
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+      - name: hadolint
+        run: |
+          for f in containers/*/Dockerfile; do
+            echo "=== ${f}"
+            docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning - < "${f}"
+          done
+
+  consistency:
+    name: Consistency (params docs, config references, repo hygiene)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: tests/checks/params_doc.py
+      - run: tests/checks/config_refs.py
+      - run: tests/checks/repo_hygiene.sh
+
+  script-tests:
+    name: Script tests (Python 3.12, bcftools)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq bcftools tabix
+      - run: tests/run_script_tests.sh
+
+  script-tests-py36:
+    # The operator tools under scripts/ run on the cluster login node, whose python3 is 3.6
+    name: Script tests (scripts/ on Python 3.6)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker run --rm -v "${PWD}:/repo" -w /repo python:3.6-slim bash tests/run_script_tests.sh scripts
+
+  groovy-lib:
+    name: lib/ unit tests (Nextflow ${{ matrix.nextflow }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        nextflow: ["24.10.5", "25.10.4"]
+    env:
+      NXF_VER: ${{ matrix.nextflow }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nextflow/framework/${{ matrix.nextflow }}
+          key: nextflow-framework-${{ matrix.nextflow }}
+      - run: tests/lib/run.sh
+
+  nextflow:
+    name: Nextflow ${{ matrix.nextflow }} (config, validation, stub DAG)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        nextflow: ["24.10.5", "25.10.4"]
+    env:
+      NXF_VER: ${{ matrix.nextflow }}
+      NXF_ANSI_LOG: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nextflow/framework/${{ matrix.nextflow }}
+          key: nextflow-framework-${{ matrix.nextflow }}
+      - name: Install the Nextflow launcher
+        run: |
+          curl -fsSL https://get.nextflow.io -o "${RUNNER_TEMP}/nextflow"
+          chmod +x "${RUNNER_TEMP}/nextflow"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+      - run: nextflow -version
+      - name: Stub runs
+        run: STUB_OUT="${RUNNER_TEMP}/stub" tests/stub/run.sh
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: stub-nextflow-${{ matrix.nextflow }}
+          path: |
+            ${{ runner.temp }}/stub/**/.nextflow.log
+            ${{ runner.temp }}/stub/**/reports/trace*.txt
+            ${{ runner.temp }}/stub/**/*.tasks.txt
+            ${{ runner.temp }}/stub/**/*.out
+          if-no-files-found: ignore
+
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      containers: ${{ steps.filter.outputs.containers }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            containers:
+              - 'containers/**'
+
+  docker-build:
+    # Builds, never pushes: publishing an image stays a deliberate, manual step
+    name: Docker build (containers/)
+    needs: changes
+    if: needs.changes.outputs.containers == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          for dir in containers/*/; do
+            image=$(basename "${dir}")
+            echo "::group::${image}"
+            docker build --platform linux/amd64 -t "ghfc-ngs-ci/${image}" "${dir}"
+            echo "::endgroup::"
+          done
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [lint, consistency, script-tests, script-tests-py36, groovy-lib, nextflow, changes, docker-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every job passed or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            case "${r}" in success|skipped) ;; *) exit 1 ;; esac
+          done

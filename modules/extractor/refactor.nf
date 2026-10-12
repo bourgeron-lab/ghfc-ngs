@@ -203,4 +203,20 @@ process REFACTOR {
     
     print(f"Processed {len(result_df)} variants into {len(families_processed)} families and {len(samples_processed)} samples")
     """
+
+    stub:
+    // Every family and sample of the pedigree, laid out as the script lays them out
+    """
+    awk '\$1 != "FID" && NF { print \$1 }' ${pedigree} | sort -u > family_list.txt
+    awk '\$1 != "FID" && NF { print \$2 }' ${pedigree} | sort -u > sample_list.txt
+    shard() { local s=\$(printf '%s' "\$1" | tr -d '._-' | tr '[:lower:]' '[:upper:]'); printf '%s/%s' "\${s: -1}" "\${s: -2:1}"; }
+    while read -r id; do
+        mkdir -p families/\$(shard "\$id")/\$id/extractor
+        touch families/\$(shard "\$id")/\$id/extractor/\$id.${original_filename}.tsv
+    done < family_list.txt
+    while read -r id; do
+        mkdir -p samples/\$(shard "\$id")/\$id/extractor
+        touch samples/\$(shard "\$id")/\$id/extractor/\$id.${original_filename}.tsv
+    done < sample_list.txt
+    """
 }

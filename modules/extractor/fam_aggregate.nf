@@ -108,4 +108,9 @@ process FAM_AGGREGATE {
     print(f"  - Found in Wombat: {found_wombat}")
     print(f"  - Found in gVCF: {found_gvcf}")
     """
+
+    stub:
+    """
+    touch ${fid}.${original_filename}.summary.tsv
+    """
 }

@@ -61,7 +61,9 @@ process MAKE_EXAMPLES {
     for i in {0..${max_task_id}}; do
         task_id=\$(printf "%05d" \$i)
         touch make_examples.tfrecord-\${task_id}-of-${num_threads_str}.gz
+        touch make_examples.tfrecord-\${task_id}-of-${num_threads_str}.gz.example_info.json
         touch gvcf.tfrecord-\${task_id}-of-${num_threads_str}.gz
+        touch make_examples_call_variant_outputs.tfrecord-\${task_id}-of-${num_threads_str}.gz
     done
     """
 }

@@ -1109,21 +1109,39 @@ glnexus_config: "DeepVariant_unfiltered"  # Default
 - **Large families (>10 individuals)**: May need increased memory and time
 - **Very large families (>50 individuals)**: Consider splitting or specialized configuration
 
-## Testing
+## Testing and CI
 
-### Test Profile
+Every pull request to `main` runs the checks in [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
+and `main` only accepts a pull request once its `ci-ok` check is green. The same checks run
+locally with:
 
 ```bash
-# Quick test with reduced resources
-./run_pipeline.sh --profile test --stub-run --data test_data/
+tests/ci_local.sh
 ```
 
-### Stub Run Features
+| Check | What it guards | Run alone |
+|---|---|---|
+| Lint | shellcheck and ruff on every script, found by its shebang; actionlint; hadolint | `tests/lint.sh` |
+| Parameters doc | every key the code reads is in the A-Z table of [documentation/params.md](documentation/params.md), every key marked live there is read, and its counts are right | `tests/checks/params_doc.py` |
+| Config references | no new unpinned container image, no `withName` that matches no process, the step lists of `main.nf` agree | `tests/checks/config_refs.py` |
+| Repository hygiene | scripts keep their exec bit, no large files or run artefacts | `tests/checks/repo_hygiene.sh` |
+| Script tests | every `*_test` next to a script; those under `scripts/` also on Python 3.6, the cluster's | `tests/run_script_tests.sh` |
+| `lib/` tests | unit tests of `lib/*.groovy`, on Nextflow 24.10.5 and 25.10.4 | `tests/lib/run.sh` |
+| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 12 steps run with `-stub-run`, and a second run schedules nothing but the extractor | `tests/stub/run.sh` |
+| Docker build | each `containers/*/Dockerfile` still builds, when one changes; nothing is pushed | |
 
-- **Fast execution**: Creates empty output files instead of running tools
-- **Workflow validation**: Ensures all file paths and dependencies are correct
-- **Resource efficient**: Minimal CPU/memory usage
-- **Error detection**: Catches configuration issues quickly
+The stub runs compare the tasks they ran with
+[`tests/stub/expected/`](tests/stub/expected). A change that means to alter which tasks run - a
+new step or process, a new planner rule - regenerates those lists, and the diff is part of the
+review:
+
+```bash
+tests/stub/run.sh --update
+```
+
+A new process therefore needs a `stub:` block that creates every declared output. A separate,
+advisory workflow lints the pipeline with the newest Nextflow and its strict parser, to show how
+far it is from the next upgrade; it never blocks a merge.
 
 ## Troubleshooting
 
@@ -1211,7 +1229,7 @@ For issues and questions:
 
 ### De Novo Mutation Analysis
 
-De novo mutations are now handled through the Wombat workflow using YAML configuration files (e.g., `de_novo_mutations.yml`). The legacy `dnm_report` script has been replaced by this more flexible configuration-based approach that allows custom filtering criteria.
+De novo mutations are now handled through the Wombat workflow using YAML configuration files (e.g., `de_novo_mutations.yml`). The legacy `dnm_report` script and `DNM_EXTRACTION` process have been removed in favour of this configuration-based approach, which allows custom filtering criteria.
 
 ### File Format Considerations
 
