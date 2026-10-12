@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+
+"""Merge the family ExpansionHunter tables into cohort tables.
+
+Reads every <FID>.<label>.genotypes.tsv in a directory and writes three tables:
+
+<cohort>.<label>.genotypes.tsv
+    The family tables concatenated, with `cohort_percentile` appended: the share of
+    the cohort's founders whose longest allele at the locus is no longer than this
+    member's longest allele, in percent.
+
+<cohort>.<label>.loci.tsv
+    One row per locus: its thresholds, the founders' longest-allele distribution
+    (median, 95th, 99th and 99.9th percentiles, maximum), and how many members of the
+    whole cohort fall in each status. A threshold that half the cohort crosses says
+    something about the locus or the catalog, not about the individuals.
+
+<cohort>.<label>.flags.tsv
+    The genotype rows whose status is pathogenic, carrier or intermediate, most severe
+    first, with the founders' median, 99.9th percentile and maximum alongside.
+
+Founders are members with no genotyped parent in their family, so a family does not
+count an allele several times over. Percentiles are nearest-rank.
+
+The family tables themselves never depend on the cohort, so the concatenated columns
+are the family values unchanged; only the appended columns are cohort-relative.
+"""
+
+import argparse
+import bisect
+import math
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+FLAGGED = ("pathogenic", "carrier", "intermediate")
+STATUSES = ("pathogenic", "carrier", "intermediate", "above_normal")
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def longest(row):
+    counts = [int(row[c]) for c in ("allele1", "allele2") if row[c] not in ("", ".")]
+    return max(counts) if counts else None
+
+
+def nearest_rank(sorted_values, q):
+    if not sorted_values:
+        return "."
+    k = max(1, math.ceil(q * len(sorted_values)))
+    return str(sorted_values[k - 1])
+
+
+def read_tables(indir, label):
+    suffix = f".{label}.genotypes.tsv"
+    paths = sorted(p for p in Path(indir).iterdir() if p.name.endswith(suffix))
+    if not paths:
+        die(f"no *{suffix} family tables in {indir}")
+    header, rows = None, []
+    for p in paths:
+        with open(p) as fh:
+            h = fh.readline().rstrip("\n").split("\t")
+            if header is None:
+                header = h
+                missing = [c for c in ("family_id", "sample", "father", "mother", "locus",
+                                       "allele1", "allele2", "status", "filter") if c not in h]
+                if missing:
+                    die(f"{p.name} lacks the columns {', '.join(missing)}")
+            elif h != header:
+                die(f"{p.name} has different columns from the other family tables: "
+                    f"tables from different versions of the pipeline have been mixed")
+            for line in fh:
+                if line.strip():
+                    rows.append(dict(zip(header, line.rstrip("\n").split("\t"))))
+    return paths, header, rows
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--input-dir", required=True)
+    ap.add_argument("--cohort", required=True)
+    ap.add_argument("--label", required=True)
+    a = ap.parse_args()
+
+    paths, header, rows = read_tables(a.input_dir, a.label)
+    seen = set()
+    for r in rows:
+        key = (r["sample"], r["locus"])
+        if key in seen:
+            die(f"sample {r['sample']} appears twice at {r['locus']}: is it in two families?")
+        seen.add(key)
+
+    # Founders' longest allele per locus, sorted, and the locus order of first appearance
+    founder_values = defaultdict(list)
+    loci = []
+    first_row = {}
+    for r in rows:
+        if r["locus"] not in first_row:
+            first_row[r["locus"]] = r
+            loci.append(r["locus"])
+        if r["father"] == "." and r["mother"] == ".":
+            v = longest(r)
+            if v is not None:
+                founder_values[r["locus"]].append(v)
+    for values in founder_values.values():
+        values.sort()
+
+    def percentile_of(r):
+        values = founder_values.get(r["locus"])
+        v = longest(r)
+        if not values or v is None:
+            return "."
+        return f"{100 * bisect.bisect_right(values, v) / len(values):.1f}"
+
+    out = Path(f"{a.cohort}.{a.label}.genotypes.tsv")
+    with open(out, "w") as fo:
+        fo.write("\t".join(header + ["cohort_percentile"]) + "\n")
+        for r in rows:
+            r["cohort_percentile"] = percentile_of(r)
+            fo.write("\t".join(r[c] for c in header + ["cohort_percentile"]) + "\n")
+    n_founders = len({(r["family_id"], r["sample"]) for r in rows
+                      if r["father"] == "." and r["mother"] == "."})
+    print(f"Cohort {a.cohort} genotypes: {len(rows)} rows from {len(paths)} families, "
+          f"{n_founders} founders")
+
+    summary = {}
+    status_counts = defaultdict(lambda: defaultdict(int))
+    low_depth = defaultdict(int)
+    samples = defaultdict(set)
+    for r in rows:
+        status_counts[r["locus"]][r["status"]] += 1
+        samples[r["locus"]].add(r["sample"])
+        if r["filter"] != "PASS":
+            low_depth[r["locus"]] += 1
+    loci_cols = ["locus", "chrom", "pos", "end", "motif", "disease", "inheritance",
+                 "normal_max", "intermediate_min", "pathogenic_min",
+                 "n_samples", "n_founders", "founders_median", "founders_p95",
+                 "founders_p99", "founders_p99.9", "founders_max"] + \
+                [f"n_{s}" for s in STATUSES] + ["n_not_pass"]
+    with open(f"{a.cohort}.{a.label}.loci.tsv", "w") as fo:
+        fo.write("\t".join(loci_cols) + "\n")
+        for locus in loci:
+            first = first_row[locus]
+            values = founder_values.get(locus, [])
+            s = {c: first.get(c, ".") for c in loci_cols[:10]}
+            s.update({
+                "n_samples": str(len(samples[locus])),
+                "n_founders": str(len(values)),
+                "founders_median": nearest_rank(values, 0.5),
+                "founders_p95": nearest_rank(values, 0.95),
+                "founders_p99": nearest_rank(values, 0.99),
+                "founders_p99.9": nearest_rank(values, 0.999),
+                "founders_max": str(values[-1]) if values else ".",
+                "n_not_pass": str(low_depth[locus]),
+            })
+            for st in STATUSES:
+                s[f"n_{st}"] = str(status_counts[locus][st])
+            summary[locus] = s
+            fo.write("\t".join(s[c] for c in loci_cols) + "\n")
+
+    flag_cols = header + ["cohort_percentile", "founders_median", "founders_p99.9", "founders_max"]
+    flagged = [r for r in rows if r["status"] in FLAGGED]
+    flagged.sort(key=lambda r: (FLAGGED.index(r["status"]), loci.index(r["locus"]),
+                                r["family_id"], r["sample"]))
+    with open(f"{a.cohort}.{a.label}.flags.tsv", "w") as fo:
+        fo.write("\t".join(flag_cols) + "\n")
+        for r in flagged:
+            for c in ("founders_median", "founders_p99.9", "founders_max"):
+                r[c] = summary[r["locus"]][c]
+            fo.write("\t".join(r[c] for c in flag_cols) + "\n")
+    by_status = {st: sum(r["status"] == st for r in flagged) for st in FLAGGED}
+    print(f"Cohort {a.cohort} flags: " + ", ".join(f"{n} {st}" for st, n in by_status.items()))
+
+
+if __name__ == "__main__":
+    main()

@@ -12,7 +12,8 @@ steps: [
     "wisecondorx",
     "wombat",
     # "ancestry",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
+    # "expansionhunter",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -135,6 +136,21 @@ ancestry_model: "" # Empty uses the model shipped inside the reference bundle
 # Genes in ROH are taken from <annotation_annotation_path>/gencode/<annotation_gencode>
 # .{symbol,ensg}.genes.bed.gz; without annotation_gencode no gene table is written.
 roh_min_gene_roh_mb: 1.0 # Only ROH at least this long are intersected with genes (default: 1.0)
+
+# ExpansionHunter configuration (step "expansionhunter")
+# Genotypes the catalog's short tandem repeats from each sample's CRAM, with ref as the
+# reference and the sex from the pedigree (unknown sex genotypes chrX as female). Each family
+# gets a merged VCF and a genotype table; the cohort a merged VCF, the concatenated table, a
+# per-locus summary and the flagged genotypes.
+#
+# expansionhunter_catalog_name is part of every output file name, like ancestry_panel_name:
+# give a new catalog a new label, or the calls made with the old one are reused as they are.
+expansionhunter_catalog: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/expansionhunter/variant_catalog_custom_JMSA_offtargets.json"
+expansionhunter_catalog_name: "jmsa50"
+# STRipy thresholds used to class each allele normal / above_normal / intermediate / pathogenic.
+# Empty leaves the alleles unclassified. Not part of any file name: after changing it, delete
+# the families' and the cohort's str/expansionhunter/*.tsv to have them written again.
+expansionhunter_thresholds: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/expansionhunter/str_thresholds.stripy.tsv"
 
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])

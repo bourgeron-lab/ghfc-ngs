@@ -118,9 +118,13 @@ flowchart TB
 
     subgraph expansionhunter [**Expansion Hunter**]
         direction TB
-        ehr_call["expansion hunter call"]
-        ehr_file["families/**{FID}**/strs/**{FID}**.ehr.**{catalog}**.tsv"]:::of
-        ehr_call --> ehr_file
+        eh_call["ExpansionHunter 5.0.0 (catalog, sex from pedigree)"]
+        eh_sample["samples/**{barcode}**/str/expansionhunter/**{barcode}**.**{catalog}**.{vcf,json}"]:::os
+        eh_merge["bcftools merge + genotype table (STRipy thresholds)"]
+        eh_family["families/**{FID}**/str/expansionhunter/**{FID}**.**{catalog}**.{vcf.gz,genotypes.tsv}"]:::of
+        eh_concat["bcftools merge + tables (founders' distribution, flags)"]
+        eh_cohort["cohorts/**{cohort}**/str/expansionhunter/**{cohort}**.**{catalog}**.{vcf.gz,genotypes,loci,flags}"]:::oc
+        eh_call --> eh_sample --> eh_merge --> eh_family --> eh_concat --> eh_cohort
     end
 
     subgraph wisecondorx [**WisecondorX**]

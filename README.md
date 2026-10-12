@@ -18,6 +18,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 - **Variant extraction** from custom TSV lists with liftover support
 - **Genetic ancestry and polygenic scores** per family and per cohort, projected onto a global reference panel
 - **Runs of homozygosity and inbreeding** (F_ROH) per individual, scored against ancestry-matched reference genomes, with genes in ROH
+- **Short tandem repeat genotyping** with ExpansionHunter per sample, merged per family and per cohort, each allele classed against published pathogenic thresholds
 - **Unit merging** for samples with multiple sequencing runs
 - **SLURM integration** with configurable resource allocation
 - **Container support** via Apptainer/Singularity
@@ -297,7 +298,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports ten main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports twelve main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -312,6 +313,7 @@ The pipeline supports ten main steps that must be explicitly listed in the `step
 - **`extractor`**: Extract specific variants from TSV lists across family BCFs, Wombat outputs, or individual gVCFs. Supports GRCh37→GRCh38 liftover.
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
 - **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
+- **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution.
 
 **Step Dependencies:**
 
@@ -325,6 +327,7 @@ The pipeline supports ten main steps that must be explicitly listed in the `step
 - `extractor` requires normalized BCFs, Wombat outputs, or gVCFs depending on extraction mode
 - `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
 - `roh` requires the ancestry step's family panel and ancestry table (needs `ancestry` in `steps` if they are missing). Like `ancestry` it never reads the call sets, so `steps: ["ancestry", "roh"]` runs on its own
+- `expansionhunter` requires CRAM files. Like `wisecondorx`, a sample with no CRAM is not sent to alignment: it is left out of its family's ExpansionHunter files, with a warning
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -512,6 +515,43 @@ modules/roh/scripts/roh_cohort_merge_test
 
 **Outputs:** Per family: per-individual inbreeding table, ROH segments, genes in ROH, pairwise kinship (families of two or more), QC JSON. Per cohort: their concatenations and the founders' ROH window counts.
 
+#### ExpansionHunter Workflow
+
+Short tandem repeat (STR) genotyping with [ExpansionHunter](https://github.com/Illumina/ExpansionHunter) v5.0.0, per sample, then merged per family and per cohort:
+1. **Calling** - Per sample, every locus of `expansionhunter_catalog` is genotyped from the CRAM, with the sex from the pedigree. The realigned reads are kept, sorted and indexed, for IGV or REViewer
+2. **Family merge** - The members' VCFs are merged into one, and a genotype table is written: one row per locus and member, with each allele's repeat count, confidence interval, read support and class against `expansionhunter_thresholds`
+3. **Cohort merge** - The family VCFs are merged. The family tables are concatenated, with each member's percentile among the cohort's founders. A per-locus summary and the flagged genotypes are written alongside
+
+ExpansionHunter does not count the repeat in the alignment as it stands. It builds a graph of each locus (left flank, repeat, right flank), realigns the region's reads onto it, and estimates the length of both alleles. That is how it goes past the read length: a read lying wholly inside the repeat gives no exact length, but the number of such reads bounds the expansion from below.
+
+**Sex.** ExpansionHunter genotypes chrX according to the sex it is given: one allele for a male, two for a female. It is read from the pedigree. A sample of unknown sex (0, -9) is genotyped as female, which only matters at the chrX loci (AR, ARX, FMR1, AFF2 and ZIC3 in the default catalog).
+
+**CRAM 3.1.** The image's ExpansionHunter is the bioconda build linked against htslib 1.22, which reads CRAM 3.1 directly. Illumina's release binary cannot, and the cohort's first run had to transcode every CRAM 3.1 to 3.0 first, at up to an hour per sample.
+
+**Reading the genotype tables.** In `genotypes.tsv`:
+- `allele1` and `allele2` are the repeat counts of the two alleles, `allele1` being the shorter. A male's chrX locus has one allele, and `allele2` is `.`.
+- `allele1_support` and `allele2_support` say what kind of reads support each allele, and matter most:
+  - `SPANNING` - reads cover the whole repeat: the length is exact, and the allele short.
+  - `FLANKING` - only the flanks are covered: the length is a lower bound.
+  - `INREPEAT` - reads lie wholly inside the repeat: a frank expansion beyond the read length, the mode expected of a pathogenic expansion.
+- A long allele supported by `FLANKING` reads alone, at a locus where the rest of the cohort is `SPANNING`, is a probable artefact. `allele*_ci` gives the confidence interval; a wide one on a long allele is the norm.
+- `locus_coverage` is the local depth. ExpansionHunter's `filter` is `LowDepth` below 10x, or when fewer than 5 reads span a breakend.
+- `allele1_class` and `allele2_class` compare each count with `expansionhunter_thresholds`, inclusive thresholds checked in this order: `pathogenic` (at least `pathogenic_min`), `intermediate` (at least `intermediate_min`, when the locus has one), `normal` (at most `normal_max`, or anything lower when `normal_max` is empty), otherwise `above_normal`. A locus with no thresholds row is left `.`.
+- `status` combines a member's alleles by inheritance. At AR loci, and XLR loci with two alleles, one pathogenic allele makes a `carrier` and two make `pathogenic`. Any other inheritance takes the highest allele class.
+- `father` and `mother` are filled in only for parents genotyped in the family. `parents_max_allele` is the longest allele either of them carries. A child's allele well above it is an expansion on transmission, or an artefact.
+
+**Comparing with the cohort.** An allele classed pathogenic in dozens of unrelated individuals says something about the locus, the catalog or the thresholds, not about the individuals. `loci.tsv` gives, per locus, the founders' longest-allele distribution and how many members reach each class. In GHFC-GRCh38, about 200 samples carry an ARX_2 allele at or above its pathogenic threshold, and XYLT1's catalog region counts more units than the published normal range, so nearly every sample is `above_normal`. Founders are members with no genotyped parent in their family, so a family does not count an allele several times over. `cohort_percentile` places each member's longest allele among them.
+
+**The catalog label.** Nothing on disk records which catalog a call was made with, so `expansionhunter_catalog_name` is part of every output file name. Give a new catalog a new label and it is recomputed in full; keep the label and the existing calls are reused as they are. The thresholds are not in any file name: after changing them, delete the families' and the cohort's `str/expansionhunter/*.tsv`, and they are written again from the existing calls.
+
+The family and cohort table scripts ship with a self-contained test that needs only `python3`:
+
+```bash
+modules/expansionhunter/scripts/eh_tables_test
+```
+
+**Outputs:** Per sample: VCF, JSON and realigned BAM. Per family: merged VCF and genotype table. Per cohort: merged VCF, concatenated genotype table with cohort percentiles, per-locus summary and flagged genotypes.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -569,6 +609,9 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Ancestry/PGS tables (cohort)**: `${data}/cohorts/${cohort_name}/ancestry/${cohort_name}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
 - **ROH tables (family)**: `${data}/families/{S1}/{S2}/${FID}/roh/${FID}.${ancestry_panel_name}.{froh,roh}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
 - **ROH tables (cohort)**: `${data}/cohorts/${cohort_name}/roh/${cohort_name}.${ancestry_panel_name}.{froh,roh,roh_windows}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
+- **ExpansionHunter calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${expansionhunter_catalog_name}.{vcf,json}` (both non-empty)
+- **ExpansionHunter files (family)**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv}`
+- **ExpansionHunter files (cohort)**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv,loci.tsv,flags.tsv}`
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -624,10 +667,16 @@ data/
 │               │       ├── BC001.npz
 │               │       ├── BC001_aberrations.bed
 │               │       └── BC001_aberrations.chr.bed
-│               └── ancestry/      # Panel genotypes for ancestry/PGS
-│                   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf
-│                   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf.csi
-│                   └── BC001.panel_gt.apgs_b1.0.0_dp10gq20.stats.tsv   # Per-sample call rate
+│               ├── ancestry/      # Panel genotypes for ancestry/PGS
+│               │   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf
+│               │   ├── BC001.panel_gt.apgs_b1.0.0_dp10gq20.bcf.csi
+│               │   └── BC001.panel_gt.apgs_b1.0.0_dp10gq20.stats.tsv   # Per-sample call rate
+│               └── str/
+│                   └── expansionhunter/
+│                       ├── BC001.jmsa50.vcf                   # Repeat genotypes
+│                       ├── BC001.jmsa50.json
+│                       ├── BC001.jmsa50_realigned.bam         # Reads realigned to the loci (IGV)
+│                       └── BC001.jmsa50_realigned.bam.bai
 ├── families/                      # Family-specific output directories (sharded)
 │   └── {S1}/                      # Shard level 1 (single character)
 │       └── {S2}/                  # Shard level 2 (single character)
@@ -670,6 +719,11 @@ data/
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.roh_genes.tsv       # Genes in ROH >= 1 Mb
 │                   ├── FID001.apgs_b1.0.0_dp10gq20.kinship.tsv         # Pairwise KING kinship
 │                   └── FID001.apgs_b1.0.0_dp10gq20.roh.qc.json
+│               └── str/
+│                   └── expansionhunter/
+│                       ├── FID001.jmsa50.vcf.gz               # Members' repeat genotypes merged
+│                       ├── FID001.jmsa50.vcf.gz.tbi
+│                       └── FID001.jmsa50.genotypes.tsv        # Locus x member, alleles classed
 ├── cohorts/                       # Cohort-specific directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── COHORT_NAME.pedigree.tsv                 # Family structure (required)
@@ -690,6 +744,12 @@ data/
 │           └── COHORT_NAME.apgs_b1.0.0_dp10gq20.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv
 │       └── roh/
 │           └── COHORT_NAME.apgs_b1.0.0_dp10gq20.{froh,roh,roh_genes,kinship,roh_windows}.tsv
+│       └── str/
+│           └── expansionhunter/
+│               ├── COHORT_NAME.jmsa50.vcf.gz                  # Every family merged
+│               ├── COHORT_NAME.jmsa50.genotypes.tsv           # Family tables + cohort percentile
+│               ├── COHORT_NAME.jmsa50.loci.tsv                # Per-locus distribution and counts
+│               └── COHORT_NAME.jmsa50.flags.tsv               # Pathogenic, carrier, intermediate
 └── extractor/                     # Extractor outputs (if TSV lists provided)
     └── VARIANT_LIST/
         ├── VARIANT_LIST.extracted.tsv               # Extracted variants
@@ -832,6 +892,20 @@ Paths use `${P}` as shorthand for `${ancestry_panel_name}`.
 - `homref_observed_over_expected` - per sample, 1.00–1.11 on gVCF-genotyped data. The command refuses below 0.75 and warns below 0.90; a trio's `common_gt.bcf`-style input sits near 0.6.
 - the `warnings` list - samples with a call rate under 0.90 are flagged `qc_pass=false` in `froh.tsv`. They are still scored: a missing site thins the evidence but does not bias it.
 
+### ExpansionHunter Outputs
+
+Paths use `${L}` as shorthand for `${expansionhunter_catalog_name}`.
+
+- **Sample calls**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${L}.{vcf,json}`, with the sample named by its bare barcode
+- **Realigned reads**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${L}_realigned.bam` (and `.bai`), sorted
+- **Family VCF**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${L}.vcf.gz` (and `.tbi`), one record per locus
+- **Family genotype table**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${L}.genotypes.tsv`
+- **Cohort VCF**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${L}.vcf.gz` (and `.tbi`)
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${L}.{genotypes,loci,flags}.tsv`
+  - `genotypes` - the family tables concatenated, plus `cohort_percentile`
+  - `loci` - per locus: thresholds, the founders' median, 95th, 99th and 99.9th percentile and maximum, and the number of members per status and not passing ExpansionHunter's filter
+  - `flags` - the genotypes whose status is pathogenic, carrier or intermediate, most severe first, with the founders' median, 99.9th percentile and maximum
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -860,6 +934,8 @@ WOMBAT_COHORT: cohort wombat merges due: 1
 SNVS_COHORT: common variants cohort bcf merge: Yes
 == SVs Calling ==
 WISECONDORX PREDICT: 0 individuals done and 3 to do
+== Short Tandem Repeats ==
+EXPANSIONHUNTER: 0 individuals done and 3 to do (0 with no CRAM), 2 families to merge, cohort merge: Yes
 == Ancestry / PGS ==
 ANCESTRY: Skipped (step not requested)
 == Other ==
@@ -910,7 +986,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
 ```
 
 ### Custom Configuration
@@ -1159,4 +1235,6 @@ If you use this pipeline in your research, please cite:
 - **GLnexus**: Yun, T., et al. (2021). Accurate, scalable cohort variant calls using DeepVariant and GLnexus. Bioinformatics, 37(5), 682-685.
 - **VEP**: McLaren, W., et al. (2016). The Ensembl Variant Effect Predictor. Genome Biology, 17(1), 122.
 - **WisecondorX**: Raman, L., et al. (2019). WisecondorX: improved copy number detection for routine shallow whole-genome sequencing. Nucleic Acids Research, 47(4), 1605-1614.
+- **ExpansionHunter**: Dolzhenko, E., et al. (2019). ExpansionHunter: a sequence-graph-based tool to analyze variation in short tandem repeat regions. Bioinformatics, 35(22), 4754-4756.
+- **STRipy** (repeat thresholds): Halman, A., Dolzhenko, E., Oshlack, A. (2022). STRipy: a graphical application for enhanced genotyping of pathogenic short tandem repeats in sequencing data. Human Mutation, 43(7), 859-868.
 - **gnomAD**: Chen, S., et al. (2024). A genomic mutational constraint map using variation in 76,156 human genomes. Nature, 625, 92-100.

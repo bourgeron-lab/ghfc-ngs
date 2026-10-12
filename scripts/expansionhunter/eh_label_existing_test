@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+# Self-contained check of eh_label_existing.
+#
+# A synthetic samples/ tree with one sample of each kind: a call to rename, one already
+# labelled, one made with another catalog, one whose VCF names another sample, one with a
+# labelled file in the way, and a sample with no call. Asserts that a dry run touches nothing,
+# that --apply renames exactly the first, BAM and index included, and that nothing else moves.
+# Needs only python3.
+#
+#   scripts/expansionhunter/eh_label_existing_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/eh_label_existing"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+cat > catalog.json <<'EOF'
+[
+  {"LocusId": "HTT", "LocusStructure": "(CAG)*", "ReferenceRegion": "chr4:3074876-3074933", "VariantType": "Repeat"},
+  {"LocusId": "FXN", "LocusStructure": "(A)*(GAA)*", "ReferenceRegion": ["chr9:1-2", "chr9:2-3"],
+   "VariantType": ["Repeat", "RareRepeat"], "VariantId": ["FXN_A", "FXN"]}
+]
+EOF
+
+# call <barcode> <vcf sample name> <varid...>
+call() {
+    local id=$1 name=$2; shift 2
+    local d="data/samples/${id: -1}/${id: -2:1}/${id}/str/expansionhunter"
+    mkdir -p "${d}"
+    {
+        printf '##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "${name}"
+        for v in "$@"; do printf 'chr1\t1\t.\tC\t.\t.\tPASS\tEND=2;VARID=%s;REPID=%s\tGT\t0/0\n' "${v}" "${v}"; done
+    } > "${d}/${id}.vcf"
+    echo '{}' > "${d}/${id}.json"
+    echo bam > "${d}/${id}_realigned.bam"
+    echo bai > "${d}/${id}_realigned.bam.bai"
+}
+dir() { echo "data/samples/${1: -1}/${1: -2:1}/${1}/str/expansionhunter"; }
+
+call GOOD01 GOOD01 HTT FXN_A FXN
+call OTHER2 OTHER2 HTT FXN_A FXN DMPK
+call NAMED3 NAMED3.GRCh38_GIABv3 HTT FXN_A FXN
+call CLASH4 CLASH4 HTT FXN_A FXN
+touch "$(dir CLASH4)/CLASH4.t1.json"
+mkdir -p "$(dir DONE05)" && touch "$(dir DONE05)/DONE05.t1.vcf"
+mkdir -p data/samples/6/0/NOCALL6/deepvariant
+
+before=$(cd data && find . -type f | sort)
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+
+python3 "${script}" --data data --catalog catalog.json --label t1 --report dry.tsv > dry.log 2>&1
+check "a dry run renames nothing" '[ "$(cd data && find . -type f | sort)" = "${before}" ]'
+check "a dry run reports the one sample to rename" 'grep -q "^GOOD01	rename	4 files$" dry.tsv'
+
+python3 "${script}" --data data --catalog catalog.json --label t1 --report run.tsv --apply > run.log 2>&1
+G=$(dir GOOD01)
+check "the call is renamed, BAM and index included" \
+    '[ -s "${G}/GOOD01.t1.vcf" ] && [ -s "${G}/GOOD01.t1.json" ] && [ -s "${G}/GOOD01.t1_realigned.bam" ] && [ -s "${G}/GOOD01.t1_realigned.bam.bai" ]'
+check "no unlabelled file is left behind" '[ -z "$(ls "${G}" | grep -v "\.t1")" ]'
+check "a call with another catalog is refused" \
+    'grep -q "^OTHER2	refused	not this catalog: 0 catalog variants absent, 1 unknown (DMPK)$" run.tsv && [ -e "$(dir OTHER2)/OTHER2.vcf" ]'
+check "a VCF naming another sample is refused" 'grep -q "^NAMED3	refused" run.tsv && [ -e "$(dir NAMED3)/NAMED3.vcf" ]'
+check "a labelled file in the way blocks the whole sample" \
+    'grep -q "^CLASH4	refused	already exists: CLASH4.t1.json$" run.tsv && [ -e "$(dir CLASH4)/CLASH4.vcf" ] && [ ! -e "$(dir CLASH4)/CLASH4.t1.vcf" ]'
+check "an already labelled sample is left alone" 'grep -q "^DONE05	already_labelled" run.tsv'
+check "a sample with no str/ directory is not listed" '! grep -q NOCALL6 run.tsv'
+check "a second run finds nothing more to do" \
+    'python3 "${script}" --data data --catalog catalog.json --label t1 --report again.tsv --apply >/dev/null 2>&1; ! grep -q "	renamed	" again.tsv'
+check "a label with a slash is refused" \
+    '! python3 "${script}" --data data --catalog catalog.json --label "a/b" --report x.tsv >/dev/null 2>&1'
+
+[ "${fail}" -eq 0 ] && echo "eh_label_existing: all checks passed" || echo "eh_label_existing: FAILURES"
+exit "${fail}"

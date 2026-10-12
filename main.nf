@@ -22,6 +22,7 @@ include { WOMBAT } from './workflows/wombat'
 include { EXTRACTOR } from './workflows/extractor'
 include { ANCESTRY } from './workflows/ancestry'
 include { ROH } from './workflows/roh'
+include { EXPANSIONHUNTER } from './workflows/expansionhunter'
 
 /*
 ========================================================================================
@@ -104,6 +105,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Same rule: planned only when requested
         roh:                ('roh' in pipeline_steps)
                                 ? CohortState.progress(plan.roh.existing.size(), n_families)
+                                : null,
+        // Samples called, as for wisecondorx; the family and cohort files follow from them
+        expansionhunter:    ('expansionhunter' in pipeline_steps)
+                                ? CohortState.progress(plan.expansionhunter.existing.size(), n_individuals)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
         snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
@@ -379,11 +384,11 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -421,6 +426,31 @@ if ('roh' in pipeline_steps) {
     if (!new File(roh_sites).exists()) {
         recordFailedRun("ancestry_reference has no roh/ tier")
         exit 1, "ERROR: the 'roh' step needs the reference bundle's roh/ tier, and ${roh_sites} does not exist. Add it with ancestry-pgs bundle/add_roh_tier.py (bundle >= 1.1.0)"
+    }
+}
+
+// ExpansionHunter genotypes against a catalog named by its label, and reads the CRAMs with the
+// alignment reference. Checked here, or every sample's task would fail on it one at a time.
+if ('expansionhunter' in pipeline_steps) {
+    def missing_eh_params = ['expansionhunter_catalog', 'expansionhunter_catalog_name', 'ref']
+        .findAll { key -> !params[key] }
+    if (missing_eh_params) {
+        recordFailedRun("expansionhunter step is missing ${missing_eh_params.join(', ')}")
+        exit 1, "ERROR: the 'expansionhunter' step requires ${missing_eh_params.join(', ')} to be set"
+    }
+    // It becomes part of file names, so no separators and no spaces
+    if (!(params.expansionhunter_catalog_name.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+        recordFailedRun("invalid expansionhunter_catalog_name")
+        exit 1, "ERROR: expansionhunter_catalog_name '${params.expansionhunter_catalog_name}' may only hold letters, digits, '.', '_' and '-': it is part of every ExpansionHunter file name"
+    }
+    def eh_files = [expansionhunter_catalog: params.expansionhunter_catalog, 'ref index': "${params.ref}.fai"]
+    if (params.expansionhunter_thresholds) {
+        eh_files.expansionhunter_thresholds = params.expansionhunter_thresholds
+    }
+    def absent = eh_files.findAll { _key, path -> !new File(path.toString()).exists() }
+    if (absent) {
+        recordFailedRun("expansionhunter inputs not found: ${absent.keySet().join(', ')}")
+        exit 1, "ERROR: the 'expansionhunter' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
     }
 }
 
@@ -766,6 +796,37 @@ workflow {
             pedigree_data.families
         )
     }
+
+    // Run ExpansionHunter if needed and allowed. Like wisecondorx it reads the CRAMs, existing
+    // and newly aligned; a sample with no CRAM is left out rather than sent to alignment.
+    if ((analysis_plan.expansionhunter.needed.size() > 0 ||
+         analysis_plan.expansionhunter.need_family.size() > 0 ||
+         analysis_plan.expansionhunter.need_cohort_merge) && 'expansionhunter' in pipeline_steps) {
+
+        def eh_tasks = []
+        if (analysis_plan.expansionhunter.needed.size() > 0) {
+            eh_tasks.add("calls for ${analysis_plan.expansionhunter.needed.size()} individuals")
+        }
+        if (analysis_plan.expansionhunter.need_family.size() > 0) {
+            eh_tasks.add("family merge for ${analysis_plan.expansionhunter.need_family.size()} families")
+        }
+        if (analysis_plan.expansionhunter.need_cohort_merge) {
+            eh_tasks.add("cohort merge")
+        }
+        log.info "Running ExpansionHunter: ${eh_tasks.join(', ')}..."
+
+        EXPANSIONHUNTER(
+            all_available_crams,
+            pedigree_data.sex,
+            pedigree_data.family_members,
+            pedigree_file,
+            analysis_plan.expansionhunter.needed,
+            analysis_plan.expansionhunter.existing,
+            analysis_plan.expansionhunter.need_family,
+            analysis_plan.expansionhunter.family_existing,
+            analysis_plan.expansionhunter.need_cohort_merge
+        )
+    }
     
     // Run Extractor if TSV files are provided and step is allowed
     if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
@@ -906,6 +967,9 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
     def families = [] as Set
     def individuals = [] as Set
     def family_members = [:]
+    // barcode -> 'male', 'female' or '' when the pedigree does not say (0, -9, ...). Some
+    // pedigrees write sex as a decimal, 2.0.
+    def sex = [:]
     
     file(pedigree_file).readLines().eachWithIndex { line, index ->
         // Skip comments and empty lines
@@ -930,12 +994,14 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
         families.add(fid)
         individuals.add(barcode)
         family_members[barcode] = fid
+        sex[barcode] = ['1': 'male', '2': 'female'][cols[4].trim().replaceAll(/\.0+$/, '')] ?: ''
     }
     
     return [
         families: families,
         individuals: individuals,
-        family_members: family_members
+        family_members: family_members,
+        sex: sex
     ]
 }
 
@@ -999,6 +1065,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // their ROH inputs come from that run rather than disk. blocked: families with no ancestry
         // outputs on disk and no ancestry step to make them.
         roh: [needed: planBucket(), existing: planBucket(), from_ancestry: planBucket(), blocked: planBucket(), need_cohort_merge: false],
+        // needed/existing/no_cram are samples, the rest families. no_cram: no call on disk and no
+        // CRAM to make one. A family none of whose members can have a call is in neither family
+        // bucket, and out of the cohort files.
+        expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false],
         pedigree_drift: [:]
     ]
 
@@ -1368,6 +1438,58 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
+    // Check existing ExpansionHunter outputs. Only when the step is requested, like wisecondorx.
+    //
+    // The catalog label is part of every file name, as the ancestry panel label is: nothing on
+    // disk records which catalog a call was made with, so a new label is what makes a new
+    // catalog recompute rather than reuse calls made with the old one.
+    if ('expansionhunter' in pipeline_steps) {
+        def label = params.expansionhunter_catalog_name
+
+        individuals.each { barcode ->
+            def prefix = "${Sharding.getSampleDir(params.data, barcode)}/str/expansionhunter/${barcode}.${label}"
+            // length() > 0 rather than exists(): ExpansionHunter never writes either one empty
+            def called = new File("${prefix}.vcf").length() > 0 && new File("${prefix}.json").length() > 0
+            if (called) {
+                plan.expansionhunter.existing.add(barcode)
+            } else if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
+                plan.expansionhunter.needed.add(barcode)
+            } else {
+                // A gVCF-only sample, or one stuck with no input at all: nothing to call it from
+                plan.expansionhunter.no_cram.add(barcode)
+            }
+        }
+
+        // A family is rebuilt when its files are missing or one of its members is (re)called. It
+        // is built from the members that have a call, so one with no CRAM is left out of it.
+        families.each { fid ->
+            def members = members_by_family[fid] ?: []
+            def callable = members.findAll { barcode ->
+                barcode in plan.expansionhunter.existing || barcode in plan.expansionhunter.needed
+            }
+            if (!callable) {
+                return
+            }
+            def prefix = "${Sharding.getFamilyDir(params.data, fid)}/str/expansionhunter/${fid}.${label}"
+            def outputs_exist = ['vcf.gz', 'vcf.gz.tbi', 'genotypes.tsv'].every { ext ->
+                new File("${prefix}.${ext}").exists()
+            }
+            if (outputs_exist && !callable.any { barcode -> barcode in plan.expansionhunter.needed }) {
+                plan.expansionhunter.family_existing.add(fid)
+            } else {
+                plan.expansionhunter.need_family.add(fid)
+            }
+        }
+
+        def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/str/expansionhunter/${params.cohort_name}.${label}"
+        def cohort_exist = ['vcf.gz', 'vcf.gz.tbi', 'genotypes.tsv', 'loci.tsv', 'flags.tsv'].every { ext ->
+            new File("${cohort_prefix}.${ext}").exists()
+        }
+        def any_family = plan.expansionhunter.need_family || plan.expansionhunter.family_existing
+        plan.expansionhunter.need_cohort_merge = any_family &&
+            (!cohort_exist || plan.expansionhunter.need_family.size() > 0)
+    }
+
     // Check existing Wombat files
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
@@ -1443,6 +1565,8 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     SNVS_COHORT: ${'snvs_cohort' in pipeline_steps ? "common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == SVs Calling ==
     WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
+    == Short Tandem Repeats ==
+    EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -1478,6 +1602,13 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.roh.needed) {
         log.info "Families needing ROH/inbreeding: ${analysis_plan.roh.needed.join(', ')}"
+    }
+    if (analysis_plan.expansionhunter.needed) {
+        log.info "Individuals needing ExpansionHunter: ${analysis_plan.expansionhunter.needed.join(', ')}"
+    }
+    if (analysis_plan.expansionhunter.no_cram) {
+        // Not an error, as for wisecondorx: a gVCF-only sample has nothing to genotype repeats from
+        log.warn "${analysis_plan.expansionhunter.no_cram.size()} individuals have no ${params.ref_name} CRAM and no ExpansionHunter call, and are left out of their families' ExpansionHunter files: ${analysis_plan.expansionhunter.no_cram.take(50).join(', ')}${analysis_plan.expansionhunter.no_cram.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
@@ -1785,7 +1916,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")
