@@ -22,10 +22,21 @@ Check.that('wisecondorx files only when the step is in play') {
 }
 Check.that('cohort outputs are grouped by the steps that rebuild them') {
     def groups = StaleFamily.cohortOutputs('/d', 'C', 'v', ['dnm.yaml'], true)
-    assert groups*.steps == [['annotation', 'snvs_cohort'], ['annotation', 'wombat', 'wombat_cohort']]
-    assert groups[0].paths.contains('/d/cohorts/C/svs/wisecondorx/C_aberrations.bed')
+    assert groups*.steps == [['annotation', 'snvs_cohort'], ['annotation', 'wombat', 'wombat_cohort'], ['wisecondorx']]
+    assert groups[0].paths == ['/d/cohorts/C/vcfs/C.common_gt.bcf', '/d/cohorts/C/vcfs/C.common_gt.bcf.csi']
     assert groups[1].paths == ['/d/cohorts/C/wombat/C.rare.v.annotated.dnm.results.tsv']
-    assert StaleFamily.cohortOutputs('/d', 'C', 'v', [], false).size() == 1
+    assert groups[2].paths == ['/d/cohorts/C/svs/wisecondorx/C_aberrations.bed']
+    assert StaleFamily.cohortOutputs('/d', 'C', 'v', [], false)*.steps == [['annotation', 'snvs_cohort']]
+}
+Check.that('the wisecondorx cohort merge waits on its own step, not on snvs_cohort') {
+    def groups = StaleFamily.cohortOutputs('/d', 'C', 'v', [], true)
+    def owner = groups.find { g -> g.paths.any { it.contains('/svs/wisecondorx/') } }
+    assert owner.steps == ['wisecondorx']
+    assert !groups.find { g -> 'snvs_cohort' in g.steps }.paths.any { it.contains('wisecondorx') }
+}
+Check.that('the ancestry, roh and expansionhunter cohort files are never deleted') {
+    def paths = StaleFamily.cohortOutputs('/d', 'C', 'v', ['dnm.yaml'], true).collectMany { it.paths }
+    assert !paths.any { it.contains('/ancestry/') || it.contains('/roh/') || it.contains('/str/') }
 }
 Check.that('a member with a CRAM only needs calling') {
     def r = StaleFamily.recovery(['KID'], ['KID'] as Set, [] as Set, [:], all_steps - 'alignment')

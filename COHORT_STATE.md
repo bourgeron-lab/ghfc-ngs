@@ -235,7 +235,10 @@ Other things worth knowing before you quote a number:
   still counts as done — only the bedgraph is regenerated, never the alignment.
 - **`snvs_cohort` and `wombat_cohort` are cohort-level**: `done` is 0 or 1 out of 1, not a
   count of families. `snvs_cohort` is the common-variant BCF, and `wombat_cohort` is every
-  wombat config's cohort table. A record written before `wombat_cohort` existed counted both
+  wombat config's cohort table. Each is 1 only when its files exist *and* no family that feeds
+  them is still to be annotated (`snvs_cohort`) or to have its wombat tables written
+  (`wombat_cohort`): a cohort file that a newly added family is not yet in reads 0, because the
+  next run will merge it again. A record written before `wombat_cohort` existed counted both
   under `snvs_cohort`.
 - **`completion_measured: "before"` means the numbers predate the run.** A validation failure and
   a `running` record both report the tree as it was at launch.
@@ -315,8 +318,13 @@ requested, or the run died before it could run.
   again with the same flag.
 - **`cohort_outputs_stale`** names cohort merges that are now wrong but were left in place
   because this run could not rebuild them. The common-variant BCF needs `annotation` and
-  `snvs_cohort` in `steps`, and the cohort wombat tables need `annotation`, `wombat` and
-  `wombat_cohort`. They still contain data from call sets that no longer exist.
+  `snvs_cohort` in `steps`, the cohort wombat tables need `annotation`, `wombat` and
+  `wombat_cohort`, and the cohort WisecondorX BED needs `wisecondorx`. They still contain data
+  from call sets that no longer exist. A later run merges them again only if it rebuilds one of
+  their families itself, so if this run rebuilds those families, delete these files by hand
+  afterwards. The merges this run *can* rebuild are deleted
+  (`cohort_outputs_deleted`) even though the run merges them again anyway, so that a run
+  stopped before the merge cannot leave the old one looking current.
 - **`rehearsal` is always `false` here.** A `-preview` or `-stub-run` deletes nothing and
   writes no state file at all, so a record describing a rehearsal cannot exist.
 - **`errors`** is normally empty. An entry means a file could not be deleted; if it names a

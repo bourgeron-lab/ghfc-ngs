@@ -386,13 +386,15 @@ Supports multiple configuration files for different filtering strategies (e.g., 
 #### Wombat Cohort Workflow
 
 Concatenates the Wombat filtered results of every family into one table per configuration. A
-table is only written once every family has its own, never from part of the cohort.
+table is only written once every family has its own, never from part of the cohort, and is
+written again whenever a family's Wombat results are (re)built in the run.
 
 **Outputs:** Cohort-level Wombat TSV files
 
 #### SNVs Cohort Workflow
 
-Merges the common variant BCFs of every family into one cohort-level BCF.
+Merges the common variant BCFs of every family into one cohort-level BCF, again whenever a
+family is (re)annotated in the run.
 
 **Outputs:** Cohort-level common variant BCF
 
@@ -404,7 +406,7 @@ CNV/SV calling using WisecondorX:
 3. **Chr reformat** - Reformat chromosome names
 4. **Family merge** - Merge aberrations within families
 5. **Annotation** - Annotate aberrations with gene and exon information
-6. **Cohort merge** - Merge aberrations across all families
+6. **Cohort merge** - Merge aberrations across all families, again whenever a family's annotated aberrations are (re)built in the run
 
 **Outputs:** NPZ files, individual aberrations BED, family aberrations BED (annotated), cohort aberrations BED
 
@@ -603,6 +605,8 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.${wisecondorx_binsize}.npz`
 - **WisecondorX aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
 - **Cohort BCF files**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf` (and `.csi`)
+- **Cohort Wombat tables**: `${data}/cohorts/${cohort_name}/wombat/${cohort_name}.rare.${vep_config_name}.annotated.${config_name}.results.tsv`
+- **Cohort WisecondorX aberrations**: `${data}/cohorts/${cohort_name}/svs/wisecondorx/${cohort_name}_aberrations.bed`
 - **Panel genotype files (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/ancestry/${barcode}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
 - **Panel genotype files (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.panel_gt.${ancestry_panel_name}.bcf` (and `.csi`)
 - **Ancestry/PGS tables (family)**: `${data}/families/{S1}/{S2}/${FID}/ancestry/${FID}.${ancestry_panel_name}.{pcs,ancestry,Q,pgs_raw,pgs_adjusted,pgs_zscore}.tsv`
@@ -614,6 +618,13 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **ExpansionHunter files (cohort)**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv,loci.tsv,flags.tsv}`
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
+
+Cohort-level files are the exception: each is merged again, from every family, whenever a family
+that feeds it is built or rebuilt in the run - the common-variant BCF when a family is annotated,
+the Wombat tables when a family's Wombat results are written, and the WisecondorX, ancestry, ROH
+and ExpansionHunter cohort files when their family files are. Adding a family to the pedigree is
+enough to have it in every cohort file. A cohort merge skipped in that run - its step not
+listed, or the run stopped first - is not caught up later unless the cohort file is deleted.
 
 These exact paths, derived from the pedigree's IDs, are the only places looked at: the
 `samples/` and `families/` trees are never globbed. A file at any other location - a

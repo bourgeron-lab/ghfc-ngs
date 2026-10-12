@@ -222,8 +222,9 @@ missing prerequisite is only an error when something in *this* run would consume
   `wombat`, `wombat_cohort`, `snvs_cohort` or `extractor` is listed.
 - `annotation` is only demanded when one of `annotation`, `wombat`, `wombat_cohort` or
   `snvs_cohort` is listed.
-- `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due. A cohort
-  table is only ever merged from every family's table, never from part of the cohort.
+- `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due, which it
+  is whenever a family has no wombat tables yet. A cohort table is only ever merged from every
+  family's table, never from part of the cohort.
 - `ancestry` is demanded by `roh` for families with no family panel or ancestry table on disk
   under the current `ancestry_panel_name`.
 - `expansionhunter` demands nothing. Like `wisecondorx`, it reads the CRAMs, and a sample with
@@ -233,9 +234,16 @@ missing prerequisite is only an error when something in *this* run would consume
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
 longer produced.
 
-Both cohort merges only check that their output exists. A cohort table or BCF built before
-families were added stays as it is until you delete it, and the next run then merges it again
-from every family.
+Every cohort-level file is merged again, from every family, whenever a family that feeds it is
+built or rebuilt in the run: the common-variant BCF when a family is annotated, the cohort
+wombat tables when a family's wombat tables are written, the cohort WisecondorX BED when a
+family's aberrations are annotated, as the ancestry, roh and expansionhunter cohort files
+already were. Adding a family to the pedigree is therefore enough to have it in every cohort
+file. On a cohort the size of SPARK that means the common-variant merge is redone for each
+batch of families added; leave `snvs_cohort` out of `steps` until the last batch to merge it
+once. A merge that is skipped, because its step is not listed or the run stopped before it,
+is not caught up by a later run that rebuilds no family: delete the cohort file to have it
+merged again.
 
 This is why `steps: ["ancestry"]` runs happily on a cohort whose annotation is incomplete:
 ancestry reads gVCFs directly and never touches the normalised or annotated call sets. The same
