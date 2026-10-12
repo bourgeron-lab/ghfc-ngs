@@ -33,7 +33,7 @@ process VCF2BEDGRAPH_VAF {
     mode: 'copy',
     pattern: "${barcode}.vaf.bedgraph.gz*"
 
-  container 'docker://fcliquet/vcf2bedgraph:latest'
+  container 'docker://fcliquet/vcf2bedgraph:0.1.5'
   
   label 'vcf2bedgraph'
 

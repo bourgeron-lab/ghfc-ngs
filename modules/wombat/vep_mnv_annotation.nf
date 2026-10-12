@@ -1,8 +1,6 @@
 process VEP_MNV_ANNOTATION {
     tag "${fid}-${wombat_config_name}"
 
-    container 'ensemblorg/ensembl-vep:release_110.1'
-
     label 'vep'
 
     input:
