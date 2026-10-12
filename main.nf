@@ -1165,21 +1165,20 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
-    // Check the existing cohort common BCF
+    // Check the existing cohort common BCF. Like the ancestry, roh and expansionhunter cohort
+    // tables, it is merged again whenever a family's common BCF is (re)built in this run: one
+    // that exists would otherwise go on lacking every family added or re-called since.
     def cohort_bcf_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf"
     def cohort_csi_path = "${params.data}/cohorts/${params.cohort_name}/vcfs/${params.cohort_name}.common_gt.bcf.csi"
-    
+
     def cohort_bcf_exists = new File(cohort_bcf_path).exists() && new File(cohort_csi_path).exists()
-    
-    if (cohort_bcf_exists) {
+    def families_with_common_bcfs = plan.annotation.existing.size() + plan.annotation.needed.size()
+
+    if (cohort_bcf_exists && plan.annotation.needed.isEmpty()) {
         plan.snvs_cohort.existing.add('cohort')  // Single cohort entry
-    } else {
-        // Need cohort merge if any families have common filtered BCFs or will create them
-        def families_with_common_bcfs = plan.annotation.existing + plan.annotation.needed
-        if (families_with_common_bcfs.size() > 0) {
-            plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
-            plan.snvs_cohort.need_bcf_merge = true
-        }
+    } else if (families_with_common_bcfs > 0) {
+        plan.snvs_cohort.needed.add('cohort')  // Single cohort entry
+        plan.snvs_cohort.need_bcf_merge = true
     }
     
     // Check existing ancestry outputs (per-sample panel genotypes, family panel
@@ -1421,19 +1420,19 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
         }
 
-        // Check existing WisecondorX cohort aberrations file
+        // Check existing WisecondorX cohort aberrations file. Merged again whenever a family's
+        // annotated aberrations are (re)built in this run, as the cohort BCF is.
         def cohort_aberrations_path = "${params.data}/cohorts/${params.cohort_name}/svs/wisecondorx/${params.cohort_name}_aberrations.bed"
         def cohort_aberrations_exists = new File(cohort_aberrations_path).exists()
+        def family_annotated = plan.wisecondorx.need_family_annotate.any { _fid, needed -> needed == true }
 
-        if (!cohort_aberrations_exists) {
-            // Check if any families have or will have annotated family aberrations
-            def cohort_has_families = families.any { fid ->
+        if (family_annotated) {
+            plan.wisecondorx.need_cohort_merge = true
+        } else if (!cohort_aberrations_exists) {
+            // Check if any families have annotated family aberrations
+            plan.wisecondorx.need_cohort_merge = families.any { fid ->
                 def annotated_family_aberrations_path = "${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
-                new File(annotated_family_aberrations_path).exists() || plan.wisecondorx.need_family_annotate[fid] == true
-            }
-
-            if (cohort_has_families) {
-                plan.wisecondorx.need_cohort_merge = true
+                new File(annotated_family_aberrations_path).exists()
             }
         }
     }
@@ -1521,12 +1520,13 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
-    // Check the existing cohort wombat tables, one per config. Like the cohort BCF, a table that
-    // exists is not rebuilt when families are added - delete it to have it merged again.
+    // Check the existing cohort wombat tables, one per config. Like the cohort BCF, every table
+    // is merged again whenever a family's wombat tables are (re)built in this run.
     (params.wombat_config_list ?: []).each { config_file ->
         def config_name = config_file.replaceAll(/\.ya?ml$/, '')
         def cohort_wombat_path = "${params.data}/cohorts/${params.cohort_name}/wombat/${params.cohort_name}.rare.${params.vep_config_name}.annotated.${config_name}.results.tsv"
-        plan.wombat_cohort.need_merges[config_name] = !new File(cohort_wombat_path).exists()
+        plan.wombat_cohort.need_merges[config_name] = !new File(cohort_wombat_path).exists() ||
+            plan.wombat.needed.size() > 0
     }
     if (plan.wombat_cohort.need_merges) {
         if (!plan.wombat_cohort.need_merges.any { k, v -> v == true }) {
@@ -1796,11 +1796,14 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
                                      missing: drift.missing, files_deleted: deleted.size()])
     }
 
-    // The cohort merges keep data from call sets that no longer exist, and the plan only
-    // checks that they exist - so nothing would ever rebuild them. But deleting one when this
-    // run cannot re-merge it is worse than leaving it: the merge would rebuild from whatever
-    // families happen to be done right now and write a *new* wrong file with a fresh
-    // timestamp, which looks current and is not. Each merge is rebuilt by its own steps.
+    // The cohort merges keep data from call sets that no longer exist. The plan merges them
+    // again in the run that rebuilds these families, but only that run: one that stops before
+    // the merge, or rebuilds a family without the merge's step, leaves the old merge looking
+    // current to every later run. So they are deleted, which always gets them redone. But
+    // deleting one when this run cannot re-merge it is worse than leaving it: the merge would
+    // rebuild from whatever families happen to be done right now and write a *new* wrong file
+    // with a fresh timestamp, which looks current and is not. Each merge is rebuilt by its own
+    // steps.
     if (report.families_cleaned) {
         def deleted = []
         def stale = []

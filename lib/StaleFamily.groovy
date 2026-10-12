@@ -81,16 +81,21 @@ class StaleFamily {
     }
 
     /**
-     * The cohort-level merges that a family clean makes stale. The plan only checks that these
-     * exist, so nothing would rebuild them on their own - they would keep data from a call set
-     * that no longer exists, indefinitely.
+     * The cohort-level merges that a family clean makes stale.
+     *
+     * The plan merges each of them again whenever a family feeding it is rebuilt in the same
+     * run, so a clean whose run goes through needs no help. They are deleted anyway because
+     * that is the only signal the plan reads: a run that stops between rebuilding the family
+     * and the merge - or that rebuilds the family without the merge's step - would leave the
+     * old merge in place, looking current, and no later run would see a reason to redo it.
+     * A missing merge is always redone.
      *
      * Grouped by the steps a run needs to rebuild them, as [steps: [...], paths: [...]]: a group
-     * is only safe to delete when every one of its steps is requested. The wisecondorx BED sits
-     * with the common-variant BCF, which is where the check for it has always been.
+     * is only safe to delete when every one of its steps is requested.
      *
-     * The cohort *ancestry* and *roh* tables are not here: their `need_cohort_merge` is driven
-     * by the per-family results, so they already rebuild themselves.
+     * The cohort *ancestry*, *roh* and *expansionhunter* files are not here, as their family
+     * files are not in familyOutputs: those rebuild themselves without a clean, and the run
+     * that rebuilds them merges the cohort again.
      */
     static List<Map> cohortOutputs(String data, String cohortName, String vepConfigName,
                                    List<String> wombatConfigNames, boolean includeWisecondorx) {
@@ -99,9 +104,6 @@ class StaleFamily {
         def common = []
         common << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf".toString()
         common << "${cohort_dir}/vcfs/${cohortName}.common_gt.bcf.csi".toString()
-        if (includeWisecondorx) {
-            common << "${cohort_dir}/svs/wisecondorx/${cohortName}_aberrations.bed".toString()
-        }
 
         def wombat = configNames(wombatConfigNames).collect { cfg ->
             "${cohort_dir}/wombat/${cohortName}.rare.${vepConfigName}.annotated.${cfg}.results.tsv".toString()
@@ -109,6 +111,11 @@ class StaleFamily {
 
         def groups = [[steps: ['annotation', 'snvs_cohort'], paths: common]]
         if (wombat) groups << [steps: ['annotation', 'wombat', 'wombat_cohort'], paths: wombat]
+        // Rebuilt from the family BEDs familyOutputs deletes, by the wisecondorx step alone
+        if (includeWisecondorx) {
+            groups << [steps: ['wisecondorx'],
+                       paths: ["${cohort_dir}/svs/wisecondorx/${cohortName}_aberrations.bed".toString()]]
+        }
         return groups
     }
 
