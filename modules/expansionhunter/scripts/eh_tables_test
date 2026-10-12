@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+# Self-contained check of eh_family_table and eh_cohort_merge.
+#
+# A trio and a singleton, with synthetic single-sample ExpansionHunter VCFs in the layout
+# EXPANSIONHUNTER_CALL publishes. Asserts every allele class and status branch (AD, AR
+# carrier and biallelic, XLR in a hemizygous male and a heterozygous female, a locus with no
+# normal bound, a locus with no thresholds row), the parents' longest allele, that the
+# cohort percentile is taken among founders only, the order of the flags table, and that a
+# stranger's VCF, a duplicated sample and mismatched headers are refused. Needs only python3.
+#
+#   modules/expansionhunter/scripts/eh_tables_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+family_table="${here}/eh_family_table"
+cohort_merge="${here}/eh_cohort_merge"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+mkdir vcfs tables
+
+L=cat_test
+
+printf 'FID\tbarcode\tfather\tmother\tsex\tphenotype\n' > ped.tsv
+printf 'FAM1\tKID\tDAD\tMUM\t1\t2\nFAM1\tDAD\t0\t0\t1\t1\nFAM1\tMUM\t0\t0\t2.0\t1\n' >> ped.tsv
+printf 'FAM2\tSOLO\t-9\t-9\t2\t2\n' >> ped.tsv
+
+printf 'locus\tmotif\tdisease\tinheritance\tnormal_range\tnormal_max\tintermediate_min\tpathogenic_min\n' > thr.tsv
+printf 'HTT\tCAG\tHuntington disease\tAD\t9-26\t26\t27\t36\n' >> thr.tsv
+printf 'FXN\tGAA\tFriedreich ataxia\tAR\t5-30\t30\t.\t70\n' >> thr.tsv
+printf 'AR\tCAG\tSBMA\tXLR\t17-35\t35\t.\t40\n' >> thr.tsv
+printf 'DAB1\tATTTC\tSCA37\tAD\t0\t.\t.\t31\n' >> thr.tsv
+
+# vcf <sample> then one "chrom pos varid gt repcn so" per record
+vcf() {
+    local sample=$1; shift
+    {
+        printf '##fileformat=VCFv4.1\n'
+        printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "${sample}"
+        while [ $# -gt 0 ]; do
+            read -r chrom pos varid gt repcn so <<< "$1"; shift
+            printf '%s\t%s\t.\tC\t.\t.\tPASS\tEND=%s;REF=10;RL=30;RU=CAG;VARID=%s;REPID=%s\tGT:SO:REPCN:REPCI:ADSP:ADFL:ADIR:LC\t%s:%s:%s:%s:1:1:0:30.0\n' \
+                "${chrom}" "${pos}" "$((pos + 30))" "${varid}" "${varid}" "${gt}" "${so}" "${repcn}" \
+                "$(sed -E 's/([0-9]+)/\1-\1/g' <<< "${repcn}")"
+        done
+    } > "vcfs/${sample}.${L}.vcf"
+}
+
+#        chrom pos      varid gt  repcn  so
+vcf KID  "chr4 3074876  HTT   1/2 20/40  SPANNING/INREPEAT" \
+         "chr9 69037286 FXN   1/2 9/80   SPANNING/INREPEAT" \
+         "chrX 67545316 AR    1   38     SPANNING" \
+         "chr1 57367043 DAB1  1/2 14/22  SPANNING/SPANNING" \
+         "chr2 100104799 AFF3 0/0 7/7    SPANNING/SPANNING"
+vcf DAD  "chr4 3074876  HTT   1/2 18/22  SPANNING/SPANNING" \
+         "chr9 69037286 FXN   1/2 9/80   SPANNING/INREPEAT" \
+         "chrX 67545316 AR    1   24     SPANNING" \
+         "chr1 57367043 DAB1  1/2 14/16  SPANNING/SPANNING" \
+         "chr2 100104799 AFF3 0/0 7/7    SPANNING/SPANNING"
+vcf MUM  "chr4 3074876  HTT   1/2 17/28  SPANNING/SPANNING" \
+         "chr9 69037286 FXN   1/2 12/75  SPANNING/INREPEAT" \
+         "chrX 67545316 AR    1/2 22/45  SPANNING/SPANNING" \
+         "chr1 57367043 DAB1  1/2 12/35  SPANNING/SPANNING" \
+         "chr2 100104799 AFF3 0/0 7/7    SPANNING/SPANNING"
+vcf SOLO "chr4 3074876  HTT   1/2 15/27  SPANNING/SPANNING" \
+         "chr9 69037286 FXN   1/2 80/90  INREPEAT/INREPEAT" \
+         "chrX 67545316 AR    1/2 20/21  SPANNING/SPANNING" \
+         "chr1 57367043 DAB1  1/2 10/12  SPANNING/SPANNING" \
+         "chr2 100104799 AFF3 0/0 7/7    SPANNING/SPANNING"
+
+python3 "${family_table}" --family FAM1 --pedigree ped.tsv --thresholds thr.tsv \
+    --out "tables/FAM1.${L}.genotypes.tsv" vcfs/KID.${L}.vcf vcfs/DAD.${L}.vcf vcfs/MUM.${L}.vcf > log.txt
+python3 "${family_table}" --family FAM2 --pedigree ped.tsv --thresholds thr.tsv \
+    --out "tables/FAM2.${L}.genotypes.tsv" vcfs/SOLO.${L}.vcf >> log.txt
+
+# field <table> <sample> <locus> <column>
+field() {
+    awk -F'\t' -v s="$2" -v l="$3" -v c="$4" '
+        NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+        $col["sample"] == s && $col["locus"] == l { print $col[c] }' "$1"
+}
+F1="tables/FAM1.${L}.genotypes.tsv"
+F2="tables/FAM2.${L}.genotypes.tsv"
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+is() { [ "$(field "$1" "$2" "$3" "$4")" = "$5" ]; }
+
+check "trio: 5 loci x 3 members" '[ "$(tail -n +2 "${F1}" | wc -l | tr -d " ")" = 15 ]'
+check "rows grouped by locus, members in pedigree order" \
+    '[ "$(tail -n +2 "${F1}" | head -3 | cut -f2 | tr "\n" " ")" = "KID DAD MUM " ]'
+check "the child names both genotyped parents" 'is "${F1}" KID HTT father DAD && is "${F1}" KID HTT mother MUM'
+check "parents are founders of the family's data" 'is "${F1}" DAD HTT father . && is "${F1}" DAD HTT mother .'
+check "a -9 parent is no parent" 'is "${F2}" SOLO HTT father .'
+check "sex decoded, 2.0 included" 'is "${F1}" KID HTT sex male && is "${F1}" MUM HTT sex female'
+check "AD: one pathogenic allele makes the member pathogenic" \
+    'is "${F1}" KID HTT allele2_class pathogenic && is "${F1}" KID HTT status pathogenic'
+check "AD: intermediate allele" 'is "${F1}" MUM HTT allele2_class intermediate && is "${F1}" MUM HTT status intermediate'
+check "thresholds are inclusive: 27 at intermediate_min 27 is intermediate" \
+    'is "${F2}" SOLO HTT allele2 27 && is "${F2}" SOLO HTT allele2_class intermediate'
+check "AR: one pathogenic allele is a carrier" 'is "${F1}" DAD FXN status carrier'
+check "AR: two pathogenic alleles are pathogenic" 'is "${F2}" SOLO FXN status pathogenic'
+check "XLR male: one allele, allele2 empty" 'is "${F1}" KID AR allele1 38 && is "${F1}" KID AR allele2 .'
+check "XLR male: classed on his single allele" 'is "${F1}" KID AR status above_normal'
+check "XLR female: one pathogenic allele is a carrier" 'is "${F1}" MUM AR status carrier'
+check "no normal bound: below pathogenic is normal" 'is "${F1}" KID DAB1 status normal'
+check "no normal bound: pathogenic still applies" 'is "${F1}" MUM DAB1 status pathogenic'
+check "a locus with no thresholds row is unclassified" 'is "${F1}" KID AFF3 status . && is "${F1}" KID AFF3 disease .'
+check "parents_max_allele is the longest parental allele" 'is "${F1}" KID HTT parents_max_allele 28'
+check "parents_max_allele is empty for a founder" 'is "${F1}" DAD HTT parents_max_allele .'
+check "per-allele support split" 'is "${F1}" KID HTT allele1_support SPANNING && is "${F1}" KID HTT allele2_support INREPEAT'
+check "the confidence interval follows the allele" 'is "${F1}" KID FXN allele2_ci 80-80'
+
+python3 "${family_table}" --family FAM1 --pedigree ped.tsv --out nothr.tsv vcfs/KID.${L}.vcf >/dev/null
+check "without thresholds every class is empty" '[ "$(field nothr.tsv KID HTT status)" = . ]'
+check "a member without a VCF is left out, not refused" '[ "$(tail -n +2 nothr.tsv | wc -l | tr -d " ")" = 5 ]'
+check "a VCF of another family is refused" \
+    '! python3 "${family_table}" --family FAM1 --pedigree ped.tsv --out x.tsv vcfs/SOLO.${L}.vcf >/dev/null 2>&1'
+check "a sample given twice is refused" \
+    '! python3 "${family_table}" --family FAM1 --pedigree ped.tsv --out x.tsv vcfs/KID.${L}.vcf vcfs/KID.${L}.vcf >/dev/null 2>&1'
+
+python3 "${cohort_merge}" --input-dir tables --cohort C --label "${L}" >> log.txt
+G="C.${L}.genotypes.tsv"
+
+check "cohort genotypes: 20 rows with cohort_percentile" \
+    '[ "$(tail -n +2 "${G}" | wc -l | tr -d " ")" = 20 ] && head -1 "${G}" | grep -q "cohort_percentile$"'
+# Founders: DAD, MUM, SOLO. HTT longest alleles 22, 28, 27
+check "percentile among founders: DAD's 22 is the lowest of three" '[ "$(field "${G}" DAD HTT cohort_percentile)" = 33.3 ]'
+check "the child's 40 is above every founder" '[ "$(field "${G}" KID HTT cohort_percentile)" = 100.0 ]'
+check "loci table: one row per locus" '[ "$(tail -n +2 C.${L}.loci.tsv | wc -l | tr -d " ")" = 5 ]'
+check "loci table: founders' maximum ignores the child's 40" \
+    'awk -F"\t" "\$1 == \"HTT\" && \$12 == 3 && \$17 == 28" C.${L}.loci.tsv | grep -q .'
+check "loci table: HTT has one pathogenic and two intermediate members" \
+    'awk -F"\t" "\$1 == \"HTT\" && \$18 == 1 && \$20 == 2" C.${L}.loci.tsv | grep -q .'
+check "flags: pathogenic rows first, then carriers, then intermediates" \
+    '[ "$(tail -n +2 C.${L}.flags.tsv | awk -F"\t" "{print \$35}" | uniq | tr "\n" " ")" = "pathogenic carrier intermediate " ]'
+check "flags: above_normal and normal are not flagged" \
+    '! tail -n +2 C.${L}.flags.tsv | awk -F"\t" "{print \$35}" | grep -qE "^(normal|above_normal)$"'
+
+mkdir dup && cp tables/* dup/ && sed 's/^FAM2/FAM3/' "tables/FAM2.${L}.genotypes.tsv" > "dup/FAM3.${L}.genotypes.tsv"
+check "a sample in two families is refused" \
+    '! python3 "${cohort_merge}" --input-dir dup --cohort D --label "${L}" >/dev/null 2>&1'
+mkdir bad && cp tables/* bad/ && printf 'family_id\tsample\tother\n' > "bad/FAM4.${L}.genotypes.tsv"
+check "mismatched headers are refused" \
+    '! python3 "${cohort_merge}" --input-dir bad --cohort B --label "${L}" >/dev/null 2>&1'
+
+[ "${fail}" -eq 0 ] && echo "eh_family_table / eh_cohort_merge: all checks passed" || echo "eh_family_table / eh_cohort_merge: FAILURES"
+exit "${fail}"

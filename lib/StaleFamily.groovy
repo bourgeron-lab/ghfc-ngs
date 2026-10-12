@@ -19,7 +19,7 @@ class StaleFamily {
      * catch files this pipeline never wrote, and the whole safety argument for deleting
      * anything is that we only remove what we know how to rebuild.
      *
-     * Four groups are deliberately absent:
+     * Five groups are deliberately absent:
      *
      *  - `ancestry/` - it self-heals. A member with no gVCF has no panel BCF either, so it is
      *    already in the plan's ancestry `need_extract`, which forces `need_family_merge` and
@@ -28,6 +28,9 @@ class StaleFamily {
      *  - `roh/` - it self-heals the same way: the plan re-calls ROH for every family whose
      *    ancestry panel or labels are rebuilt, and ROH is only ever called on a whole-family
      *    panel.
+     *  - `str/expansionhunter/` - it does not come from the joint call. Its family files are
+     *    rebuilt whenever a member is called, and a member missing from them is one with no
+     *    CRAM, which gets called, and its family rebuilt, as soon as it has one.
      *  - `*.dnm.*` - DNM_EXTRACTION is included by no workflow, so nothing would regenerate
      *    them. A file left stale is recoverable; a file deleted that nothing rebuilds is not.
      *  - `extractor/` - the plan does no completeness check for it, so deleting would not

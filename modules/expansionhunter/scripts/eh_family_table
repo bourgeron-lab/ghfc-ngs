@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+
+"""Tabulate a family's ExpansionHunter genotypes, one row per locus and member.
+
+Reads the members' ExpansionHunter VCFs (one sample each) and the cohort pedigree,
+and writes a long table with each allele's repeat count, confidence interval, read
+support and, when a thresholds table is given, its class against the published
+ranges. Rows are grouped by locus, members in pedigree order, so a family's alleles
+at one locus sit together.
+
+Allele columns come in pairs, allele1 being the shorter. A male's chrX loci carry one
+allele, and allele2 is then '.'.
+
+Classes, from the thresholds table, checked in this order:
+  pathogenic    count >= pathogenic_min
+  intermediate  count >= intermediate_min, when the locus has one
+  normal        count <= normal_max, or any count below the above when normal_max is '.'
+  above_normal  between normal_max and the next published threshold
+
+`status` combines a member's alleles by inheritance. For AR loci, and XLR loci with two
+alleles, a single pathogenic allele makes a `carrier` and two make `pathogenic`; any
+other inheritance (AD, XLD, AD/AR, unknown) takes the member's highest allele class.
+
+`father` and `mother` are given only for parents genotyped in this family, so a member
+with neither is a founder of the family's data. `parents_max_allele` is the longest
+allele either genotyped parent carries at the locus: a child's allele well above it is
+an expansion on transmission, or an artefact.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+CLASS_RANK = {"normal": 0, "above_normal": 1, "intermediate": 2, "pathogenic": 3}
+
+COLUMNS = [
+    "family_id", "sample", "father", "mother", "sex", "phenotype",
+    "locus", "chrom", "pos", "end", "motif", "ref_units", "filter", "genotype",
+    "allele1", "allele2", "allele1_ci", "allele2_ci",
+    "allele1_support", "allele2_support",
+    "allele1_spanning", "allele2_spanning", "allele1_flanking", "allele2_flanking",
+    "allele1_inrepeat", "allele2_inrepeat", "locus_coverage",
+    "disease", "inheritance", "normal_max", "intermediate_min", "pathogenic_min",
+    "allele1_class", "allele2_class", "status", "parents_max_allele",
+]
+
+# FORMAT field -> output column prefix, for the fields that carry one value per allele
+PER_ALLELE = {"REPCN": "", "REPCI": "_ci", "SO": "_support",
+              "ADSP": "_spanning", "ADFL": "_flanking", "ADIR": "_inrepeat"}
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_pedigree(path, fid):
+    """The family's rows, in file order: barcode -> (father, mother, sex, phenotype)."""
+    members = {}
+    with open(path) as fh:
+        for index, line in enumerate(fh):
+            if line.startswith("#") or not line.strip():
+                continue
+            cols = line.rstrip("\n\r").split("\t")
+            if index == 0 and cols[0] == "FID":
+                continue
+            if len(cols) < 6:
+                die(f"pedigree row with {len(cols)} columns instead of 6: {line.strip()}")
+            if cols[0] != fid:
+                continue
+            sex = {"1": "male", "2": "female"}.get(cols[4].strip().split(".")[0], ".")
+            pheno = {"1": "unaffected", "2": "affected"}.get(cols[5].strip().split(".")[0], ".")
+            members[cols[1]] = (cols[2], cols[3], sex, pheno)
+    if not members:
+        die(f"family {fid} is not in the pedigree {path}")
+    return members
+
+
+def number(value):
+    return None if value in ("", ".") else int(value)
+
+
+def read_thresholds(path):
+    if not path:
+        return {}
+    out = {}
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        need = ["locus", "disease", "inheritance", "normal_max", "intermediate_min", "pathogenic_min"]
+        missing = [c for c in need if c not in header]
+        if missing:
+            die(f"thresholds table {path} lacks the columns {', '.join(missing)}")
+        for line in fh:
+            if not line.strip():
+                continue
+            row = dict(zip(header, line.rstrip("\n").split("\t")))
+            try:
+                out[row["locus"]] = {
+                    "disease": row["disease"] or ".",
+                    "inheritance": row["inheritance"] or ".",
+                    "normal_max": number(row["normal_max"]),
+                    "intermediate_min": number(row["intermediate_min"]),
+                    "pathogenic_min": number(row["pathogenic_min"]),
+                }
+            except ValueError:
+                die(f"thresholds table {path}: non-numeric threshold for {row['locus']}")
+    return out
+
+
+def read_vcf(path):
+    """(sample, [record]) from a single-sample ExpansionHunter VCF."""
+    sample, records = None, []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("##"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if line.startswith("#CHROM"):
+                if len(f) != 10:
+                    die(f"{path} has {len(f) - 9} samples; expected one ExpansionHunter sample")
+                sample = f[9]
+                continue
+            info = dict(kv.split("=", 1) for kv in f[7].split(";") if "=" in kv)
+            fmt = dict(zip(f[8].split(":"), f[9].split(":")))
+            records.append({"chrom": f[0], "pos": f[1], "filter": f[6], "info": info, "fmt": fmt})
+    if sample is None:
+        die(f"{path} has no #CHROM header line")
+    return sample, records
+
+
+def alleles(value):
+    """'14/23' -> ['14', '23'], '41' -> ['41'], missing -> []."""
+    if value in (None, "", "."):
+        return []
+    return value.split("/")
+
+
+def classify(count, t):
+    if count is None or t is None:
+        return "."
+    if t["pathogenic_min"] is not None and count >= t["pathogenic_min"]:
+        return "pathogenic"
+    if t["intermediate_min"] is not None and count >= t["intermediate_min"]:
+        return "intermediate"
+    if t["normal_max"] is None or count <= t["normal_max"]:
+        return "normal"
+    return "above_normal"
+
+
+def status(classes, t):
+    classes = [c for c in classes if c != "."]
+    if not classes or t is None:
+        return "."
+    biallelic = t["inheritance"] == "AR" or (t["inheritance"] == "XLR" and len(classes) == 2)
+    if biallelic and len(classes) == 2:
+        n_path = classes.count("pathogenic")
+        if n_path == 2:
+            return "pathogenic"
+        if n_path == 1:
+            return "carrier"
+    return max(classes, key=CLASS_RANK.get)
+
+
+def fmt_value(v):
+    return "." if v is None else str(v)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--family", required=True)
+    ap.add_argument("--pedigree", required=True)
+    ap.add_argument("--thresholds", default="")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("vcfs", nargs="+")
+    a = ap.parse_args()
+
+    members = read_pedigree(a.pedigree, a.family)
+    thresholds = read_thresholds(a.thresholds)
+
+    calls = {}                           # sample -> {locus: record}
+    loci = []                            # locus order, as the VCFs give it
+    for path in a.vcfs:
+        sample, records = read_vcf(path)
+        if sample not in members:
+            die(f"{Path(path).name} holds sample {sample}, who is not in family {a.family}")
+        if sample in calls:
+            die(f"sample {sample} was given twice")
+        calls[sample] = {}
+        for rec in records:
+            locus = rec["info"].get("VARID") or rec["info"].get("REPID")
+            if not locus:
+                die(f"{Path(path).name}: record at {rec['chrom']}:{rec['pos']} has no VARID")
+            if locus not in loci:
+                loci.append(locus)
+            calls[sample][locus] = rec
+
+    ordered = [s for s in members if s in calls]
+    absent = [s for s in members if s not in calls]
+    if absent:
+        print(f"Family {a.family}: no ExpansionHunter call for {', '.join(absent)}, left out")
+
+    def parent(barcode, which):
+        p = members[barcode][which]
+        return p if p in calls else "."
+
+    def counts(sample, locus):
+        rec = calls[sample].get(locus)
+        return [int(x) for x in alleles(rec["fmt"].get("REPCN"))] if rec else []
+
+    n_rows = 0
+    with open(a.out, "w") as fo:
+        fo.write("\t".join(COLUMNS) + "\n")
+        for locus in loci:
+            t = thresholds.get(locus)
+            for sample in ordered:
+                rec = calls[sample].get(locus)
+                if rec is None:
+                    continue
+                father, mother = parent(sample, 0), parent(sample, 1)
+                row = {
+                    "family_id": a.family, "sample": sample, "father": father, "mother": mother,
+                    "sex": members[sample][2], "phenotype": members[sample][3],
+                    "locus": locus, "chrom": rec["chrom"], "pos": rec["pos"],
+                    "end": rec["info"].get("END", "."), "motif": rec["info"].get("RU", "."),
+                    "ref_units": rec["info"].get("REF", "."), "filter": rec["filter"],
+                    "genotype": rec["fmt"].get("GT", "."),
+                    "locus_coverage": rec["fmt"].get("LC", "."),
+                }
+                for field, suffix in PER_ALLELE.items():
+                    values = alleles(rec["fmt"].get(field))
+                    for i in (1, 2):
+                        row[f"allele{i}{suffix}"] = values[i - 1] if len(values) >= i else "."
+                cn = counts(sample, locus)
+                classes = [classify(c, t) for c in cn]
+                row["allele1_class"] = classes[0] if classes else "."
+                row["allele2_class"] = classes[1] if len(classes) > 1 else "."
+                row["status"] = status(classes, t)
+                for key in ("disease", "inheritance"):
+                    row[key] = t[key] if t else "."
+                for key in ("normal_max", "intermediate_min", "pathogenic_min"):
+                    row[key] = fmt_value(t[key]) if t else "."
+                parental = [c for p in (father, mother) if p != "." for c in counts(p, locus)]
+                row["parents_max_allele"] = str(max(parental)) if parental else "."
+                fo.write("\t".join(row[c] for c in COLUMNS) + "\n")
+                n_rows += 1
+
+    print(f"Family {a.family}: {len(loci)} loci x {len(ordered)} members -> {n_rows} rows"
+          + ("" if thresholds else " (no thresholds table: alleles left unclassified)"))
+    if n_rows == 0:
+        die(f"family {a.family}: no genotype rows written")
+
+
+if __name__ == "__main__":
+    main()

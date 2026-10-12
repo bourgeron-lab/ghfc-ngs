@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+"""Give existing ExpansionHunter calls the catalog label the pipeline expects.
+
+The cohort's calls were made before the expansionhunter step existed, as
+
+    samples/{S1}/{S2}/<ID>/str/expansionhunter/<ID>.vcf
+                                               <ID>.json
+                                               <ID>_realigned.bam(.bai)
+
+The step names them after the catalog, <ID>.<label>.vcf and so on, and does not see
+the unlabelled ones. This renames them in place, so the step reuses them instead of
+calling every sample again.
+
+A sample is renamed only when its VCF names the sample <ID> and holds exactly the
+catalog's variants - so a call made with another catalog is never given this
+catalog's label - and when none of the labelled names exists yet. Nothing is ever
+overwritten or deleted. Without --apply it only reports what it would do.
+
+    eh_label_existing --data /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38 \\
+        --catalog .../variant_catalog_custom_JMSA_offtargets.json --label jmsa50
+    eh_label_existing ... --apply
+
+Every sample is listed with its outcome in --report (a TSV), for the record.
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+LABEL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def catalog_variants(path):
+    ids = set()
+    for entry in json.load(open(path)):
+        vid = entry.get("VariantId")
+        if isinstance(vid, list):
+            ids.update(vid)
+        elif vid:
+            ids.add(vid)
+        else:
+            ids.add(entry["LocusId"])
+    return ids
+
+
+def vcf_content(path):
+    """(sample name, set of VARIDs) of a single-sample ExpansionHunter VCF."""
+    sample, ids = None, set()
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("##"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if line.startswith("#CHROM"):
+                sample = f[9] if len(f) == 10 else None
+                continue
+            for kv in f[7].split(";"):
+                if kv.startswith("VARID="):
+                    ids.add(kv[6:])
+    return sample, ids
+
+
+def eh_dirs(samples_root):
+    """Every samples/{S1}/{S2}/<ID>/str/expansionhunter, by walking the three shard levels."""
+    for d1 in sorted(os.scandir(samples_root), key=lambda e: e.name):
+        if not d1.is_dir():
+            continue
+        for d2 in sorted(os.scandir(d1.path), key=lambda e: e.name):
+            if not d2.is_dir():
+                continue
+            for s in sorted(os.scandir(d2.path), key=lambda e: e.name):
+                d = Path(s.path) / "str" / "expansionhunter"
+                if d.is_dir():
+                    yield s.name, d
+
+
+def plan(barcode, d, label, variants):
+    """(outcome, detail, [(source, target)])."""
+    old = {"vcf": d / f"{barcode}.vcf", "json": d / f"{barcode}.json",
+           "bam": d / f"{barcode}_realigned.bam", "bai": d / f"{barcode}_realigned.bam.bai"}
+    new = {"vcf": d / f"{barcode}.{label}.vcf", "json": d / f"{barcode}.{label}.json",
+           "bam": d / f"{barcode}.{label}_realigned.bam", "bai": d / f"{barcode}.{label}_realigned.bam.bai"}
+
+    if not old["vcf"].exists():
+        if new["vcf"].exists():
+            return "already_labelled", "", []
+        return "no_call", "no unlabelled VCF", []
+    for kind in ("vcf", "json"):
+        if not old[kind].exists() or old[kind].stat().st_size == 0:
+            return "incomplete", f"{old[kind].name} missing or empty", []
+    sample, ids = vcf_content(old["vcf"])
+    if sample != barcode:
+        return "refused", f"the VCF names its sample {sample!r}", []
+    if ids != variants:
+        extra, missing = sorted(ids - variants), sorted(variants - ids)
+        return "refused", (f"not this catalog: {len(missing)} catalog variants absent"
+                           f"{' (' + ', '.join(missing[:5]) + ')' if missing else ''}, "
+                           f"{len(extra)} unknown{' (' + ', '.join(extra[:5]) + ')' if extra else ''}"), []
+    moves = [(old[k], new[k]) for k in ("vcf", "json", "bam", "bai") if old[k].exists()]
+    clash = [t.name for _s, t in moves if t.exists()]
+    if clash:
+        return "refused", f"already exists: {', '.join(clash)}", []
+    return "rename", f"{len(moves)} files", moves
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--data", required=True, help="the project directory holding samples/")
+    ap.add_argument("--catalog", required=True, help="the catalog the calls were made with")
+    ap.add_argument("--label", required=True, help="its expansionhunter_catalog_name")
+    ap.add_argument("--ids", help="only these barcodes, one per line")
+    ap.add_argument("--report", default="eh_label_existing.tsv")
+    ap.add_argument("--apply", action="store_true", help="rename; without it, only report")
+    a = ap.parse_args()
+
+    if not a.label or set(a.label) - LABEL_CHARS:
+        sys.exit("ERROR: the label may only hold letters, digits, '.', '_' and '-'")
+    samples_root = Path(a.data) / "samples"
+    if not samples_root.is_dir():
+        sys.exit(f"ERROR: {samples_root} is not a directory")
+    variants = catalog_variants(a.catalog)
+    only = None
+    if a.ids:
+        only = {l.split()[0] for l in open(a.ids) if l.strip() and not l.startswith("#")}
+
+    counts = {}
+    failed = 0
+    with open(a.report, "w") as rep:
+        rep.write("barcode\toutcome\tdetail\n")
+        for barcode, d in eh_dirs(samples_root):
+            if only is not None and barcode not in only:
+                continue
+            outcome, detail, moves = plan(barcode, d, a.label, variants)
+            if outcome == "rename" and a.apply:
+                done = []
+                try:
+                    for src, dst in moves:
+                        # rename() would replace a file that appeared since the check
+                        if dst.exists():
+                            raise FileExistsError(dst)
+                        os.rename(src, dst)
+                        done.append(dst.name)
+                    outcome = "renamed"
+                except OSError as e:
+                    outcome, failed = "failed", failed + 1
+                    detail = f"{e} after renaming {', '.join(done) or 'nothing'}"
+            counts[outcome] = counts.get(outcome, 0) + 1
+            rep.write(f"{barcode}\t{outcome}\t{detail}\n")
+            if outcome in ("refused", "incomplete", "failed"):
+                print(f"{barcode}: {outcome}: {detail}", file=sys.stderr)
+
+    verb = "" if a.apply else " (dry run: nothing renamed; add --apply)"
+    print(f"{len(variants)} catalog variants, label {a.label}{verb}")
+    for outcome in ("rename", "renamed", "already_labelled", "no_call", "incomplete", "refused", "failed"):
+        if counts.get(outcome):
+            print(f"  {outcome:17} {counts[outcome]}")
+    print(f"Per-sample outcomes: {a.report}")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

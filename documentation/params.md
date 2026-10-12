@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-54 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+57 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -81,6 +81,9 @@ program can see is in this table. A key that is not here is not read by anything
 | `data` | always — **required** | [Core paths and identity](#core-paths-and-identity) |
 | `deepvariant_threads` | `deepvariant_sample` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `enable_conda` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
+| `expansionhunter_catalog` | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
+| `expansionhunter_catalog_name` 📄 | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
+| `expansionhunter_thresholds` | `expansionhunter` | [ExpansionHunter](#expansionhunter) |
 | `extractor_tsvs_list` | `extractor` | [Extractor](#extractor) |
 | `fastq_pattern` | `alignment` | [Input discovery](#input-discovery) |
 | `glnexus_bed` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
@@ -187,7 +190,7 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these ten:
+the command line. Every entry must be one of these twelve:
 
 | Step | Produces |
 |---|---|
@@ -202,6 +205,7 @@ the command line. Every entry must be one of these ten:
 | `extractor` | Specific variants pulled out of family BCFs, wombat TSVs or gVCFs |
 | `ancestry` | Ancestry components, admixture and polygenic scores, per family and per cohort |
 | `roh` | Runs of homozygosity and inbreeding (F_ROH) per individual, genes in ROH, per family and per cohort |
+| `expansionhunter` | Short tandem repeat genotypes per sample, merged and classed per family, merged and summarised per cohort |
 
 ### The rule that catches people out
 
@@ -222,6 +226,8 @@ missing prerequisite is only an error when something in *this* run would consume
   table is only ever merged from every family's table, never from part of the cohort.
 - `ancestry` is demanded by `roh` for families with no family panel or ancestry table on disk
   under the current `ancestry_panel_name`.
+- `expansionhunter` demands nothing. Like `wisecondorx`, it reads the CRAMs, and a sample with
+  no CRAM is left out of its family's files, with a warning, rather than sent to alignment.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -242,9 +248,12 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the eleven above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the twelve above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: the 'roh' step requires ...` | `roh` listed without `ancestry_reference` and `ancestry_panel_name` |
+| `ERROR: the 'expansionhunter' step requires ...` | `expansionhunter` listed without `expansionhunter_catalog`, `expansionhunter_catalog_name` or `ref` |
+| `ERROR: the 'expansionhunter' step cannot find ...` | the catalog, the thresholds table or the reference's `.fai` does not exist |
+| `ERROR: expansionhunter_catalog_name '...' may only hold ...` | a label with a character that cannot go in a file name |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
 
@@ -254,7 +263,7 @@ they should be set.
 
 ## Key reference
 
-50 keys are read by the code. In the tables below, **no default** means the key is `null` when
+57 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -479,6 +488,19 @@ These three are the only keys in the whole file with a **hard requirement check*
 - **Output names.** Its outputs carry `ancestry_panel_name` too. Adding the roh/ tier changes no ancestry result, so it needs no new label. To recompute ROH alone, delete the families' `roh/` directories.
 - **Gene table.** It is written only when `annotation_gencode` and `annotation_annotation_path` are both set, from `<annotation_annotation_path>/gencode/<annotation_gencode>.{symbol,ensg}.genes.bed.gz`, the same files `wisecondorx` annotates with.
 
+### ExpansionHunter
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `expansionhunter_catalog` | file | `""` | ExpansionHunter variant catalog (JSON). **Required** by `expansionhunter`. |
+| `expansionhunter_catalog_name` 📄 | string | `""` | Label for that catalog in every output file name. **Required** by `expansionhunter`. Letters, digits, `.`, `_` and `-` only. |
+| `expansionhunter_thresholds` | file | `""` | Per-locus thresholds table, used to class each allele. Empty leaves the alleles unclassified. |
+
+- **The label is the cache.** Nothing on disk records which catalog a call was made with. A new catalog with an existing label reuses the old calls as if nothing had changed, and a new label recomputes every sample. The catalog of the cohort run, `references/GRCh38/expansionhunter/variant_catalog_custom_JMSA_offtargets.json`, goes with `jmsa50`.
+- **Thresholds.** A TSV keyed on the catalog's VariantId, with the columns `locus`, `disease`, `inheritance`, `normal_max`, `intermediate_min` and `pathogenic_min` (`.` for none). `references/GRCh38/expansionhunter/str_thresholds.stripy.tsv` holds the STRipy values for the cohort catalog, and its README says how they were converted. It is in no file name: after changing it, delete the families' and the cohort's `str/expansionhunter/*.tsv`, and they are rebuilt from the existing calls.
+- **Reference and sex.** Each sample is genotyped against `ref`, which must be the reference its CRAM was aligned to and have a `.fai`. The sex comes from the pedigree; unknown sex is genotyped as female, which only matters at chrX loci.
+- **Calls made before the step.** `scripts/expansionhunter/eh_label_existing` gives unlabelled calls (`<ID>.vcf`, `<ID>.json`, `<ID>_realigned.bam`) the label, after checking that each VCF holds exactly the catalog's variants. Without `--apply` it only reports.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -610,6 +632,10 @@ cohort, with nothing to indicate it. Encode the bundle version and the threshold
 ```yaml
 ancestry_panel_name: "apgs_b1.0.0_dp10gq20"
 ```
+
+**`expansionhunter_catalog_name`** works the same way for the ExpansionHunter calls. Pointing
+`expansionhunter_catalog` at another catalog without a new label reuses every existing call,
+made with the old catalog, and mixes in new ones made with the new catalog.
 
 ### Three different directories
 
