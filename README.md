@@ -772,21 +772,33 @@ data/
 
 ### FASTQ File Naming Convention
 
-The pipeline expects FASTQ files to follow this naming pattern:
+`fastq_pattern` is a glob under `<data>/fastq/`. Its matches are paired into R1/R2 by Nextflow's
+`fromFilePairs`, so the pattern must contain the read marker as `{1,2}`. Each name is then
+read by position (`barcodeFromFastqName` and `unitFromFastqName` in `main.nf`):
 
 ```
-A{PROJECT}_DA_{BARCODE}_{LANE}_{READ}_{INDEX}.{FLOWCELL}.{DUAL}.fastq.gz
+{RUN}_{X}_A{PROJECT}_DA_{BARCODE}_{LANE}[_...]_{FLOWCELL}.{DUAL}[.anything].fastq.gz
 ```
 
-Example: `A001_DA_BC001_L001_1_001.HG7T2.dual.fastq.gz`
+| Part | Read from | Used for |
+|---|---|---|
+| `{BARCODE}` | the 5th `_`-separated field | the sample; must match the pedigree |
+| `{LANE}` | the 6th `_`-separated field | the unit name and read group |
+| `A{PROJECT}` | the 3rd `_`-separated field, of which the last three characters are kept | the read group |
+| `{FLOWCELL}` | the last `_`-separated field before the first `.` | the unit name and read group |
+| `{DUAL}` | the text between the first and the second `.` | the read group |
 
-Where:
+The first, second and fourth fields are not read, but must be present. Each R1/R2 pair is one
+**unit**, `{BARCODE}_{FLOWCELL}_{LANE}`, aligned on its own and then merged per sample.
 
-- `{BARCODE}`: Sample identifier (must match pedigree file)
-- `{LANE}`: Sequencing lane
-- `{READ}`: 1 or 2 for paired-end reads
-- `{FLOWCELL}`: Flowcell identifier
-- `{DUAL}`: Dual index information
+Put the read marker after the first `.` (`fastq_pattern: "*.R{1,2}.fastq.gz"`), or as a field
+between `{LANE}` and `{FLOWCELL}` (`"*_R{1,2}_*"`). It must not be the last field before the
+first `.`: it would be read as the flowcell, so R1 and R2 would land in different units and be
+ignored as unpaired.
+
+Example: `220301_NV01_A001_DA_BC001_L001_HG7T2.dual.R1.fastq.gz` and its `.R2.` mate, with
+`fastq_pattern: "*.R{1,2}.fastq.gz"`. That gives barcode `BC001`, project `001`, lane `L001`,
+flowcell `HG7T2`, dual `dual` and unit `BC001_HG7T2_L001`.
 
 ## Output
 
