@@ -801,7 +801,8 @@ workflow {
     // and newly aligned; a sample with no CRAM is left out rather than sent to alignment.
     if ((analysis_plan.expansionhunter.needed.size() > 0 ||
          analysis_plan.expansionhunter.need_family.size() > 0 ||
-         analysis_plan.expansionhunter.need_cohort_merge) && 'expansionhunter' in pipeline_steps) {
+         analysis_plan.expansionhunter.need_cohort_merge ||
+         analysis_plan.expansionhunter.need_reviewer.size() > 0) && 'expansionhunter' in pipeline_steps) {
 
         def eh_tasks = []
         if (analysis_plan.expansionhunter.needed.size() > 0) {
@@ -812,6 +813,9 @@ workflow {
         }
         if (analysis_plan.expansionhunter.need_cohort_merge) {
             eh_tasks.add("cohort merge")
+        }
+        if (analysis_plan.expansionhunter.need_reviewer.size() > 0) {
+            eh_tasks.add("REViewer pileups for ${analysis_plan.expansionhunter.need_reviewer.size()} individuals")
         }
         log.info "Running ExpansionHunter: ${eh_tasks.join(', ')}..."
 
@@ -824,7 +828,8 @@ workflow {
             analysis_plan.expansionhunter.existing,
             analysis_plan.expansionhunter.need_family,
             analysis_plan.expansionhunter.family_existing,
-            analysis_plan.expansionhunter.need_cohort_merge
+            analysis_plan.expansionhunter.need_cohort_merge,
+            analysis_plan.expansionhunter.need_reviewer
         )
     }
     
@@ -1065,10 +1070,11 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // their ROH inputs come from that run rather than disk. blocked: families with no ancestry
         // outputs on disk and no ancestry step to make them.
         roh: [needed: planBucket(), existing: planBucket(), from_ancestry: planBucket(), blocked: planBucket(), need_cohort_merge: false],
-        // needed/existing/no_cram are samples, the rest families. no_cram: no call on disk and no
-        // CRAM to make one. A family none of whose members can have a call is in neither family
-        // bucket, and out of the cohort files.
-        expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false],
+        // needed/existing/no_cram/need_reviewer/reviewer_no_bam are samples, need_family and
+        // family_existing families. no_cram: no call on disk and no CRAM to make one. A family
+        // none of whose members can have a call is in neither family bucket, and out of the
+        // cohort files. reviewer_no_bam: a call on disk to review, without its realigned reads.
+        expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false, need_reviewer: planBucket(), reviewer_no_bam: planBucket()],
         pedigree_drift: [:]
     ]
 
@@ -1487,6 +1493,35 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def any_family = plan.expansionhunter.need_family || plan.expansionhunter.family_existing
         plan.expansionhunter.need_cohort_merge = any_family &&
             (!cohort_exist || plan.expansionhunter.need_family.size() > 0)
+
+        // REViewer pileups of the flagged genotypes, which only a thresholds table can flag. A
+        // member is drawn again when it is called, or its family table rebuilt, in this run:
+        // what is flagged may have changed. Otherwise when its metrics table, written even when
+        // nothing is flagged, is missing.
+        if (params.expansionhunter_reviewer && params.expansionhunter_thresholds) {
+            individuals.each { barcode ->
+                def fid = family_members[barcode]
+                def has_table = fid in plan.expansionhunter.need_family || fid in plan.expansionhunter.family_existing
+                if (!has_table || !(barcode in plan.expansionhunter.existing || barcode in plan.expansionhunter.needed)) {
+                    return
+                }
+                if (barcode in plan.expansionhunter.needed) {
+                    plan.expansionhunter.need_reviewer.add(barcode)
+                    return
+                }
+                def sample_dir = "${Sharding.getSampleDir(params.data, barcode)}/str/expansionhunter"
+                def reviewed = new File("${sample_dir}/reviewer/${barcode}.${label}.metrics.tsv").length() > 0
+                if (reviewed && !(fid in plan.expansionhunter.need_family)) {
+                    return
+                }
+                def prefix = "${sample_dir}/${barcode}.${label}"
+                if (new File("${prefix}_realigned.bam").length() > 0 && new File("${prefix}_realigned.bam.bai").length() > 0) {
+                    plan.expansionhunter.need_reviewer.add(barcode)
+                } else {
+                    plan.expansionhunter.reviewer_no_bam.add(barcode)
+                }
+            }
+        }
     }
 
     // Check existing Wombat files
@@ -1566,7 +1601,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     == SVs Calling ==
     WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
     == Short Tandem Repeats ==
-    EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}, ${analysis_plan.expansionhunter.need_reviewer.size()} individuals to draw with REViewer" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -1605,6 +1640,9 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.expansionhunter.needed) {
         log.info "Individuals needing ExpansionHunter: ${analysis_plan.expansionhunter.needed.join(', ')}"
+    }
+    if (analysis_plan.expansionhunter.reviewer_no_bam) {
+        log.warn "${analysis_plan.expansionhunter.reviewer_no_bam.size()} individuals have an ExpansionHunter call but not its realigned reads, and get no REViewer pileups: ${analysis_plan.expansionhunter.reviewer_no_bam.take(50).join(', ')}${analysis_plan.expansionhunter.reviewer_no_bam.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.expansionhunter.no_cram) {
         // Not an error, as for wisecondorx: a gVCF-only sample has nothing to genotype repeats from

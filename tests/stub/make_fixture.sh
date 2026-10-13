@@ -40,10 +40,18 @@ touch "${data}/old_cram_38/BC003.cram" "${data}/old_cram_38/BC003.cram.crai"
 touch "${data}/old_cram_37/BC004.cram" "${data}/old_cram_37/BC004.cram.crai"
 
 for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz \
-         wisecondorx.100000.npz eh_catalog.json eh_thresholds.tsv \
+         wisecondorx.100000.npz eh_thresholds.tsv \
          ancestry_catalog.tsv bundle/roh/sites.tsv.gz extract_me.tsv hg19ToHg38.over.chain.gz; do
     touch "${refs}/${f}"
 done
+# The expansionhunter workflow reads the catalog itself, for the loci of multi-variant entries
+cat > "${refs}/eh_catalog.json" <<'JSON'
+[
+  {"LocusId": "HTT", "LocusStructure": "(CAG)*", "ReferenceRegion": "chr4:3074876-3074933", "VariantType": "Repeat"},
+  {"LocusId": "FXN", "LocusStructure": "(A)*(GAA)*", "ReferenceRegion": ["chr9:69037261-69037286", "chr9:69037286-69037304"],
+   "VariantId": ["FXN_A", "FXN"], "VariantType": ["Repeat", "RareRepeat"]}
+]
+JSON
 # An empty config runs the standard wombat path; this one adds the external MNV annotation
 : > "${refs}/wombat/standard.yml"
 printf 'mnv:\n  annotate: external\n' > "${refs}/wombat/mnv.yml"

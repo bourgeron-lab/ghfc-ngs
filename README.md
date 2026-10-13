@@ -18,7 +18,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 - **Variant extraction** from custom TSV lists with liftover support
 - **Genetic ancestry and polygenic scores** per family and per cohort, projected onto a global reference panel
 - **Runs of homozygosity and inbreeding** (F_ROH) per individual, scored against ancestry-matched reference genomes, with genes in ROH
-- **Short tandem repeat genotyping** with ExpansionHunter per sample, merged per family and per cohort, each allele classed against published pathogenic thresholds
+- **Short tandem repeat genotyping** with ExpansionHunter per sample, merged per family and per cohort, each allele classed against published pathogenic thresholds, and REViewer pileups of the flagged genotypes
 - **Unit merging** for samples with multiple sequencing runs
 - **SLURM integration** with configurable resource allocation
 - **Container support** via Apptainer/Singularity
@@ -313,7 +313,7 @@ The pipeline supports twelve main steps that must be explicitly listed in the `s
 - **`extractor`**: Extract specific variants from TSV lists across family BCFs, Wombat outputs, or individual gVCFs. Supports GRCh37→GRCh38 liftover.
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
 - **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
-- **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution.
+- **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution. Draws a REViewer read pileup of every flagged genotype.
 
 **Step Dependencies:**
 
@@ -523,6 +523,7 @@ Short tandem repeat (STR) genotyping with [ExpansionHunter](https://github.com/I
 1. **Calling** - Per sample, every locus of `expansionhunter_catalog` is genotyped from the CRAM, with the sex from the pedigree. The realigned reads are kept, sorted and indexed, for IGV or REViewer
 2. **Family merge** - The members' VCFs are merged into one, and a genotype table is written: one row per locus and member, with each allele's repeat count, confidence interval, read support and class against `expansionhunter_thresholds`
 3. **Cohort merge** - The family VCFs are merged. The family tables are concatenated, with each member's percentile among the cohort's founders. A per-locus summary and the flagged genotypes are written alongside
+4. **Pileups** - Per family, [REViewer](https://github.com/Illumina/REViewer) 0.2.7 draws the realigned reads of each member's flagged genotypes (status `pathogenic`, `carrier` or `intermediate`) as an SVG, when `expansionhunter_reviewer` is on and thresholds are given
 
 ExpansionHunter does not count the repeat in the alignment as it stands. It builds a graph of each locus (left flank, repeat, right flank), realigns the region's reads onto it, and estimates the length of both alleles. That is how it goes past the read length: a read lying wholly inside the repeat gives no exact length, but the number of such reads bounds the expansion from below.
 
@@ -552,7 +553,9 @@ The family and cohort table scripts ship with a self-contained test that needs o
 modules/expansionhunter/scripts/eh_tables_test
 ```
 
-**Outputs:** Per sample: VCF, JSON and realigned BAM. Per family: merged VCF and genotype table. Per cohort: merged VCF, concatenated genotype table with cohort percentiles, per-locus summary and flagged genotypes.
+**Reading a pileup.** Each SVG shows the reads REViewer assigned to the two haplotypes it found most consistent with the genotype, repeat in the middle. A correct call spreads the reads evenly along each allele; a size that is over- or underestimated leaves part of an allele bare, or reads piled where they do not fit. Repeats longer than the fragment length are capped at it, so a large expansion is judged by its in-repeat reads, not its drawn length. `metrics.tsv` gives each allele's depth: one far below the locus' other allele is suspect. The SVGs open in any browser, scaled to the window.
+
+**Outputs:** Per sample: VCF, JSON, realigned BAM, and the REViewer pileups of the flagged genotypes with their metrics. Per family: merged VCF and genotype table. Per cohort: merged VCF, concatenated genotype table with cohort percentiles, per-locus summary and flagged genotypes.
 
 ### Parameters File (params.yml)
 

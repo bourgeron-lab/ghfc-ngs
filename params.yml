@@ -151,6 +151,10 @@ expansionhunter_catalog_name: "jmsa50"
 # Empty leaves the alleles unclassified. Not part of any file name: after changing it, delete
 # the families' and the cohort's str/expansionhunter/*.tsv to have them written again.
 expansionhunter_thresholds: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/expansionhunter/str_thresholds.stripy.tsv"
+# REViewer read pileups (SVG) of every flagged genotype - status pathogenic, carrier or
+# intermediate, as in the cohort's flags.tsv - in samples/.../str/expansionhunter/reviewer/.
+# Needs expansionhunter_thresholds, without which nothing is flagged.
+expansionhunter_reviewer: true
 
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
