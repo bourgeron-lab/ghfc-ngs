@@ -124,7 +124,10 @@ flowchart TB
         eh_family["families/**{FID}**/str/expansionhunter/**{FID}**.**{catalog}**.{vcf.gz,genotypes.tsv}"]:::of
         eh_concat["bcftools merge + tables (founders' distribution, flags)"]
         eh_cohort["cohorts/**{cohort}**/str/expansionhunter/**{cohort}**.**{catalog}**.{vcf.gz,genotypes,loci,flags}"]:::oc
+        eh_reviewer["REViewer 0.2.7 (flagged genotypes)"]
+        eh_pileups["samples/**{barcode}**/str/expansionhunter/reviewer/**{barcode}**.**{catalog}**.{**{locus}**.svg,metrics,phasing}"]:::os
         eh_call --> eh_sample --> eh_merge --> eh_family --> eh_concat --> eh_cohort
+        eh_family --> eh_reviewer --> eh_pileups
     end
 
     subgraph wisecondorx [**WisecondorX**]

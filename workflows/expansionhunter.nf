@@ -3,6 +3,7 @@
  * Genotypes the variant catalog's short tandem repeats in each sample's CRAM
  * Merges each family's calls into one VCF and a genotype table, classed against published thresholds
  * Merges the family files into cohort-level files, with each allele's place among the cohort's founders
+ * Draws REViewer read pileups of each family's flagged genotypes
  *
  * Skips processing if output files already exist - only runs necessary modules
  */
@@ -11,6 +12,7 @@
 include { EXPANSIONHUNTER_CALL } from '../modules/expansionhunter/expansionhunter_call'
 include { EXPANSIONHUNTER_FAMILY } from '../modules/expansionhunter/expansionhunter_family'
 include { EXPANSIONHUNTER_COHORT } from '../modules/expansionhunter/expansionhunter_cohort'
+include { EXPANSIONHUNTER_REVIEWER } from '../modules/expansionhunter/expansionhunter_reviewer'
 
 workflow EXPANSIONHUNTER {
 
@@ -24,6 +26,7 @@ workflow EXPANSIONHUNTER {
     need_family        // collection: families whose VCF and table must be (re)built
     existing_families  // collection: families whose VCF and table are on disk and current
     need_cohort_merge  // boolean: whether the cohort files must be (re)built
+    need_reviewer      // collection: samples whose flagged genotypes must be (re)drawn
 
     main:
 
@@ -152,6 +155,58 @@ workflow EXPANSIONHUNTER {
     } else {
         cohort_vcf_output = channel.empty()
         cohort_tables_output = channel.empty()
+    }
+
+    // =====================================================================
+    // Step 4: Draw the pileups of each sample's flagged genotypes
+    // =====================================================================
+    if (need_reviewer) {
+        // Samples called in an earlier run read their call and its realigned reads from disk
+        existing_reads = channel.fromList(
+            need_reviewer.findAll { barcode -> !(barcode in need_call) }.collect { barcode ->
+                def prefix = "${Sharding.getSampleDir(params.data, barcode)}/str/expansionhunter/${barcode}.${catalog_name}"
+                tuple(barcode, file("${prefix}.vcf"), file("${prefix}_realigned.bam"), file("${prefix}_realigned.bam.bai"))
+            })
+
+        // Families not rebuilt in this run read their table from disk
+        existing_tables = channel.fromList(
+            need_reviewer.collect { barcode -> family_members[barcode] }.unique()
+                .findAll { fid -> !(fid in need_family) }
+                .collect { fid ->
+                    tuple(fid, file("${Sharding.getFamilyDir(params.data, fid)}/str/expansionhunter/${fid}.${catalog_name}.genotypes.tsv"))
+                })
+
+        // REViewer takes loci (LocusId), the family table names variants (VariantId). They
+        // differ at a locus with several variants, whose VariantId is a list: FXN_A and FXN in FXN.
+        def variant_loci = new groovy.json.JsonSlurper().parseText(catalog.text)
+            .collectMany { entry ->
+                [entry.VariantId ?: entry.LocusId].flatten()
+                    .findAll { vid -> vid != entry.LocusId }
+                    .collect { vid -> "${vid}=${entry.LocusId}" }
+            }
+            .join(',')
+
+        // One task per family. Its members are keyed with their expected number, so a family
+        // starts when its last member is called; remainder keeps the members of one whose
+        // other calls failed. Each family then waits for its table: a family whose merge was
+        // skipped has none, and its members are not drawn.
+        def reviewed_members = need_reviewer.countBy { barcode -> family_members[barcode] }
+        reviewer_input = EXPANSIONHUNTER_CALL.out.vcf
+            .join(EXPANSIONHUNTER_CALL.out.bam)
+            .filter { barcode, _vcf, _bam, _bai -> barcode in need_reviewer }
+            .mix(existing_reads)
+            .map { barcode, vcf, bam, bai ->
+                def fid = family_members[barcode]
+                tuple(groupKey(fid, reviewed_members[fid]), barcode, vcf, bam, bai)
+            }
+            .groupTuple(by: 0, remainder: true)
+            .map { fid, barcodes, vcfs, bams, bais -> tuple(fid.toString(), barcodes, vcfs, bams, bais) }
+            .join(new_family_tables.mix(existing_tables))
+            .map { fid, barcodes, vcfs, bams, bais, table ->
+                tuple(fid, barcodes, vcfs, bams, bais, table, ref, ref_fai, catalog, catalog_name, variant_loci)
+            }
+
+        EXPANSIONHUNTER_REVIEWER(reviewer_input)
     }
 
     emit:

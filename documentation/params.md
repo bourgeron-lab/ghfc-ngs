@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-57 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+58 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -83,6 +83,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `enable_conda` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `expansionhunter_catalog` | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
 | `expansionhunter_catalog_name` 📄 | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
+| `expansionhunter_reviewer` | `expansionhunter` | [ExpansionHunter](#expansionhunter) |
 | `expansionhunter_thresholds` | `expansionhunter` | [ExpansionHunter](#expansionhunter) |
 | `extractor_tsvs_list` | `extractor` | [Extractor](#extractor) |
 | `fastq_pattern` | `alignment` | [Input discovery](#input-discovery) |
@@ -503,10 +504,12 @@ These three are the only keys in the whole file with a **hard requirement check*
 | `expansionhunter_catalog` | file | `""` | ExpansionHunter variant catalog (JSON). **Required** by `expansionhunter`. |
 | `expansionhunter_catalog_name` 📄 | string | `""` | Label for that catalog in every output file name. **Required** by `expansionhunter`. Letters, digits, `.`, `_` and `-` only. |
 | `expansionhunter_thresholds` | file | `""` | Per-locus thresholds table, used to class each allele. Empty leaves the alleles unclassified. |
+| `expansionhunter_reviewer` | boolean | `true` | Draw a REViewer read pileup of every flagged genotype. Needs `expansionhunter_thresholds`, without which nothing is flagged. |
 
 - **The label is the cache.** Nothing on disk records which catalog a call was made with. A new catalog with an existing label reuses the old calls as if nothing had changed, and a new label recomputes every sample. The catalog of the cohort run, `references/GRCh38/expansionhunter/variant_catalog_custom_JMSA_offtargets.json`, goes with `jmsa50`.
 - **Thresholds.** A TSV keyed on the catalog's VariantId, with the columns `locus`, `disease`, `inheritance`, `normal_max`, `intermediate_min` and `pathogenic_min` (`.` for none). `references/GRCh38/expansionhunter/str_thresholds.stripy.tsv` holds the STRipy values for the cohort catalog, and its README says how they were converted. It is in no file name: after changing it, delete the families' and the cohort's `str/expansionhunter/*.tsv`, and they are rebuilt from the existing calls.
 - **Reference and sex.** Each sample is genotyped against `ref`, which must be the reference its CRAM was aligned to and have a `.fai`. The sex comes from the pedigree; unknown sex is genotyped as female, which only matters at chrX loci.
+- **REViewer pileups.** A genotype is flagged when its `status` is `pathogenic`, `carrier` or `intermediate`: the rows of the cohort's `flags.tsv`. Each flagged locus gets `<ID>.<label>.<LocusId>.svg` in the sample's `str/expansionhunter/reviewer/`, beside `<ID>.<label>.metrics.tsv` (REViewer's allele depths) and `<ID>.<label>.phasing.tsv`. The metrics table is written even when nothing is flagged, and is what marks a sample done: a sample is drawn again when it is called or its family table rebuilt, so after a thresholds change the rebuilt tables redraw their members. SVGs of loci no longer flagged are left in place. Calls made before the step are drawn from the realigned reads beside them, which must be sorted and indexed; one without them is reported and skipped.
 - **Calls made before the step.** `scripts/expansionhunter/eh_label_existing` gives unlabelled calls (`<ID>.vcf`, `<ID>.json`, `<ID>_realigned.bam`) the label, after checking that each VCF holds exactly the catalog's variants. Without `--apply` it only reports.
 
 ### Containers and resources
