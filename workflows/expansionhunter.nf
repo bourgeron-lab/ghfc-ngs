@@ -190,14 +190,20 @@ workflow EXPANSIONHUNTER {
         // starts when its last member is called; remainder keeps the members of one whose
         // other calls failed. Each family then waits for its table: a family whose merge was
         // skipped has none, and its members are not drawn.
-        def reviewed_members = need_reviewer.countBy { barcode -> family_members[barcode] }
+        // Counted with each: Nextflow 24.10 fails to compile `def ... = need_reviewer.countBy { ... }`
+        // here ("Variable `need_reviewer` already defined in the process scope")
+        def reviewed_members = [:]
+        need_reviewer.each { barcode ->
+            def family = family_members[barcode]
+            reviewed_members[family] = (reviewed_members[family] ?: 0) + 1
+        }
         reviewer_input = EXPANSIONHUNTER_CALL.out.vcf
             .join(EXPANSIONHUNTER_CALL.out.bam)
             .filter { barcode, _vcf, _bam, _bai -> barcode in need_reviewer }
             .mix(existing_reads)
             .map { barcode, vcf, bam, bai ->
-                def fid = family_members[barcode]
-                tuple(groupKey(fid, reviewed_members[fid]), barcode, vcf, bam, bai)
+                def family = family_members[barcode]
+                tuple(groupKey(family, reviewed_members[family]), barcode, vcf, bam, bai)
             }
             .groupTuple(by: 0, remainder: true)
             .map { fid, barcodes, vcfs, bams, bais -> tuple(fid.toString(), barcodes, vcfs, bams, bais) }
