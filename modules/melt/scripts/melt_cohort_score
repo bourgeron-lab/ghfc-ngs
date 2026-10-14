@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+
+"""Cohort frequency and ranking of the MELT insertions of every sample.
+
+Reads the per-sample MELT VCFs in a directory, <barcode>.<label>.<CLASS>.vcf as
+MELT_CALL publishes them (CLASS one of ALU, LINE1, SVA), and writes two files:
+
+<cohort>.<label>.internal_af.bed
+    The cohort's insertion loci. Per class, every sample's PASS sites are chained into
+    loci, a site joining a locus when it starts at most --window bp after the locus
+    ends (what `bedtools merge -d <window>` does); a locus's frequency is the number of
+    distinct samples with a site in it over the number of samples with a VCF of that
+    class. Columns: chrom start end mei_class internal_af n_carriers n_total.
+
+<cohort>.<label>.candidates.tsv.gz
+    Every PASS insertion of every sample, ranked by a composite score, highest first:
+
+        2   * (1 - gnomAD-SV AF)    the highest GRPMAX_AF (else AF) within --window bp,
+                                    same class; 0 when none
+      + 2   * (1 - internal AF)     the highest cohort locus frequency within --window bp
+      + 1   * impact                1 exonic, 0.5 genic, 0 intergenic
+      + 2   * NDD                   1 when the gene is in the NDD gene set
+      + 0.5 * ASSESS / 5            MELT's breakpoint evidence, 0 to 5
+
+    The gene is the first gene of --genes overlapping the insertion, else the gene MELT
+    names in INFO/INTERNAL; the insertion is exonic when INTERNAL names an exon, genic
+    when either names a gene.
+
+This is a port of the scoring of the cohort's first MEI analysis (Alex's
+prioritize_melt.sh and build_internal_af.sh), with the same windows, weights and
+output columns, less its optional HPO term: the pipeline has no per-sample HPO terms.
+
+The gnomAD-SV sites are read as `bcftools query -f '%CHROM\\t%POS\\t%ALT\\t%INFO/AF\\t%INFO/GRPMAX_AF\\n'`
+writes them, so that this script needs nothing but python3.
+"""
+
+import argparse
+import bisect
+import csv
+import gzip
+import re
+import sys
+from pathlib import Path
+
+CLASSES = ("ALU", "LINE1", "SVA")
+WEIGHTS = {"gnomad": 2.0, "internal": 2.0, "genic": 1.0, "ndd": 2.0, "assess": 0.5}
+COLUMNS = ["sample", "chrom", "pos", "end", "mei_class", "gene", "ndd", "impact",
+           "gnomad_af", "internal_af", "melt_filter", "assess", "gt", "composite_score"]
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def opener(path):
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+
+
+def read_inputs(indir, label):
+    """{class: {barcode: path}} of the per-sample VCFs, each checked to name its sample."""
+    name = re.compile(r"^(.+)\." + re.escape(label) + r"\.(" + "|".join(CLASSES) + r")\.vcf$")
+    vcfs = {cls: {} for cls in CLASSES}
+    for p in sorted(Path(indir).iterdir()):
+        m = name.match(p.name)
+        if not m:
+            continue
+        barcode, cls = m.groups()
+        if barcode in vcfs[cls]:
+            die(f"two {cls} VCFs for {barcode}")
+        sample = None
+        with open(p) as fh:
+            for line in fh:
+                if line.startswith("#CHROM"):
+                    f = line.rstrip("\n").split("\t")
+                    sample = f[9] if len(f) == 10 else None
+                    break
+        if sample != barcode:
+            die(f"{p.name} names its sample {sample!r}, not {barcode}")
+        vcfs[cls][barcode] = p
+    if not any(vcfs.values()):
+        die(f"no *.{label}.{{{','.join(CLASSES)}}}.vcf in {indir}")
+    return vcfs
+
+
+def records(path):
+    """(chrom, pos, filter, info, gt) of every record of a single-sample VCF."""
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 8:
+                continue
+            gt = f[9].split(":")[0] if len(f) >= 10 else "."
+            yield f[0], int(f[1]), f[6], f[7], gt
+
+
+def internal_loci(paths, window):
+    """[(chrom, start, end, carriers)] of the PASS sites of one class, chained as by bedtools merge -d."""
+    sites = []
+    for barcode, path in paths.items():
+        for chrom, pos, flt, _info, _gt in records(path):
+            if flt == "PASS":
+                sites.append((chrom, pos - 1, barcode))
+    sites.sort()
+    loci = []
+    for chrom, start, barcode in sites:
+        if loci and loci[-1][0] == chrom and start <= loci[-1][2] + window:
+            locus = loci[-1]
+            locus[2] = max(locus[2], start + 1)
+            locus[3].add(barcode)
+        else:
+            loci.append([chrom, start, start + 1, {barcode}])
+    return [(chrom, start, end, len(carriers)) for chrom, start, end, carriers in loci]
+
+
+def read_genes(path):
+    """chrom -> (starts, ends, symbols) sorted by start, and chrom -> longest gene."""
+    rows = {}
+    with opener(path) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith("#"):
+                continue
+            c, s, e, sym = line.rstrip("\n").split("\t")[:4]
+            rows.setdefault(c, []).append((int(s), int(e), sym))
+    genes, longest = {}, {}
+    for c, rs in rows.items():
+        rs.sort()
+        genes[c] = ([r[0] for r in rs], [r[1] for r in rs], [r[2] for r in rs])
+        longest[c] = max(e - s for s, e, _ in rs)
+    return genes, longest
+
+
+def gene_at(genes, longest, chrom, pos):
+    """Symbol of the gene overlapping 1-based pos with the greatest start, or None."""
+    g = genes.get(chrom)
+    if not g:
+        return None
+    starts, ends, syms = g
+    p0 = pos - 1
+    j = bisect.bisect_right(starts, p0) - 1
+    lo = p0 - longest.get(chrom, 0)
+    while j >= 0 and starts[j] >= lo:
+        if starts[j] <= p0 < ends[j]:
+            return syms[j]
+        j -= 1
+    return None
+
+
+def read_ndd(path, columns):
+    """Symbols marked true, 1 or yes in any of the named columns of the NDD gene table."""
+    genes = set()
+    with open(path, newline="") as fh:
+        r = csv.reader(fh, delimiter="\t")
+        header = next(r)
+        idx = {h: i for i, h in enumerate(header)}
+        if "Symbol" not in idx:
+            die(f"{path} has no 'Symbol' column")
+        sel = [idx[c] for c in columns if c in idx]
+        if not sel:
+            die(f"{path} has none of the columns {columns}")
+        sym_i = idx["Symbol"]
+        for row in r:
+            if len(row) <= sym_i or not row[sym_i].strip():
+                continue
+            if any(j < len(row) and row[j].strip().lower() in ("true", "1", "yes") for j in sel):
+                genes.add(row[sym_i].strip())
+    return genes
+
+
+def read_gnomad(path):
+    """(chrom, class) -> (positions, frequencies): GRPMAX_AF, else AF, of gnomAD's MEI sites."""
+    rows = {}
+    with opener(path) as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            c, p, alt, af, gm = line.rstrip("\n").split("\t")[:5]
+            cls = next((k for k in CLASSES if f"<INS:ME:{k}>" in alt), None)
+            if cls is None:
+                continue
+            af = 0.0 if af == "." else float(af)
+            gm = -1.0 if gm == "." else float(gm)
+            rows.setdefault((c, cls), []).append((int(p), gm if gm >= 0 else af))
+    out = {}
+    for k, rs in rows.items():
+        rs.sort()
+        out[k] = ([r[0] for r in rs], [r[1] for r in rs])
+    return out
+
+
+def max_near(sites, pos, window):
+    if not sites:
+        return 0.0
+    positions, vals = sites
+    lo = bisect.bisect_left(positions, pos - window)
+    hi = bisect.bisect_right(positions, pos + window)
+    return max(vals[lo:hi], default=0.0)
+
+
+def locus_af(loci, pos, window):
+    """Highest frequency of a cohort locus within window bp of 1-based pos."""
+    if not loci:
+        return 0.0
+    starts, ends, afs = loci
+    p0 = pos - 1
+    best = 0.0
+    j = bisect.bisect_right(starts, p0 + window) - 1
+    while j >= 0:
+        if starts[j] - window <= p0 <= ends[j] + window:
+            best = max(best, afs[j])
+        if ends[j] + window < p0 - window:
+            break
+        j -= 1
+    return best
+
+
+def parse_info(s):
+    d = {}
+    for kv in s.split(";"):
+        k, _, v = kv.partition("=")
+        d[k] = v if _ else True
+    return d
+
+
+def melt_gene(info):
+    """(gene or None, exonic) from MELT's INTERNAL=<gene>,<region>."""
+    val = info.get("INTERNAL")
+    if not val or val is True or val.upper().startswith("NULL"):
+        return None, False
+    parts = val.split(",")
+    gene = parts[0] if parts[0] and parts[0].upper() != "NULL" else None
+    region = parts[1].upper() if len(parts) > 1 else ""
+    return gene, "EXON" in region
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--input-dir", required=True, help="the per-sample MELT VCFs")
+    ap.add_argument("--cohort", required=True)
+    ap.add_argument("--label", required=True, help="melt_label, in the input and output names")
+    ap.add_argument("--genes", required=True, help="gene BED (chrom start end symbol), may be gzipped")
+    ap.add_argument("--ndd", required=True, help="NDD gene table, with a Symbol column")
+    ap.add_argument("--ndd-columns", required=True,
+                    help="'|'-separated columns of the NDD table that mark a gene as NDD")
+    ap.add_argument("--gnomad", required=True, help="gnomAD-SV sites as bcftools query writes them")
+    ap.add_argument("--window", type=int, default=50)
+    a = ap.parse_args()
+
+    vcfs = read_inputs(a.input_dir, a.label)
+    prefix = f"{a.cohort}.{a.label}"
+
+    # Cohort loci, and their frequency as the scoring reads it: as written, to 6 digits
+    internal = {}
+    bed_rows = []
+    for cls in CLASSES:
+        n_total = len(vcfs[cls])
+        if not n_total:
+            continue
+        by_chrom = {}
+        for chrom, start, end, n in internal_loci(vcfs[cls], a.window):
+            af = "%.6g" % (n / n_total)
+            bed_rows.append((chrom, start, end, cls, af, n, n_total))
+            by_chrom.setdefault(chrom, []).append((start, end, float(af)))
+        for chrom, rs in by_chrom.items():
+            internal[(chrom, cls)] = ([r[0] for r in rs], [r[1] for r in rs], [r[2] for r in rs])
+    bed_rows.sort(key=lambda r: (r[0], r[1], r[3]))
+    with open(f"{prefix}.internal_af.bed", "w") as out:
+        for row in bed_rows:
+            out.write("\t".join(str(x) for x in row) + "\n")
+
+    genes, longest = read_genes(a.genes)
+    ndd = read_ndd(a.ndd, a.ndd_columns.split("|"))
+    gnomad = read_gnomad(a.gnomad)
+
+    # Kept as (score, line) rather than as rows of fields: a 4,000-sample cohort has ~4M
+    candidates = []
+    for cls in CLASSES:
+        for barcode, path in sorted(vcfs[cls].items()):
+            for chrom, pos, flt, info, gt in records(path):
+                if flt != "PASS":
+                    continue
+                d = parse_info(info)
+                end = int(d.get("END", pos))
+                try:
+                    assess = float(d.get("ASSESS", 0))
+                except ValueError:
+                    assess = 0.0
+                mgene, exonic = melt_gene(d)
+                ggene = gene_at(genes, longest, chrom, pos)
+                gene = ggene or mgene or "."
+                genic = bool(ggene) or mgene is not None
+                impact = 1.0 if exonic else (0.5 if genic else 0.0)
+                g_af = max_near(gnomad.get((chrom, cls)), pos, a.window)
+                i_af = locus_af(internal.get((chrom, cls)), pos, a.window)
+                is_ndd = 1 if gene in ndd else 0
+                score = round(WEIGHTS["gnomad"] * (1.0 - g_af)
+                              + WEIGHTS["internal"] * (1.0 - i_af)
+                              + WEIGHTS["genic"] * impact
+                              + WEIGHTS["ndd"] * is_ndd
+                              + WEIGHTS["assess"] * max(0.0, min(1.0, assess / 5.0)), 4)
+                row = [barcode, chrom, pos, end, cls, gene, is_ndd,
+                       "exonic" if exonic else ("genic" if genic else "intergenic"),
+                       round(g_af, 6), round(i_af, 6), flt, assess, gt, score]
+                candidates.append((-score, barcode, chrom, pos, "\t".join(str(x) for x in row)))
+    candidates.sort()
+    with gzip.open(f"{prefix}.candidates.tsv.gz", "wt") as out:
+        out.write("\t".join(COLUMNS) + "\n")
+        for c in candidates:
+            out.write(c[-1] + "\n")
+
+    n_samples = len(set().union(*(set(v) for v in vcfs.values())))
+    print(f"{a.cohort}: {n_samples} samples, {len(bed_rows)} cohort loci, "
+          f"{len(candidates)} PASS candidates; {len(ndd)} NDD genes, "
+          f"{sum(len(v[0]) for v in gnomad.values())} gnomAD-SV MEI sites")
+
+
+if __name__ == "__main__":
+    main()

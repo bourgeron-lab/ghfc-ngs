@@ -4,7 +4,7 @@
 #
 #   1. validation - parameter mistakes the run must refuse before doing anything, each with
 #      its message (-preview, so nothing is written even if a check stops working);
-#   2. fresh      - all 12 steps with -stub-run on the untouched cohort;
+#   2. fresh      - all 13 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
 #                   the pedigree.
@@ -50,9 +50,10 @@ params() {
 
 valid_scenario=(
     'cohort_name: "STUB"'
-    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter"]'
+    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt"]'
     "ancestry_reference: \"${fixture}/refs/bundle\""
     'expansionhunter_catalog_name: "eh_stub"'
+    'melt_label: "melt_stub"'
 )
 
 # --- 1. validation ------------------------------------------------------------------------
@@ -82,6 +83,7 @@ expect_refusal roh_without_tier "needs the reference bundle's roh/ tier" "${v[0]
     "ancestry_reference: \"${fixture}/refs\"" "${v[3]}"
 expect_refusal eh_bad_catalog_name "may only hold letters" "${v[0]}" 'steps: ["expansionhunter"]' "${v[2]}" \
     'expansionhunter_catalog_name: "eh/stub"'
+expect_refusal melt_bad_label "melt_label 'melt/stub' may only hold" "${v[0]}" 'steps: ["melt"]' 'melt_label: "melt/stub"'
 expect_refusal resources_typo "no process is called PYWOMBATT" "${v[@]}" 'resources: {PYWOMBATT: {cpus: 2}}'
 
 # --- 2. and 3. stub runs ------------------------------------------------------------------
@@ -146,6 +148,7 @@ for merge in 'SNVS_COHORT:SNVS_COHORT_MERGE (STUB)' \
              'ANCESTRY:ANCESTRY_COHORT_MERGE (STUB-pcs)' \
              'ROH:ROH_COHORT_MERGE (STUB)' \
              'EXPANSIONHUNTER:EXPANSIONHUNTER_COHORT (STUB)' \
+             'MELT:MELT_COHORT (STUB)' \
              'DEEPVARIANT_FAMILY:GLNEXUS_FAMILY (FAM03)'; do
     if ! grep -qxF -- "${merge}" "${out}/addfamily.tasks.txt"; then
         echo "  FAIL  addfamily: ${merge} was not run"; fail=1

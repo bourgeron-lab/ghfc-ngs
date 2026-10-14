@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set here are read by the checks, which are eval'd strings
+
+# Self-contained check of melt_import_existing.
+#
+# A synthetic samples/ tree with one sample of each kind: calls to copy, calls already
+# imported, a sample missing a class, one whose VCF names another sample, one not written by
+# MELT 2.2.2, one with a labelled file in the way, and a sample with no meis/. Asserts that a
+# dry run touches nothing, that --apply copies exactly the first, byte for byte, leaves meis/
+# in place, and that nothing else moves. Needs only python3.
+#
+#   scripts/melt/melt_import_existing_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/melt_import_existing"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+dir() { echo "data/samples/${1: -1}/${1: -2:1}/${1}"; }
+
+# calls <barcode> <vcf sample name> <source> <class...>
+calls() {
+    local id=$1 name=$2 source=$3; shift 3
+    local d
+    d="$(dir "${id}")/meis"
+    mkdir -p "${d}"
+    for cls in "$@"; do
+        printf '##fileformat=VCFv4.2\n%s\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\nchr1\t1\t.\tA\t<INS:ME:%s>\t.\tPASS\tASSESS=5\tGT\t0/1\n' \
+            "${source}" "${name}" "${cls}" > "${d}/${cls}.final_comp.vcf"
+    done
+}
+
+calls GOOD01 GOOD01 '##source=MELTv2.2.2' ALU LINE1 SVA
+calls PART02 PART02 '##source=MELTv2.2.2' ALU SVA
+calls NAMED3 NAMED3.GRCh38_GIABv3 '##source=MELTv2.2.2' ALU LINE1 SVA
+calls OLDV04 OLDV04 '##source=MELTv2.0.5' ALU LINE1 SVA
+calls CLASH5 CLASH5 '##source=MELTv2.2.2' ALU LINE1 SVA
+mkdir -p "$(dir CLASH5)/mei/melt" && touch "$(dir CLASH5)/mei/melt/CLASH5.t1.SVA.vcf"
+calls DONE06 DONE06 '##source=MELTv2.2.2' ALU LINE1 SVA
+mkdir -p "$(dir DONE06)/mei/melt"
+for cls in ALU LINE1 SVA; do echo "done" > "$(dir DONE06)/mei/melt/DONE06.t1.${cls}.vcf"; done
+mkdir -p "$(dir NOMEI7)/deepvariant"
+
+before=$(cd data && find . -type f | sort)
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+
+python3 "${script}" --data data --label t1 --report dry.tsv > dry.log 2>&1
+check "a dry run copies nothing" '[ "$(cd data && find . -type f | sort)" = "${before}" ]'
+check "a dry run reports the one sample to copy" 'grep -q "^GOOD01	copy	3 files$" dry.tsv'
+
+python3 "${script}" --data data --label t1 --report run.tsv --apply > run.log 2>&1
+G=$(dir GOOD01)
+check "the three calls are copied under the label, byte for byte" \
+    'for c in ALU LINE1 SVA; do cmp -s "${G}/meis/${c}.final_comp.vcf" "${G}/mei/melt/GOOD01.t1.${c}.vcf" || exit 1; done'
+check "meis/ is left in place" '[ -s "${G}/meis/ALU.final_comp.vcf" ]'
+check "no temporary file is left behind" '[ -z "$(find data -name "*.importing")" ]'
+check "a sample missing a class is not copied" \
+    'grep -q "^PART02	incomplete	LINE1.final_comp.vcf missing or empty$" run.tsv && [ ! -e "$(dir PART02)/mei" ]'
+check "a VCF naming another sample is refused" 'grep -q "^NAMED3	refused" run.tsv && [ ! -e "$(dir NAMED3)/mei" ]'
+check "calls not made by MELT 2.2.2 are refused" \
+    'grep -q "^OLDV04	refused	ALU.final_comp.vcf has no ##source=MELTv2.2.2 line$" run.tsv && [ ! -e "$(dir OLDV04)/mei" ]'
+check "a labelled file in the way blocks the whole sample" \
+    'grep -q "^CLASH5	refused	already exists: CLASH5.t1.SVA.vcf$" run.tsv && [ ! -e "$(dir CLASH5)/mei/melt/CLASH5.t1.ALU.vcf" ]'
+check "an imported sample is left alone" \
+    'grep -q "^DONE06	already_imported" run.tsv && [ "$(cat "$(dir DONE06)/mei/melt/DONE06.t1.ALU.vcf")" = done ]'
+check "a sample with no meis/ directory is not listed" '! grep -q NOMEI7 run.tsv'
+check "a second run finds nothing more to do" \
+    'python3 "${script}" --data data --label t1 --report again.tsv --apply >/dev/null 2>&1; ! grep -q "	copied	" again.tsv'
+check "--ids restricts the run to the listed samples" \
+    'echo GOOD01 > ids.txt; python3 "${script}" --data data --label t2 --ids ids.txt --report ids.tsv >/dev/null 2>&1; [ "$(tail -n +2 ids.tsv | cut -f1)" = GOOD01 ]'
+check "a label with a slash is refused" \
+    '! python3 "${script}" --data data --label "a/b" --report x.tsv >/dev/null 2>&1'
+
+[ "${fail}" -eq 0 ] && echo "melt_import_existing: all checks passed" || echo "melt_import_existing: FAILURES"
+exit "${fail}"

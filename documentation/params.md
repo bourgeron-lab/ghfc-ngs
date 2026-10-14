@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-58 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+63 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -96,6 +96,11 @@ program can see is in this table. A key that is not here is not read by anything
 | `max_cpus` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
 | `max_memory` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
 | `max_time` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
+| `melt_dir` | `melt` — **required** | [MELT](#melt) |
+| `melt_gnomad_sv` | `melt` — **required** | [MELT](#melt) |
+| `melt_label` 📄 | `melt` — **required** | [MELT](#melt) |
+| `melt_ndd_columns` | `melt` | [MELT](#melt) |
+| `melt_ndd_genes` | `melt` — **required** | [MELT](#melt) |
 | `old_cram_37` | `alignment`, realignment only | [Reference genomes](#reference-genomes) |
 | `old_cram_38` | `alignment`, realignment only | [Reference genomes](#reference-genomes) |
 | `old_ref_37` | `alignment`, realignment only | [Reference genomes](#reference-genomes) |
@@ -191,7 +196,7 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these twelve:
+the command line. Every entry must be one of these thirteen:
 
 | Step | Produces |
 |---|---|
@@ -207,6 +212,7 @@ the command line. Every entry must be one of these twelve:
 | `ancestry` | Ancestry components, admixture and polygenic scores, per family and per cohort |
 | `roh` | Runs of homozygosity and inbreeding (F_ROH) per individual, genes in ROH, per family and per cohort |
 | `expansionhunter` | Short tandem repeat genotypes per sample, merged and classed per family, merged and summarised per cohort |
+| `melt` | Mobile element insertions (ALU, LINE1, SVA) per sample, merged per family, with their cohort frequency and a ranking of every insertion per cohort |
 
 ### The rule that catches people out
 
@@ -230,6 +236,7 @@ missing prerequisite is only an error when something in *this* run would consume
   under the current `ancestry_panel_name`.
 - `expansionhunter` demands nothing. Like `wisecondorx`, it reads the CRAMs, and a sample with
   no CRAM is left out of its family's files, with a warning, rather than sent to alignment.
+- `melt` demands nothing either, for the same reason.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -257,12 +264,15 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the twelve above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the thirteen above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: the 'roh' step requires ...` | `roh` listed without `ancestry_reference` and `ancestry_panel_name` |
 | `ERROR: the 'expansionhunter' step requires ...` | `expansionhunter` listed without `expansionhunter_catalog`, `expansionhunter_catalog_name` or `ref` |
 | `ERROR: the 'expansionhunter' step cannot find ...` | the catalog, the thresholds table or the reference's `.fai` does not exist |
 | `ERROR: expansionhunter_catalog_name '...' may only hold ...` | a label with a character that cannot go in a file name |
+| `ERROR: the 'melt' step requires ...` | `melt` listed without `melt_dir`, `melt_label`, `melt_gnomad_sv`, `melt_ndd_genes`, `ref`, or the gencode settings `annotation_annotation_path` and `annotation_gencode` |
+| `ERROR: the 'melt' step cannot find ...` | a file of the MELT distribution, gnomAD-SV, the NDD table, the gencode gene BED or the reference's `.fai` does not exist |
+| `ERROR: melt_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
 
@@ -272,7 +282,7 @@ they should be set.
 
 ## Key reference
 
-57 keys are read by the code. In the tables below, **no default** means the key is `null` when
+62 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -512,6 +522,23 @@ These three are the only keys in the whole file with a **hard requirement check*
 - **REViewer pileups.** A genotype is flagged when its `status` is `pathogenic`, `carrier` or `intermediate`: the rows of the cohort's `flags.tsv`. Each flagged locus gets `<ID>.<label>.<LocusId>.svg` in the sample's `str/expansionhunter/reviewer/`, beside `<ID>.<label>.metrics.tsv` (REViewer's allele depths) and `<ID>.<label>.phasing.tsv`. The metrics table is written even when nothing is flagged, and is what marks a sample done: a sample is drawn again when it is called or its family table rebuilt, so after a thresholds change the rebuilt tables redraw their members. SVGs of loci no longer flagged are left in place. Calls made before the step are drawn from the realigned reads beside them, which must be sorted and indexed; one without them is reported and skipped.
 - **Calls made before the step.** `scripts/expansionhunter/eh_label_existing` gives unlabelled calls (`<ID>.vcf`, `<ID>.json`, `<ID>_realigned.bam`) the label, after checking that each VCF holds exactly the catalog's variants. Without `--apply` it only reports.
 
+### MELT
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `melt_dir` | directory | `""` | The MELT v2.2.2 distribution: `MELT.jar`, `me_refs/Hg38/{ALU,LINE1,SVA}_MELT.zip`, `add_bed_files/Hg38/Hg38.genes.bed`. **Required** by `melt`. |
+| `melt_label` 📄 | string | `""` | Label for the calls in every output file name. **Required** by `melt`. Letters, digits, `.`, `_` and `-` only. |
+| `melt_gnomad_sv` | file | `""` | gnomAD-SV sites VCF, for the population frequency of each insertion (`GRPMAX_AF`, else `AF`, within 50 bp). **Required** by `melt`. |
+| `melt_ndd_genes` | file | `""` | NDD gene table: a TSV with a `Symbol` column and columns marking genes `True`. **Required** by `melt`. |
+| `melt_ndd_columns` | string | `"High Confidence NDD genes v3"` | The columns of `melt_ndd_genes` that mark a gene NDD, `\|`-separated; a gene marked in any of them is. |
+
+- **MELT is not in any image.** Its licence (University of Maryland, academic use) is non-transferable, so it cannot be redistributed; the image `fcliquet/melt-deps` holds what it runs with, and each task stages `melt_dir`. The cohort's copy is `/pasteur/helix/projects/ghfc_wgs/tools/MELTv2.2.2`.
+- **The label is the cache**, as for ExpansionHunter. Give a new label to a new MELT version or a new set of mobile elements. The cohort's first calls, made with MELT 2.2.2 Single on ALU, LINE1 and SVA, go with `melt222`.
+- **Reference.** Each sample is called against `ref`, which must be the reference its CRAM was aligned to. A CRAM whose contigs are not all in `ref` (aligned to `1` rather than `chr1`, say) fails at once and is not retried.
+- **Genes.** The cohort scoring places insertions in genes with `<annotation_annotation_path>/gencode/<annotation_gencode>.symbol.genes.bed.gz`, the BED the `roh` step uses, so `melt` needs those two keys set too.
+- **Scoring.** The cohort's candidates table ranks every PASS insertion by `2(1 - gnomAD AF) + 2(1 - cohort AF) + impact (1 exonic, 0.5 genic) + 2 NDD + 0.5 ASSESS/5`, the weights of the cohort's first MEI analysis. None of these settings is in a file name: the cohort files are rebuilt whenever a sample is called, or after you delete them.
+- **Calls made before the step.** `scripts/melt/melt_import_existing` copies the calls of the first analysis (`<ID>/meis/{ALU,LINE1,SVA}.final_comp.vcf`) to `mei/melt/<ID>.<label>.<CLASS>.vcf`, after checking each one. Without `--apply` it only reports.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -646,7 +673,8 @@ ancestry_panel_name: "apgs_b1.0.0_dp10gq20"
 
 **`expansionhunter_catalog_name`** works the same way for the ExpansionHunter calls. Pointing
 `expansionhunter_catalog` at another catalog without a new label reuses every existing call,
-made with the old catalog, and mixes in new ones made with the new catalog.
+made with the old catalog, and mixes in new ones made with the new catalog. **`melt_label`**
+does the same for the MELT calls.
 
 ### Three different directories
 

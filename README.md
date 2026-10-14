@@ -298,7 +298,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports twelve main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports thirteen main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -314,6 +314,7 @@ The pipeline supports twelve main steps that must be explicitly listed in the `s
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
 - **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
 - **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution. Draws a REViewer read pileup of every flagged genotype.
+- **`melt`**: Mobile element insertion (ALU, LINE1, SVA) calling with MELT v2.2.2 Single on each sample's CRAM. Merges each family's calls into one VCF, then chains the cohort's insertions into loci with their carrier frequency and ranks every PASS insertion against gnomAD-SV, the cohort, the genes and the NDD gene set.
 
 **Step Dependencies:**
 
@@ -328,6 +329,7 @@ The pipeline supports twelve main steps that must be explicitly listed in the `s
 - `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
 - `roh` requires the ancestry step's family panel and ancestry table (needs `ancestry` in `steps` if they are missing). Like `ancestry` it never reads the call sets, so `steps: ["ancestry", "roh"]` runs on its own
 - `expansionhunter` requires CRAM files. Like `wisecondorx`, a sample with no CRAM is not sent to alignment: it is left out of its family's ExpansionHunter files, with a warning
+- `melt` requires CRAM files, and treats a sample with none as `expansionhunter` does
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -557,6 +559,40 @@ modules/expansionhunter/scripts/eh_tables_test
 
 **Outputs:** Per sample: VCF, JSON, realigned BAM, and the REViewer pileups of the flagged genotypes with their metrics. Per family: merged VCF and genotype table. Per cohort: merged VCF, concatenated genotype table with cohort percentiles, per-locus summary and flagged genotypes.
 
+#### MELT Workflow
+
+Mobile element insertion (MEI) calling with [MELT](https://melt.igs.umaryland.edu/) v2.2.2, per sample, then merged per family and scored per cohort:
+1. **Calling** - Per sample, MELT Single calls ALU, LINE1 and SVA insertions from the CRAM, against `ref` and MELT's Hg38 transposon references, and annotates them with MELT's Hg38 gene BED
+2. **Family merge** - Each member's three VCFs are concatenated, and the members merged with `bcftools merge --merge none`
+3. **Cohort scoring** - Every sample's PASS sites are chained into cohort loci per class, a site joining a locus when it starts at most 50 bp after it ends, with the share of samples carrying each. Every PASS insertion is then ranked by `2(1 - gnomAD-SV AF) + 2(1 - cohort AF) + impact + 2 NDD + 0.5 ASSESS/5`, impact being 1 exonic, 0.5 genic, 0 intergenic
+
+This is the cohort's first MEI analysis, run outside the pipeline, brought into it: same MELT version and settings, same scoring and weights, less its optional HPO term.
+
+**Licence.** MELT is free for academic use, but its licence is non-transferable, so MELT cannot go into an image anyone can pull. `fcliquet/melt-deps` holds what MELT runs with (OpenJDK 11, samtools 1.21, bowtie2 2.5.4), and each task stages the MELT distribution from `melt_dir`.
+
+**CRAM 3.1.** The htsjdk bundled in MELT 2.2.2 cannot decode CRAM 3.1. A 3.1 CRAM is transcoded to 3.0 in the task first, which adds a few minutes and the size of the CRAM in scratch.
+
+**Resources.** A sample takes about 5 hours at 30-40x, in under 6 GB of heap, and leaves about 20 GB of intermediates in node-local scratch. Above about 50x MELT's pinpoint step exhausts the heap: Java then exits with status 3 and the call is retried with 64 GB, then 120 GB. Any other failure is not retried and does not stop the run; it skips that sample's family merge and the cohort scoring, with a warning. A CRAM whose contigs are not the reference's (aligned to `1` rather than `chr1`) fails at once with status 64.
+
+**What a family VCF is not.** MELT calls each sample on its own, and the same insertion is often placed a few bases apart in two members, which makes two records. A member with no record at an insertion has no call there, which is not proof that it lacks it: in the cohort's first analysis most insertions that looked de novo turned out to be inherited insertions MELT had missed in a parent. Check a candidate de novo against the parents' calls within 50 bp, PASS or not, and their reads.
+
+**The label.** `melt_label` is part of every output file name, as `expansionhunter_catalog_name` is. The cohort files are rebuilt whenever a sample is called, since every new call changes the cohort frequencies.
+
+**Calls made before the step.** The first analysis wrote `samples/{S1}/{S2}/<ID>/meis/{ALU,LINE1,SVA}.final_comp.vcf`. `scripts/melt/melt_import_existing` copies them to the step's names, after checking each one, so they are not called again:
+
+```bash
+scripts/melt/melt_import_existing --data /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38 --label melt222
+```
+
+Without `--apply` it only reports. The scoring script and the import script each ship with a self-contained test that needs only `python3`:
+
+```bash
+modules/melt/scripts/melt_cohort_score_test
+scripts/melt/melt_import_existing_test
+```
+
+**Outputs:** Per sample: one VCF per class, as MELT writes it. Per family: merged VCF. Per cohort: the loci BED and the ranked candidates.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -619,13 +655,17 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **ExpansionHunter calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${expansionhunter_catalog_name}.{vcf,json}` (both non-empty)
 - **ExpansionHunter files (family)**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv}`
 - **ExpansionHunter files (cohort)**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv,loci.tsv,flags.tsv}`
+- **MELT calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${melt_label}.{ALU,LINE1,SVA}.vcf` (all three non-empty)
+- **MELT VCF (family)**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${melt_label}.{vcf.gz,vcf.gz.tbi}`
+- **MELT files (cohort)**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${melt_label}.{internal_af.bed,candidates.tsv.gz}`
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
 Cohort-level files are the exception: each is merged again, from every family, whenever a family
 that feeds it is built or rebuilt in the run - the common-variant BCF when a family is annotated,
-the Wombat tables when a family's Wombat results are written, and the WisecondorX, ancestry, ROH
-and ExpansionHunter cohort files when their family files are. Adding a family to the pedigree is
+the Wombat tables when a family's Wombat results are written, the WisecondorX, ancestry, ROH
+and ExpansionHunter cohort files when their family files are, and the MELT cohort files when a
+sample is called. Adding a family to the pedigree is
 enough to have it in every cohort file. A cohort merge skipped in that run - its step not
 listed, or the run stopped first - is not caught up later unless the cohort file is deleted.
 
@@ -691,6 +731,11 @@ data/
 │                       ├── BC001.jmsa50.json
 │                       ├── BC001.jmsa50_realigned.bam         # Reads realigned to the loci (IGV)
 │                       └── BC001.jmsa50_realigned.bam.bai
+│               └── mei/
+│                   └── melt/
+│                       ├── BC001.melt222.ALU.vcf              # Insertions, as MELT writes them
+│                       ├── BC001.melt222.LINE1.vcf
+│                       └── BC001.melt222.SVA.vcf
 ├── families/                      # Family-specific output directories (sharded)
 │   └── {S1}/                      # Shard level 1 (single character)
 │       └── {S2}/                  # Shard level 2 (single character)
@@ -738,6 +783,10 @@ data/
 │                       ├── FID001.jmsa50.vcf.gz               # Members' repeat genotypes merged
 │                       ├── FID001.jmsa50.vcf.gz.tbi
 │                       └── FID001.jmsa50.genotypes.tsv        # Locus x member, alleles classed
+│               └── mei/
+│                   └── melt/
+│                       ├── FID001.melt222.vcf.gz              # Members' insertions merged
+│                       └── FID001.melt222.vcf.gz.tbi
 ├── cohorts/                       # Cohort-specific directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── COHORT_NAME.pedigree.tsv                 # Family structure (required)
@@ -764,6 +813,10 @@ data/
 │               ├── COHORT_NAME.jmsa50.genotypes.tsv           # Family tables + cohort percentile
 │               ├── COHORT_NAME.jmsa50.loci.tsv                # Per-locus distribution and counts
 │               └── COHORT_NAME.jmsa50.flags.tsv               # Pathogenic, carrier, intermediate
+│       └── mei/
+│           └── melt/
+│               ├── COHORT_NAME.melt222.internal_af.bed        # Insertion loci, carrier frequency
+│               └── COHORT_NAME.melt222.candidates.tsv.gz      # Every PASS insertion, ranked
 └── extractor/                     # Extractor outputs (if TSV lists provided)
     └── VARIANT_LIST/
         ├── VARIANT_LIST.extracted.tsv               # Extracted variants
@@ -932,6 +985,15 @@ Paths use `${L}` as shorthand for `${expansionhunter_catalog_name}`.
   - `loci` - per locus: thresholds, the founders' median, 95th, 99th and 99.9th percentile and maximum, and the number of members per status and not passing ExpansionHunter's filter
   - `flags` - the genotypes whose status is pathogenic, carrier or intermediate, most severe first, with the founders' median, 99.9th percentile and maximum
 
+### MELT Outputs
+
+Paths use `${L}` as shorthand for `${melt_label}`.
+
+- **Sample calls**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${L}.{ALU,LINE1,SVA}.vcf`, MELT's VCFs unchanged, the sample named by its bare barcode. `ALT` is `<INS:ME:ALU>` (or LINE1, SVA); `ASSESS` (0-5) grades the breakpoint evidence, 5 being a target site duplication resolved by split reads; `INTERNAL` names the RefSeq gene and region MELT places the insertion in
+- **Family VCF**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${L}.vcf.gz` (and `.tbi`)
+- **Cohort loci**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.internal_af.bed` - `chrom start end mei_class internal_af n_carriers n_total`, per class, from PASS sites only
+- **Cohort candidates**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.candidates.tsv.gz` - every PASS insertion of every sample, highest score first: `sample chrom pos end mei_class gene ndd impact gnomad_af internal_af melt_filter assess gt composite_score`. `gene` is the gencode gene overlapping the insertion, else MELT's; `gnomad_af` is gnomAD-SV's highest `GRPMAX_AF` (else `AF`) for the class within 50 bp
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -1012,7 +1074,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
 ```
 
 ### Custom Configuration
@@ -1050,6 +1112,7 @@ The pipeline uses the following containers by default:
 - **DeepVariant**: `google/deepvariant:1.9.0`
 - **GLnexus**: `cgrlab/glnexus:v1.4.1`
 - **SAMtools**: `biocontainers/samtools:1.19.2--h50ea8bc_1`
+- **MELT**: `fcliquet/melt-deps:1.0.0` (OpenJDK 11, samtools, bowtie2, bcftools; MELT itself is staged from `melt_dir`, see `containers/melt/Dockerfile`)
 
 ### Container Profiles
 

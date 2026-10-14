@@ -20,7 +20,8 @@ data="${dir}/data"
 refs="${dir}/refs"
 
 mkdir -p "${data}/cohorts/STUB" "${data}/fastq" "${data}/old_cram_38" "${data}/old_cram_37" \
-    "${refs}/bundle/roh" "${refs}/wombat" "${refs}/annotation" "${dir}/scratch"
+    "${refs}/bundle/roh" "${refs}/wombat" "${refs}/annotation/gencode" "${dir}/scratch" \
+    "${refs}/melt/me_refs/Hg38" "${refs}/melt/add_bed_files/Hg38"
 
 printf 'FID\tbarcode\tfather\tmother\tsex\tphenotype\n' > "${data}/cohorts/STUB/STUB.pedigree.tsv"
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -41,7 +42,10 @@ touch "${data}/old_cram_37/BC004.cram" "${data}/old_cram_37/BC004.cram.crai"
 
 for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz \
          wisecondorx.100000.npz eh_thresholds.tsv \
-         ancestry_catalog.tsv bundle/roh/sites.tsv.gz extract_me.tsv hg19ToHg38.over.chain.gz; do
+         ancestry_catalog.tsv bundle/roh/sites.tsv.gz extract_me.tsv hg19ToHg38.over.chain.gz \
+         annotation/gencode/gencode.stub.symbol.genes.bed.gz gnomad_sv.vcf.gz ndd_genes.tsv \
+         melt/MELT.jar melt/me_refs/Hg38/ALU_MELT.zip melt/me_refs/Hg38/LINE1_MELT.zip \
+         melt/me_refs/Hg38/SVA_MELT.zip melt/add_bed_files/Hg38/Hg38.genes.bed; do
     touch "${refs}/${f}"
 done
 # The expansionhunter workflow reads the catalog itself, for the loci of multi-variant entries
@@ -84,6 +88,9 @@ ancestry_catalog: "${refs}/ancestry_catalog.tsv"
 ancestry_panel_name: "apgs_stub"
 expansionhunter_catalog: "${refs}/eh_catalog.json"
 expansionhunter_thresholds: "${refs}/eh_thresholds.tsv"
+melt_dir: "${refs}/melt"
+melt_gnomad_sv: "${refs}/gnomad_sv.vcf.gz"
+melt_ndd_genes: "${refs}/ndd_genes.tsv"
 max_cpus: 2
 max_memory: "2.GB"
 max_time: "1.h"
