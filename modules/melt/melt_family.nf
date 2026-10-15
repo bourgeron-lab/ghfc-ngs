@@ -3,13 +3,14 @@
 /*
  * MELT: per-family merge module
  * Merges the members' MELT VCFs, all three classes, into one family VCF
+ * Tabulates each child's insertions against its parents' calls
  */
 
 nextflow.enable.dsl=2
 
 process MELT_FAMILY {
   /*
-  Merge a family's MELT calls into one VCF
+  Merge a family's MELT calls into one VCF, and write its transmission table
 
   Each member's ALU, LINE1 and SVA VCFs are sorted, compressed and concatenated into one,
   then the members are merged with --merge none: an insertion is one record for every
@@ -18,18 +19,28 @@ process MELT_FAMILY {
   few bases apart in two members and then makes two records; a member without a record
   has no call there, which is not proof that it lacks the insertion.
 
+  The transmission table is written by melt_family_transmission from the members' own
+  VCFs, not from the merge: for every PASS insertion of a child with a genotyped parent,
+  each parent's nearest call of the same class within 50 bp, PASS or not, and whether the
+  insertion is inherited, absent in both parents (a de novo candidate), or cannot tell
+  because a parent is not genotyped.
+
   Parameters
   ----------
   fid : val
     Family ID
   vcfs : path
     The members' MELT VCFs, three per member
+  pedigree : path
+    Cohort pedigree file; only the family's rows are read
   label : val
     melt_label, identifying the calls in output file names
+  transmission : path
+    The transmission table script, staged in so it is reachable inside the container
 
   Returns
   -------
-  Tuple of family ID, merged VCF and its index
+  Tuple of family ID, merged VCF and its index, and the transmission table
   */
 
   tag "${fid}"
@@ -39,17 +50,18 @@ process MELT_FAMILY {
     "${params.data}/families/${s1}/${s2}/${fid}/mei/melt"
   },
     mode: 'copy',
-    pattern: "${fid}.${label}{.vcf.gz,.vcf.gz.tbi}"
+    pattern: "${fid}.${label}{.vcf.gz,.vcf.gz.tbi,.transmission.tsv}"
 
   label 'melt_family'
 
   input:
   // Staged into a subdirectory, so a family named after its only member cannot have its
   // input and its output under the same name
-  tuple val(fid), path(vcfs, stageAs: 'input_vcfs/*'), val(label)
+  tuple val(fid), path(vcfs, stageAs: 'input_vcfs/*'), path(pedigree), val(label), path(transmission)
 
   output:
   tuple val(fid), path("${prefix}.vcf.gz"), path("${prefix}.vcf.gz.tbi"), emit: vcf
+  tuple val(fid), path("${prefix}.transmission.tsv"), emit: transmission
 
   script:
   prefix = "${fid}.${label}"
@@ -100,6 +112,13 @@ process MELT_FAMILY {
     echo "ERROR: the family merge produced no records" >&2
     exit 1
   fi
+
+  python3 ${transmission} \\
+      --family ${fid} \\
+      --pedigree ${pedigree} \\
+      --input-dir input_vcfs \\
+      --label ${label} \\
+      --out ${prefix}.transmission.tsv
   """
 
   stub:
@@ -107,5 +126,6 @@ process MELT_FAMILY {
   """
   echo | gzip > ${prefix}.vcf.gz
   touch ${prefix}.vcf.gz.tbi
+  printf 'family_id\\tchild\\tfather\\tmother\\tmei_class\\tchrom\\tpos\\ttransmission\\n${fid}\\t${fid}_s1\\t${fid}_s2\\t${fid}_s3\\tALU\\tchr1\\t1000\\tinherited_father\\n' > ${prefix}.transmission.tsv
   """
 }

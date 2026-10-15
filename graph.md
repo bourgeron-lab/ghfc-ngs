@@ -136,9 +136,12 @@ flowchart TB
         melt_sample["samples/**{barcode}**/mei/melt/**{barcode}**.**{label}**.{ALU,LINE1,SVA}.vcf"]:::os
         melt_merge["bcftools concat + merge"]
         melt_family["families/**{FID}**/mei/melt/**{FID}**.**{label}**.vcf.gz"]:::of
+        melt_trans["children's insertions vs parents' calls (±50 bp, any FILTER)"]
+        melt_trans_out["families/**{FID}**/mei/melt/**{FID}**.**{label}**.transmission.tsv"]:::of
         melt_score["cohort loci (±50 bp) + score (gnomAD-SV, genes, NDD)"]
         melt_cohort["cohorts/**{cohort}**/mei/melt/**{cohort}**.**{label}**.{internal_af.bed,candidates.tsv.gz}"]:::oc
         melt_call --> melt_sample --> melt_merge --> melt_family
+        melt_sample --> melt_trans --> melt_trans_out
         melt_sample --> melt_score --> melt_cohort
     end
 

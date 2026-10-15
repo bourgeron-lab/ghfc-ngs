@@ -893,6 +893,7 @@ workflow {
         MELT(
             all_available_crams,
             pedigree_data.family_members,
+            pedigree_file,
             analysis_plan.melt.needed,
             analysis_plan.melt.existing,
             analysis_plan.melt.need_family,
@@ -1613,7 +1614,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
         }
 
-        // A family is rebuilt when its VCF is missing or one of its members is (re)called. It
+        // A family is rebuilt when its VCF or transmission table is missing or one of its members is (re)called. It
         // is built from the members that have a call, so one with no CRAM is left out of it.
         families.each { fid ->
             def members = members_by_family[fid] ?: []
@@ -1624,7 +1625,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 return
             }
             def prefix = "${Sharding.getFamilyDir(params.data, fid)}/mei/melt/${fid}.${label}"
-            def outputs_exist = ['vcf.gz', 'vcf.gz.tbi'].every { ext -> new File("${prefix}.${ext}").exists() }
+            def outputs_exist = ['vcf.gz', 'vcf.gz.tbi', 'transmission.tsv'].every { ext -> new File("${prefix}.${ext}").exists() }
             if (outputs_exist && !callable.any { barcode -> barcode in plan.melt.needed }) {
                 plan.melt.family_existing.add(fid)
             } else {

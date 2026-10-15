@@ -1,7 +1,7 @@
 /*
  * MELT Workflow
  * Calls ALU, LINE1 and SVA mobile element insertions in each sample's CRAM with MELT Single
- * Merges each family's calls into one VCF
+ * Merges each family's calls into one VCF, and tabulates each child's insertions against its parents' calls
  * Chains the cohort's insertions into loci with their carrier frequency, and ranks every PASS
  * insertion against the cohort, gnomAD-SV, the genes and the NDD gene set
  *
@@ -18,6 +18,7 @@ workflow MELT {
     take:
     cram_files         // channel: [barcode, cram, crai] - existing and newly aligned CRAMs
     family_members     // map: [barcode: fid]
+    pedigree_file      // string: path to the cohort pedigree
     need_call          // collection: samples that need a MELT call
     existing_calls     // collection: samples whose call is already on disk
     need_family        // collection: families whose VCF must be (re)built
@@ -34,6 +35,7 @@ workflow MELT {
     // Staged as a process input rather than referenced through projectDir: the pipeline
     // directory is not mounted inside the task container.
     def cohort_score = file("${projectDir}/modules/melt/scripts/melt_cohort_score", checkIfExists: true)
+    def transmission_script = file("${projectDir}/modules/melt/scripts/melt_family_transmission", checkIfExists: true)
 
     // A sample's three VCFs, read from its sharded path, never globbed
     def published_vcfs = { barcode ->
@@ -99,12 +101,16 @@ workflow MELT {
                 }
                 return true
             }
-            .map { fid, _barcodes, vcfs -> tuple(fid.toString(), vcfs.flatten(), label) }
+            .map { fid, _barcodes, vcfs ->
+                tuple(fid.toString(), vcfs.flatten(), file(pedigree_file), label, transmission_script)
+            }
 
         MELT_FAMILY(family_inputs)
         new_family_vcfs = MELT_FAMILY.out.vcf
+        new_family_transmission = MELT_FAMILY.out.transmission
     } else {
         new_family_vcfs = channel.empty()
+        new_family_transmission = channel.empty()
     }
 
     // =====================================================================
@@ -149,5 +155,6 @@ workflow MELT {
     emit:
     sample_vcfs = MELT_CALL.out.vcfs
     family_vcfs = new_family_vcfs
+    family_transmission = new_family_transmission
     cohort_tables = cohort_tables_output
 }

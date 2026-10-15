@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set here are read by the checks, which are eval'd strings
+
+# Self-contained check of melt_family_transmission.
+#
+# A family of a trio plus a half-sib whose mother has no MELT calls, and a singleton, with
+# synthetic MELT VCFs in the layout MELT_CALL publishes. Asserts every transmission label,
+# that a parent's non-PASS and 0/0 calls count, that the window is inclusive (50 bp joins,
+# 51 does not), that only calls of the same class count, that the nearest call wins and a
+# PASS one on a tie, that the child's non-PASS calls and the parents themselves get no row,
+# the columns taken from MELT's INFO, the row order, that a family with no child writes a
+# header only, and that a stranger's VCF, a VCF naming another sample and a member missing
+# a class are refused. Needs only python3.
+#
+#   modules/melt/scripts/melt_family_transmission_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/melt_family_transmission"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+mkdir vcfs
+
+L=t1
+
+printf 'FID\tbarcode\tfather\tmother\tsex\tphenotype\n' > ped.tsv
+printf 'FAM1\tKID\tDAD\tMUM\t1\t2\nFAM1\tHALF\tDAD\tNOMUM\t2\t1\n' >> ped.tsv
+printf 'FAM1\tDAD\t0\t0\t1\t1\nFAM1\tMUM\t0\t0\t2\t1\nFAM1\tNOMUM\t0\t0\t2\t1\n' >> ped.tsv
+printf 'FAM2\tSOLO\t-9\t-9\t2\t2\n' >> ped.tsv
+
+# vcf <sample> <class> then one "chrom pos filter internal gt" per record
+vcf() {
+    local sample=$1 cls=$2; shift 2
+    {
+        printf '##fileformat=VCFv4.2\n##source=MELTv2.2.2\n'
+        printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "${sample}"
+        while [ $# -gt 0 ]; do
+            read -r chrom pos filter internal gt <<< "$1"; shift
+            printf '%s\t%s\t.\tA\t<INS:ME:%s>\t.\t%s\tTSD=null;ASSESS=5;INTERNAL=%s;SVTYPE=%s;SVLEN=281;LP=3;RP=4;RA=0.5;PRIOR=false;SR=7\tGT:GL:DP:AD\t%s:-1,-2,-3:30:10\n' \
+                "${chrom}" "${pos}" "${cls}" "${filter}" "${internal}" "${cls}" "${gt}"
+        done
+    } > "vcfs/${sample}.${L}.${cls}.vcf"
+}
+
+#           chrom pos   filter internal         gt
+vcf KID ALU "chr10 100  PASS   null,null        0/1" \
+            "chr1 5000  PASS   null,null        0/1" \
+            "chr1 1000  PASS   GENEA,INTRONIC   0/1" \
+            "chr1 9000  lc     null,null        0/1" \
+            "chr2 300   PASS   GENEB,EXON_2     1/1" \
+            "chr4 200   PASS   null,null        0/1"
+vcf DAD ALU "chr1 1030  PASS   GENEA,INTRONIC   0/1" \
+            "chr1 5051  PASS   null,null        0/1" \
+            "chr10 80   lc     null,null        0/1" \
+            "chr10 120  PASS   null,null        0/1"
+vcf MUM ALU "chr1 1050  ac0    GENEA,INTRONIC   0/0" \
+            "chr1 1048  PASS   GENEA,INTRONIC   0/1" \
+            "chr2 310   s25    GENEB,EXON_2     0/1" \
+            "chr4 250   ac0    null,null        0/0"
+vcf HALF ALU "chr1 1010 PASS   GENEA,INTRONIC   0/1" \
+             "chr5 500  PASS   null,null        0/1"
+vcf KID LINE1 "chr3 700 PASS   null,null        0/1"
+vcf DAD LINE1 "chr2 300 PASS   GENEB,EXON_2     0/1"
+vcf MUM LINE1
+vcf HALF LINE1
+for s in KID DAD MUM HALF; do vcf "${s}" SVA; done
+for c in ALU LINE1 SVA; do vcf SOLO "${c}"; done
+mkdir fam1 fam2
+cp vcfs/{KID,DAD,MUM,HALF}.* fam1/
+cp vcfs/SOLO.* fam2/
+# Another label in the directory is ignored
+cp "fam1/KID.${L}.ALU.vcf" fam1/KID.other.ALU.vcf
+
+run() { python3 "${script}" --pedigree ped.tsv --label "${L}" "$@"; }
+
+run --family FAM1 --input-dir fam1 --out T1.tsv > log.txt
+run --family FAM2 --input-dir fam2 --out T2.tsv >> log.txt
+
+# field <table> <child> <chrom> <pos> <column>
+field() {
+    awk -F'\t' -v k="$2" -v c="$3" -v p="$4" -v col="$5" '
+        NR == 1 { for (i = 1; i <= NF; i++) idx[$i] = i; next }
+        $idx["child"] == k && $idx["chrom"] == c && $idx["pos"] == p { print $idx[col] }' "$1"
+}
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+is() { [ "$(field T1.tsv "$1" "$2" "$3" "$4")" = "$5" ]; }
+
+check "header: 23 columns, ending in transmission" \
+    '[ "$(head -1 T1.tsv | awk -F"\t" "{print NF}")" = 23 ] && head -1 T1.tsv | grep -q "	transmission$"'
+check "one row per PASS insertion of the two children: 6 + 2" '[ "$(tail -n +2 T1.tsv | wc -l | tr -d " ")" = 8 ]'
+check "the parents, founders, get no row" '! cut -f2 T1.tsv | grep -qE "^(DAD|MUM)$"'
+check "the child's non-PASS insertion gets no row" '[ -z "$(field T1.tsv KID chr1 9000 transmission)" ]'
+check "rows by child, then chromosome in natural order, then position" \
+    '[ "$(tail -n +2 T1.tsv | cut -f2,6,7 | tr "\t\n" ": ")" = "KID:chr1:1000 KID:chr1:5000 KID:chr2:300 KID:chr3:700 KID:chr4:200 KID:chr10:100 HALF:chr1:1010 HALF:chr5:500 " ]'
+check "both parents' calls: inherited_both" 'is KID chr1 1000 transmission inherited_both'
+check "the nearest call of a parent is the one reported" \
+    'is KID chr1 1000 mother_pos 1048 && is KID chr1 1000 mother_distance 48 && is KID chr1 1000 mother_filter PASS'
+check "the father's call 30 bp away" \
+    'is KID chr1 1000 father_pos 1030 && is KID chr1 1000 father_distance 30 && is KID chr1 1000 father_gt 0/1'
+check "a call 51 bp away is outside the window: absent_in_parents" \
+    'is KID chr1 5000 transmission absent_in_parents && is KID chr1 5000 father_pos .'
+check "a call exactly 50 bp away, ac0 and 0/0, counts" \
+    'is KID chr4 200 transmission inherited_mother && is KID chr4 200 mother_distance 50 && is KID chr4 200 mother_filter ac0 && is KID chr4 200 mother_gt 0/0'
+check "a parent's non-PASS call counts, with its FILTER" \
+    'is KID chr2 300 transmission inherited_mother && is KID chr2 300 mother_filter s25'
+check "a parent's call of another class does not count" 'is KID chr2 300 father_pos .'
+check "a LINE1 insertion is matched against LINE1 calls only" 'is KID chr3 700 transmission absent_in_parents'
+check "equidistant calls: the PASS one is reported" \
+    'is KID chr10 100 transmission inherited_father && is KID chr10 100 father_pos 120 && is KID chr10 100 father_filter PASS'
+check "an ungenotyped mother is '.'" 'is HALF chr1 1010 mother . && is HALF chr1 1010 father DAD'
+check "the genotyped parent's call: inherited_father" 'is HALF chr1 1010 transmission inherited_father'
+check "no call and one parent ungenotyped: parent_ungenotyped" 'is HALF chr5 500 transmission parent_ungenotyped'
+check "gene and region from INTERNAL, null as '.'" \
+    'is KID chr2 300 gene GENEB && is KID chr2 300 region EXON_2 && is KID chr1 5000 gene . && is KID chr1 5000 region .'
+check "the child's GT, ASSESS, SR, LP, RP" \
+    '[ "$(field T1.tsv KID chr2 300 child_gt):$(field T1.tsv KID chr2 300 child_assess):$(field T1.tsv KID chr2 300 child_sr):$(field T1.tsv KID chr2 300 child_lp):$(field T1.tsv KID chr2 300 child_rp)" = "1/1:5:7:3:4" ]'
+
+run --family FAM1 --input-dir fam1 --out W.tsv --window 60 > /dev/null
+check "a wider window takes in the call 51 bp away" '[ "$(field W.tsv KID chr1 5000 transmission)" = inherited_father ]'
+
+check "a family with no child writes a header only" '[ "$(wc -l < T2.tsv | tr -d " ")" = 1 ]'
+
+mkdir stranger && cp fam1/* stranger/ && cp fam2/* stranger/
+check "a VCF of another family is refused" \
+    '! run --family FAM1 --input-dir stranger --out x.tsv >/dev/null 2>&1'
+mkdir renamed && cp fam1/* renamed/ && cp "fam1/DAD.${L}.SVA.vcf" "renamed/MUM.${L}.SVA.vcf"
+check "a VCF naming another sample is refused" \
+    '! run --family FAM1 --input-dir renamed --out x.tsv >/dev/null 2>&1'
+mkdir partial && cp fam1/* partial/ && rm "partial/MUM.${L}.LINE1.vcf"
+check "a member missing a class is refused" \
+    '! run --family FAM1 --input-dir partial --out x.tsv >/dev/null 2>&1'
+
+[ "${fail}" -eq 0 ] && echo "melt_family_transmission: all checks passed" || echo "melt_family_transmission: FAILURES"
+exit "${fail}"
