@@ -314,7 +314,7 @@ The pipeline supports thirteen main steps that must be explicitly listed in the 
 - **`ancestry`**: Genetic ancestry and polygenic scores using [ancestry-pgs](https://github.com/bourgeron-lab/ancestry-pgs). Genotypes the reference panel sites directly from each sample's gVCF, merges them per family, then projects each family onto the panel and scores the PGS catalog. Cohort tables are concatenations of the family tables.
 - **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
 - **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution. Draws a REViewer read pileup of every flagged genotype.
-- **`melt`**: Mobile element insertion (ALU, LINE1, SVA) calling with MELT v2.2.2 Single on each sample's CRAM. Merges each family's calls into one VCF, then chains the cohort's insertions into loci with their carrier frequency and ranks every PASS insertion against gnomAD-SV, the cohort, the genes and the NDD gene set.
+- **`melt`**: Mobile element insertion (ALU, LINE1, SVA) calling with MELT v2.2.2 Single on each sample's CRAM. Merges each family's calls into one VCF and tabulates each child's insertions against its parents' calls, then chains the cohort's insertions into loci with their carrier frequency and ranks every PASS insertion against gnomAD-SV, the cohort, the genes and the NDD gene set.
 
 **Step Dependencies:**
 
@@ -563,7 +563,7 @@ modules/expansionhunter/scripts/eh_tables_test
 
 Mobile element insertion (MEI) calling with [MELT](https://melt.igs.umaryland.edu/) v2.2.2, per sample, then merged per family and scored per cohort:
 1. **Calling** - Per sample, MELT Single calls ALU, LINE1 and SVA insertions from the CRAM, against `ref` and MELT's Hg38 transposon references, and annotates them with MELT's Hg38 gene BED
-2. **Family merge** - Each member's three VCFs are concatenated, and the members merged with `bcftools merge --merge none`
+2. **Family merge** - Each member's three VCFs are concatenated, and the members merged with `bcftools merge --merge none`. Each PASS insertion of a child with a genotyped parent is looked up in each parent's calls of the same class within 50 bp, PASS or not, and labelled inherited, absent in both parents (a de novo candidate), or undecided for want of a genotyped parent
 3. **Cohort scoring** - Every sample's PASS sites are chained into cohort loci per class, a site joining a locus when it starts at most 50 bp after it ends, with the share of samples carrying each. Every PASS insertion is then ranked by `2(1 - gnomAD-SV AF) + 2(1 - cohort AF) + impact + 2 NDD + 0.5 ASSESS/5`, impact being 1 exonic, 0.5 genic, 0 intergenic
 
 This is the cohort's first MEI analysis, run outside the pipeline, brought into it: same MELT version and settings, same scoring and weights, less its optional HPO term.
@@ -574,7 +574,12 @@ This is the cohort's first MEI analysis, run outside the pipeline, brought into 
 
 **Resources.** A sample takes about 5 hours at 30-40x, in under 6 GB of heap, and leaves about 20 GB of intermediates in node-local scratch. Above about 50x MELT's pinpoint step exhausts the heap: Java then exits with status 3 and the call is retried with 64 GB, then 120 GB. Any other failure is not retried and does not stop the run; it skips that sample's family merge and the cohort scoring, with a warning. A CRAM whose contigs are not the reference's (aligned to `1` rather than `chr1`) fails at once with status 64.
 
-**What a family VCF is not.** MELT calls each sample on its own, and the same insertion is often placed a few bases apart in two members, which makes two records. A member with no record at an insertion has no call there, which is not proof that it lacks it: in the cohort's first analysis most insertions that looked de novo turned out to be inherited insertions MELT had missed in a parent. Check a candidate de novo against the parents' calls within 50 bp, PASS or not, and their reads.
+**What a family VCF is not.** MELT calls each sample on its own, and the same insertion is often placed a few bases apart in two members, which makes two records. A member with no record at an insertion has no call there, which is not proof that it lacks it: in the cohort's first analysis most insertions that looked de novo turned out to be inherited insertions MELT had missed in a parent. The family's transmission table does that check: each child's PASS insertions against the parents' calls of the same class within 50 bp, PASS or not, nearest first. An insertion `absent_in_parents` is still only a candidate de novo, to be checked in the parents' reads.
+
+`transmission`, from the parents' nearest calls:
+- `inherited_both`, `inherited_father`, `inherited_mother` - the parents with a call within 50 bp, whatever its FILTER or GT (an `ac0` record with GT `0/0` is MELT having seen an insertion there and genotyped it absent; the parent columns show which it is)
+- `absent_in_parents` - both parents genotyped, neither with a call: a de novo candidate
+- `parent_ungenotyped` - no call in the genotyped parent, and the other one unknown in the pedigree or without MELT calls
 
 **The label.** `melt_label` is part of every output file name, as `expansionhunter_catalog_name` is. The cohort files are rebuilt whenever a sample is called, since every new call changes the cohort frequencies.
 
@@ -584,14 +589,15 @@ This is the cohort's first MEI analysis, run outside the pipeline, brought into 
 scripts/melt/melt_import_existing --data /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38 --label melt222
 ```
 
-Without `--apply` it only reports. The scoring script and the import script each ship with a self-contained test that needs only `python3`:
+Without `--apply` it only reports. The transmission, scoring and import scripts each ship with a self-contained test that needs only `python3`:
 
 ```bash
+modules/melt/scripts/melt_family_transmission_test
 modules/melt/scripts/melt_cohort_score_test
 scripts/melt/melt_import_existing_test
 ```
 
-**Outputs:** Per sample: one VCF per class, as MELT writes it. Per family: merged VCF. Per cohort: the loci BED and the ranked candidates.
+**Outputs:** Per sample: one VCF per class, as MELT writes it. Per family: merged VCF and transmission table. Per cohort: the loci BED and the ranked candidates.
 
 ### Parameters File (params.yml)
 
@@ -656,7 +662,7 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **ExpansionHunter files (family)**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv}`
 - **ExpansionHunter files (cohort)**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv,loci.tsv,flags.tsv}`
 - **MELT calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${melt_label}.{ALU,LINE1,SVA}.vcf` (all three non-empty)
-- **MELT VCF (family)**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${melt_label}.{vcf.gz,vcf.gz.tbi}`
+- **MELT files (family)**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${melt_label}.{vcf.gz,vcf.gz.tbi,transmission.tsv}`
 - **MELT files (cohort)**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${melt_label}.{internal_af.bed,candidates.tsv.gz}`
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
@@ -786,7 +792,8 @@ data/
 │               └── mei/
 │                   └── melt/
 │                       ├── FID001.melt222.vcf.gz              # Members' insertions merged
-│                       └── FID001.melt222.vcf.gz.tbi
+│                       ├── FID001.melt222.vcf.gz.tbi
+│                       └── FID001.melt222.transmission.tsv    # Children's insertions vs parents' calls
 ├── cohorts/                       # Cohort-specific directories (not sharded)
 │   └── COHORT_NAME/
 │       ├── COHORT_NAME.pedigree.tsv                 # Family structure (required)
@@ -991,6 +998,7 @@ Paths use `${L}` as shorthand for `${melt_label}`.
 
 - **Sample calls**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${L}.{ALU,LINE1,SVA}.vcf`, MELT's VCFs unchanged, the sample named by its bare barcode. `ALT` is `<INS:ME:ALU>` (or LINE1, SVA); `ASSESS` (0-5) grades the breakpoint evidence, 5 being a target site duplication resolved by split reads; `INTERNAL` names the RefSeq gene and region MELT places the insertion in
 - **Family VCF**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${L}.vcf.gz` (and `.tbi`)
+- **Family transmission table**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${L}.transmission.tsv` - one row per PASS insertion of each child with a genotyped parent, by child, chromosome and position: `family_id child father mother mei_class chrom pos gene region child_gt child_assess child_sr child_lp child_rp`, then `{father,mother}_{pos,filter,gt,distance}` of each parent's nearest call of the class within 50 bp, any FILTER (`.` when none, or the parent is not genotyped), then `transmission`. `gene` and `region` are MELT's `INTERNAL`; `child_sr`, `child_lp`, `child_rp` its split reads and left and right discordant pairs. A family with no parent-child pair has a header only
 - **Cohort loci**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.internal_af.bed` - `chrom start end mei_class internal_af n_carriers n_total`, per class, from PASS sites only
 - **Cohort candidates**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.candidates.tsv.gz` - every PASS insertion of every sample, highest score first: `sample chrom pos end mei_class gene ndd impact gnomad_af internal_af melt_filter assess gt composite_score`. `gene` is the gencode gene overlapping the insertion, else MELT's; `gnomad_af` is gnomAD-SV's highest `GRPMAX_AF` (else `AF`) for the class within 50 bp
 

@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+
+"""Transmission of a family's MELT insertions from the parents to each child.
+
+Reads the members' per-sample MELT VCFs in a directory, <barcode>.<label>.<CLASS>.vcf as
+MELT_CALL publishes them (CLASS one of ALU, LINE1, SVA), and the cohort pedigree, and
+writes one row per PASS insertion of every child with at least one genotyped parent: a
+parent in the pedigree whose VCFs are among the inputs.
+
+MELT calls each sample on its own: the same insertion lands a few bases apart in
+relatives, and a parent's copy is often called but filtered, or not called at all. So
+each parent is looked up for a call of the same class within --window bp of the child's,
+of any FILTER, and the nearest is reported with its position, FILTER, GT and distance
+('.' when there is none). In the cohort's first MEI analysis, 92% of the insertions that
+looked de novo against the parents' PASS calls had such a call in a parent.
+
+`transmission`, from the parents' nearest calls:
+  inherited_both      both parents have a call
+  inherited_father    only the father has one
+  inherited_mother    only the mother has one
+  absent_in_parents   both parents are genotyped and neither has one: a de novo candidate
+  parent_ungenotyped  no call in the genotyped parent, and the other is not genotyped
+                      (unknown in the pedigree, or without MELT calls)
+
+A parent's call counts whatever its FILTER and GT: an ac0 record with GT 0/0 is MELT
+having seen an insertion there and genotyped it absent. The parent columns show which
+it is.
+
+`gene` and `region` are those MELT names in INFO/INTERNAL; `child_sr`, `child_lp` and
+`child_rp` its split reads and left and right discordant pairs.
+"""
+
+import argparse
+import bisect
+import re
+import sys
+from pathlib import Path
+
+CLASSES = ("ALU", "LINE1", "SVA")
+PARENT_FIELDS = ("pos", "filter", "gt", "distance")
+COLUMNS = (["family_id", "child", "father", "mother", "mei_class", "chrom", "pos",
+            "gene", "region", "child_gt", "child_assess", "child_sr", "child_lp", "child_rp"]
+           + [f"{p}_{f}" for p in ("father", "mother") for f in PARENT_FIELDS]
+           + ["transmission"])
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_pedigree(path, fid):
+    """The family's rows, in file order: barcode -> (father, mother)."""
+    members = {}
+    with open(path) as fh:
+        for index, line in enumerate(fh):
+            if line.startswith("#") or not line.strip():
+                continue
+            cols = line.rstrip("\n\r").split("\t")
+            if index == 0 and cols[0] == "FID":
+                continue
+            if len(cols) < 6:
+                die(f"pedigree row with {len(cols)} columns instead of 6: {line.strip()}")
+            if cols[0] != fid:
+                continue
+            members[cols[1]] = (cols[2], cols[3])
+    if not members:
+        die(f"family {fid} is not in the pedigree {path}")
+    return members
+
+
+def read_inputs(indir, label):
+    """{barcode: {class: path}} of the members' VCFs, each checked to name its sample."""
+    name = re.compile(r"^(.+)\." + re.escape(label) + r"\.(" + "|".join(CLASSES) + r")\.vcf$")
+    vcfs = {}
+    for p in sorted(Path(indir).iterdir()):
+        m = name.match(p.name)
+        if not m:
+            continue
+        barcode, cls = m.groups()
+        sample = None
+        with open(p) as fh:
+            for line in fh:
+                if line.startswith("#CHROM"):
+                    f = line.rstrip("\n").split("\t")
+                    sample = f[9] if len(f) == 10 else None
+                    break
+        if sample != barcode:
+            die(f"{p.name} names its sample {sample!r}, not {barcode}")
+        vcfs.setdefault(barcode, {})[cls] = p
+    if not vcfs:
+        die(f"no *.{label}.{{{','.join(CLASSES)}}}.vcf in {indir}")
+    for barcode, by_class in vcfs.items():
+        missing = [c for c in CLASSES if c not in by_class]
+        if missing:
+            die(f"{barcode} has no {label} {', '.join(missing)} VCF")
+    return vcfs
+
+
+def parse_info(s):
+    d = {}
+    for kv in s.split(";"):
+        k, _, v = kv.partition("=")
+        d[k] = v if _ else True
+    return d
+
+
+def records(path):
+    """{chrom, pos, filter, info, gt} of every record of a single-sample VCF."""
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 8:
+                continue
+            gt = f[9].split(":")[0] if len(f) >= 10 and f[8].startswith("GT") else "."
+            yield {"chrom": f[0], "pos": int(f[1]), "filter": f[6],
+                   "info": parse_info(f[7]), "gt": gt}
+
+
+def index_calls(recs):
+    """chrom -> (positions, records), sorted by position."""
+    by_chrom = {}
+    for r in recs:
+        by_chrom.setdefault(r["chrom"], []).append(r)
+    out = {}
+    for chrom, rs in by_chrom.items():
+        rs.sort(key=lambda r: r["pos"])
+        out[chrom] = ([r["pos"] for r in rs], rs)
+    return out
+
+
+def nearest(index, chrom, pos, window):
+    """The call within window bp of pos nearest to it, PASS first on a tie, or None."""
+    if chrom not in index:
+        return None
+    positions, rs = index[chrom]
+    lo = bisect.bisect_left(positions, pos - window)
+    hi = bisect.bisect_right(positions, pos + window)
+    if lo == hi:
+        return None
+    return min(rs[lo:hi], key=lambda r: (abs(r["pos"] - pos), r["filter"] != "PASS", r["pos"]))
+
+
+def melt_internal(info):
+    """(gene, region) from MELT's INTERNAL=<gene>,<region>, '.' for each one absent."""
+    val = info.get("INTERNAL")
+    if not val or val is True:
+        return ".", "."
+    parts = [p if p and p.upper() != "NULL" else "." for p in val.split(",")]
+    return parts[0], parts[1] if len(parts) > 1 else "."
+
+
+def info_value(info, key):
+    v = info.get(key)
+    return "." if v in (None, True, "") else v
+
+
+def chrom_key(chrom):
+    c = chrom[3:] if chrom.startswith("chr") else chrom
+    if c.isdigit():
+        return (0, int(c), "")
+    return (1, {"X": 0, "Y": 1, "M": 2, "MT": 2}.get(c, 3), c)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--family", required=True)
+    ap.add_argument("--pedigree", required=True)
+    ap.add_argument("--input-dir", required=True, help="the members' per-sample MELT VCFs")
+    ap.add_argument("--label", required=True, help="melt_label, in the input names")
+    ap.add_argument("--window", type=int, default=50)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+
+    members = read_pedigree(a.pedigree, a.family)
+    vcfs = read_inputs(a.input_dir, a.label)
+    strangers = sorted(set(vcfs) - set(members))
+    if strangers:
+        die(f"{', '.join(strangers)} not in family {a.family}")
+
+    def parent(barcode, which):
+        p = members[barcode][which]
+        return p if p in vcfs else "."
+
+    children = [s for s in members if s in vcfs and (parent(s, 0) != "." or parent(s, 1) != ".")]
+    parents = {p for c in children for p in (parent(c, 0), parent(c, 1)) if p != "."}
+
+    # Every call of the parents, PASS or not, per class
+    calls = {(p, cls): index_calls(records(vcfs[p][cls])) for p in parents for cls in CLASSES}
+
+    rows = []
+    for order, child in enumerate(children):
+        father, mother = parent(child, 0), parent(child, 1)
+        for cls in CLASSES:
+            for rec in records(vcfs[child][cls]):
+                if rec["filter"] != "PASS":
+                    continue
+                info = rec["info"]
+                gene, region = melt_internal(info)
+                row = [a.family, child, father, mother, cls, rec["chrom"], str(rec["pos"]),
+                       gene, region, rec["gt"]] + [info_value(info, k) for k in ("ASSESS", "SR", "LP", "RP")]
+                found = {}
+                for p in (father, mother):
+                    hit = nearest(calls[(p, cls)], rec["chrom"], rec["pos"], a.window) if p != "." else None
+                    found[p] = hit is not None
+                    row += ([str(hit["pos"]), hit["filter"], hit["gt"], str(abs(hit["pos"] - rec["pos"]))]
+                            if hit else ["."] * len(PARENT_FIELDS))
+                in_father = father != "." and found[father]
+                in_mother = mother != "." and found[mother]
+                if in_father and in_mother:
+                    label = "inherited_both"
+                elif in_father:
+                    label = "inherited_father"
+                elif in_mother:
+                    label = "inherited_mother"
+                elif father != "." and mother != ".":
+                    label = "absent_in_parents"
+                else:
+                    label = "parent_ungenotyped"
+                row.append(label)
+                rows.append(((order, chrom_key(rec["chrom"]), rec["pos"], CLASSES.index(cls)), row))
+    rows.sort(key=lambda r: r[0])
+
+    counts = {}
+    with open(a.out, "w") as out:
+        out.write("\t".join(COLUMNS) + "\n")
+        for _key, row in rows:
+            out.write("\t".join(row) + "\n")
+            counts[row[-1]] = counts.get(row[-1], 0) + 1
+
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "no rows"
+    print(f"Family {a.family}: {len(children)} children with a genotyped parent, "
+          f"{len(rows)} PASS insertions: {summary}")
+
+
+if __name__ == "__main__":
+    main()
