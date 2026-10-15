@@ -130,6 +130,18 @@ flowchart TB
         eh_family --> eh_reviewer --> eh_pileups
     end
 
+    subgraph melt [**MELT**]
+        direction TB
+        melt_call["MELT 2.2.2 Single (ALU, LINE1, SVA)"]
+        melt_sample["samples/**{barcode}**/mei/melt/**{barcode}**.**{label}**.{ALU,LINE1,SVA}.vcf"]:::os
+        melt_merge["bcftools concat + merge"]
+        melt_family["families/**{FID}**/mei/melt/**{FID}**.**{label}**.vcf.gz"]:::of
+        melt_score["cohort loci (±50 bp) + score (gnomAD-SV, genes, NDD)"]
+        melt_cohort["cohorts/**{cohort}**/mei/melt/**{cohort}**.**{label}**.{internal_af.bed,candidates.tsv.gz}"]:::oc
+        melt_call --> melt_sample --> melt_merge --> melt_family
+        melt_sample --> melt_score --> melt_cohort
+    end
+
     subgraph wisecondorx [**WisecondorX**]
         direction TB
         wcx_call["WisecondorX call"]
@@ -139,6 +151,7 @@ flowchart TB
 
     alignment ==> bedgraph
     alignment ==> expansionhunter
+    alignment ==> melt
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus

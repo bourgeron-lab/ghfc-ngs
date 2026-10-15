@@ -23,6 +23,7 @@ include { EXTRACTOR } from './workflows/extractor'
 include { ANCESTRY } from './workflows/ancestry'
 include { ROH } from './workflows/roh'
 include { EXPANSIONHUNTER } from './workflows/expansionhunter'
+include { MELT } from './workflows/melt'
 
 /*
 ========================================================================================
@@ -109,6 +110,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Samples called, as for wisecondorx; the family and cohort files follow from them
         expansionhunter:    ('expansionhunter' in pipeline_steps)
                                 ? CohortState.progress(plan.expansionhunter.existing.size(), n_individuals)
+                                : null,
+        // Same: samples called
+        melt:               ('melt' in pipeline_steps)
+                                ? CohortState.progress(plan.melt.existing.size(), n_individuals)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
         snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
@@ -384,11 +389,11 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -451,6 +456,40 @@ if ('expansionhunter' in pipeline_steps) {
     if (absent) {
         recordFailedRun("expansionhunter inputs not found: ${absent.keySet().join(', ')}")
         exit 1, "ERROR: the 'expansionhunter' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+    }
+}
+
+// MELT runs from its distribution directory, with the alignment reference, and labels its calls;
+// the cohort scoring reads gnomAD-SV, the NDD genes and the annotation's gencode gene BED.
+if ('melt' in pipeline_steps) {
+    def missing_melt_params = ['melt_dir', 'melt_label', 'melt_gnomad_sv', 'melt_ndd_genes', 'melt_ndd_columns', 'ref']
+        .findAll { key -> !params[key] }
+    if (!rohGeneBeds()[0]) {
+        missing_melt_params += ['annotation_annotation_path and annotation_gencode']
+    }
+    if (missing_melt_params) {
+        recordFailedRun("melt step is missing ${missing_melt_params.join(', ')}")
+        exit 1, "ERROR: the 'melt' step requires ${missing_melt_params.join(', ')} to be set"
+    }
+    // It becomes part of file names, so no separators and no spaces
+    if (!(params.melt_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+        recordFailedRun("invalid melt_label")
+        exit 1, "ERROR: melt_label '${params.melt_label}' may only hold letters, digits, '.', '_' and '-': it is part of every MELT file name"
+    }
+    // Quoted into the scoring's command line
+    if (params.melt_ndd_columns.toString().contains("'")) {
+        recordFailedRun("invalid melt_ndd_columns")
+        exit 1, "ERROR: melt_ndd_columns may not hold a single quote"
+    }
+    def melt_files = ['MELT.jar', 'me_refs/Hg38/ALU_MELT.zip', 'me_refs/Hg38/LINE1_MELT.zip', 'me_refs/Hg38/SVA_MELT.zip',
+                      'add_bed_files/Hg38/Hg38.genes.bed']
+        .collectEntries { rel -> ["melt_dir ${rel}".toString(), "${params.melt_dir}/${rel}"] }
+    melt_files += [melt_gnomad_sv: params.melt_gnomad_sv, melt_ndd_genes: params.melt_ndd_genes,
+                   'ref index': "${params.ref}.fai", 'gencode gene BED': rohGeneBeds()[0]]
+    def absent = melt_files.findAll { _key, path -> !new File(path.toString()).exists() }
+    if (absent) {
+        recordFailedRun("melt inputs not found: ${absent.keySet().join(', ')}")
+        exit 1, "ERROR: the 'melt' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
     }
 }
 
@@ -832,6 +871,35 @@ workflow {
             analysis_plan.expansionhunter.need_reviewer
         )
     }
+
+    // Run MELT if needed and allowed. Like expansionhunter it reads the CRAMs, existing and
+    // newly aligned; a sample with no CRAM is left out rather than sent to alignment.
+    if ((analysis_plan.melt.needed.size() > 0 ||
+         analysis_plan.melt.need_family.size() > 0 ||
+         analysis_plan.melt.need_cohort_merge) && 'melt' in pipeline_steps) {
+
+        def melt_tasks = []
+        if (analysis_plan.melt.needed.size() > 0) {
+            melt_tasks.add("calls for ${analysis_plan.melt.needed.size()} individuals")
+        }
+        if (analysis_plan.melt.need_family.size() > 0) {
+            melt_tasks.add("family merge for ${analysis_plan.melt.need_family.size()} families")
+        }
+        if (analysis_plan.melt.need_cohort_merge) {
+            melt_tasks.add("cohort scoring")
+        }
+        log.info "Running MELT: ${melt_tasks.join(', ')}..."
+
+        MELT(
+            all_available_crams,
+            pedigree_data.family_members,
+            analysis_plan.melt.needed,
+            analysis_plan.melt.existing,
+            analysis_plan.melt.need_family,
+            analysis_plan.melt.need_cohort_merge,
+            rohGeneBeds()[0]
+        )
+    }
     
     // Run Extractor if TSV files are provided and step is allowed
     if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
@@ -1035,7 +1103,7 @@ def planBucket() {
 }
 
 // The gene BEDs the ROH step intersects with, from the annotation's gencode settings, as
-// [symbol BED, ID BED]. Both empty when gencode is not configured, and then no gene table is
+// [symbol BED, ID BED]; the melt step scores against the symbol one. Both empty when gencode is not configured, and then no gene table is
 // written or expected. containsKey first: reading an unset params key logs a warning.
 def rohGeneBeds() {
     def gencode = params.containsKey('annotation_gencode') ? params.annotation_gencode : null
@@ -1075,6 +1143,9 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // none of whose members can have a call is in neither family bucket, and out of the
         // cohort files. reviewer_no_bam: a call on disk to review, without its realigned reads.
         expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false, need_reviewer: planBucket(), reviewer_no_bam: planBucket()],
+        // As for expansionhunter: needed/existing/no_cram are samples, need_family and
+        // family_existing families
+        melt: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false],
         pedigree_drift: [:]
     ]
 
@@ -1524,6 +1595,53 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
+    // Check existing MELT outputs, as for ExpansionHunter: only when the step is requested, and
+    // with melt_label in every file name as the only record of how a call was made.
+    if ('melt' in pipeline_steps) {
+        def label = params.melt_label
+
+        individuals.each { barcode ->
+            def prefix = "${Sharding.getSampleDir(params.data, barcode)}/mei/melt/${barcode}.${label}"
+            // MELT writes a header even with no insertion, so a complete call is never empty
+            def called = ['ALU', 'LINE1', 'SVA'].every { cls -> new File("${prefix}.${cls}.vcf").length() > 0 }
+            if (called) {
+                plan.melt.existing.add(barcode)
+            } else if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
+                plan.melt.needed.add(barcode)
+            } else {
+                plan.melt.no_cram.add(barcode)
+            }
+        }
+
+        // A family is rebuilt when its VCF is missing or one of its members is (re)called. It
+        // is built from the members that have a call, so one with no CRAM is left out of it.
+        families.each { fid ->
+            def members = members_by_family[fid] ?: []
+            def callable = members.findAll { barcode ->
+                barcode in plan.melt.existing || barcode in plan.melt.needed
+            }
+            if (!callable) {
+                return
+            }
+            def prefix = "${Sharding.getFamilyDir(params.data, fid)}/mei/melt/${fid}.${label}"
+            def outputs_exist = ['vcf.gz', 'vcf.gz.tbi'].every { ext -> new File("${prefix}.${ext}").exists() }
+            if (outputs_exist && !callable.any { barcode -> barcode in plan.melt.needed }) {
+                plan.melt.family_existing.add(fid)
+            } else {
+                plan.melt.need_family.add(fid)
+            }
+        }
+
+        // The cohort files are built from every sample's calls, not from the family files: a
+        // new call anywhere changes every insertion's cohort frequency, and so its score
+        def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/mei/melt/${params.cohort_name}.${label}"
+        def cohort_exist = ['internal_af.bed', 'candidates.tsv.gz'].every { ext ->
+            new File("${cohort_prefix}.${ext}").exists()
+        }
+        def any_call = plan.melt.existing || plan.melt.needed
+        plan.melt.need_cohort_merge = any_call && (!cohort_exist || plan.melt.needed.size() > 0)
+    }
+
     // Check existing Wombat files
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
@@ -1602,6 +1720,8 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
     == Short Tandem Repeats ==
     EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}, ${analysis_plan.expansionhunter.need_reviewer.size()} individuals to draw with REViewer" : 'Skipped (step not requested)'}
+    == Mobile Element Insertions ==
+    MELT: ${'melt' in pipeline_steps ? "${analysis_plan.melt.existing.size()} individuals done and ${analysis_plan.melt.needed.size()} to do (${analysis_plan.melt.no_cram.size()} with no CRAM), ${analysis_plan.melt.need_family.size()} families to merge, cohort scoring: ${analysis_plan.melt.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -1647,6 +1767,13 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.expansionhunter.no_cram) {
         // Not an error, as for wisecondorx: a gVCF-only sample has nothing to genotype repeats from
         log.warn "${analysis_plan.expansionhunter.no_cram.size()} individuals have no ${params.ref_name} CRAM and no ExpansionHunter call, and are left out of their families' ExpansionHunter files: ${analysis_plan.expansionhunter.no_cram.take(50).join(', ')}${analysis_plan.expansionhunter.no_cram.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.melt.needed) {
+        log.info "Individuals needing MELT: ${analysis_plan.melt.needed.join(', ')}"
+    }
+    if (analysis_plan.melt.no_cram) {
+        // Not an error, as for expansionhunter: a gVCF-only sample has nothing to call insertions from
+        log.warn "${analysis_plan.melt.no_cram.size()} individuals have no ${params.ref_name} CRAM and no MELT call, and are left out of their families' and the cohort's MELT files: ${analysis_plan.melt.no_cram.take(50).join(', ')}${analysis_plan.melt.no_cram.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
@@ -1957,7 +2084,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")

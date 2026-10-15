@@ -13,7 +13,8 @@ steps: [
     "wombat",
     # "ancestry",
     # "expansionhunter",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter
+    # "melt",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -155,6 +156,20 @@ expansionhunter_thresholds: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/
 # intermediate, as in the cohort's flags.tsv - in samples/.../str/expansionhunter/reviewer/.
 # Needs expansionhunter_thresholds, without which nothing is flagged.
 expansionhunter_reviewer: true
+
+# MELT configuration (step "melt")
+# Calls ALU, LINE1 and SVA insertions from each sample's CRAM with MELT v2.2.2 Single, against
+# ref. Each family gets a merged VCF; the cohort the frequency of every insertion locus and every
+# PASS insertion ranked against gnomAD-SV, the cohort, the genes (the gencode BED of
+# annotation_annotation_path/annotation_gencode) and the NDD genes.
+#
+# MELT is in no image - its licence forbids redistributing it - and runs from melt_dir.
+# melt_label is part of every output file name, like expansionhunter_catalog_name.
+melt_dir: "/pasteur/helix/projects/ghfc_wgs/tools/MELTv2.2.2"
+melt_label: "melt222"
+melt_gnomad_sv: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/gnomAD/gnomad.v4.1.sv.sites.vcf.gz"
+melt_ndd_genes: "/pasteur/helix/projects/ghfc_wgs/references/genesets/NCBI_data_HomoSapiens9606_NDD_DD_gene_lists_v5_20240308.txt"
+melt_ndd_columns: "High Confidence NDD genes v3" # '|'-separated columns of melt_ndd_genes that mark a gene NDD
 
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])

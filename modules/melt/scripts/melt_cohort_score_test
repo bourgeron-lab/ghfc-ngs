@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # variables set here are read by the checks, which are eval'd strings
+
+# Self-contained check of melt_cohort_score.
+#
+# Three samples with synthetic MELT VCFs in the layout MELT_CALL publishes. Asserts the
+# chaining of sites into cohort loci at the window's edge (a gap of exactly 50 bp joins, 51
+# does not), that carriers are counted once per sample and only from PASS sites, the
+# frequency format, every term of the score on a worked insertion (gnomAD GRPMAX_AF with the
+# fallback to AF, the cohort frequency, exonic/genic/intergenic, the NDD set), the ranking,
+# and that a VCF naming another sample is refused. When bedtools is on PATH, the loci are
+# also compared with `bedtools merge -d 50`. Needs only python3.
+#
+#   modules/melt/scripts/melt_cohort_score_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/melt_cohort_score"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+mkdir vcfs
+
+L=t1
+
+# vcf <sample> <class> then one "chrom pos filter internal assess gt" per record
+vcf() {
+    local sample=$1 cls=$2; shift 2
+    {
+        printf '##fileformat=VCFv4.2\n##source=MELTv2.2.2\n'
+        printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "${sample}"
+        while [ $# -gt 0 ]; do
+            read -r chrom pos filter internal assess gt <<< "$1"; shift
+            printf '%s\t%s\t.\tA\t<INS:ME:%s>\t.\t%s\tTSD=null;ASSESS=%s;INTERNAL=%s;SVTYPE=%s;SVLEN=281\tGT:GL:DP:AD\t%s:-1,-2,-3:30:10\n' \
+                "${chrom}" "${pos}" "${cls}" "${filter}" "${assess}" "${internal}" "${cls}" "${gt}"
+        done
+    } > "vcfs/${sample}.${L}.${cls}.vcf"
+}
+
+#          chrom pos     filter internal          assess gt
+vcf S1 ALU "chr1 1000    PASS   NM_1,EXON_2       5      0/1" \
+           "chr1 5000    PASS   null,null         3      0/1" \
+           "chr2 300     lc     null,null         5      0/1"
+vcf S2 ALU "chr1 1030    PASS   NM_1,EXON_2       5      1/1" \
+           "chr1 1030    PASS   NM_1,EXON_2       5      1/1" \
+           "chr1 5080    PASS   null,null         2      0/1"
+vcf S3 ALU "chr1 1081    PASS   NM_1,EXON_2       4      0/1" \
+           "chr1 1133    PASS   null,null         4      0/1" \
+           "chr2 300     PASS   NM_9,INTRON       0      0/1"
+for s in S1 S2 S3; do vcf "${s}" LINE1; done
+vcf S1 SVA "chr3 70000 PASS NM_5,INTRON 5 0/1"
+vcf S2 SVA
+vcf S3 SVA
+
+# A stranger in the directory, of another label, is ignored
+cp "vcfs/S1.${L}.SVA.vcf" vcfs/S1.other.SVA.vcf
+
+printf 'chr1\t900\t2000\tGENEA\nchr2\t100\t400\tGENEB\nchr3\t60000\t80000\tGENEC\n' | gzip > genes.bed.gz
+printf 'Symbol\tHigh Confidence NDD genes v3\tCandidate\nGENEA\tTrue\tFalse\nGENEC\tFalse\tTrue\n' > ndd.tsv
+# chrom pos alt af grpmax: GRPMAX_AF where there is one, else AF; another class is not matched
+printf 'chr1\t1010\t<INS:ME:ALU>\t0.01\t0.05\nchr1\t5000\t<INS:ME:ALU>\t0.2\t.\nchr1\t1000\t<INS:ME:SVA>\t0.9\t0.9\nchr1\t1000\t<DEL>\t0.9\t0.9\n' > gnomad.tsv
+
+run() {
+    python3 "${script}" --input-dir vcfs --cohort C --label "${L}" --genes genes.bed.gz \
+        --ndd ndd.tsv --ndd-columns "High Confidence NDD genes v3" --gnomad gnomad.tsv
+}
+
+fail=0
+check() {
+    if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
+}
+
+run > run.log 2>&1 || { cat run.log; exit 1; }
+bed=C.${L}.internal_af.bed
+gunzip -c "C.${L}.candidates.tsv.gz" > cand.tsv
+# row <sample> <pos>: the candidate's columns from gene on
+row() { awk -F'\t' -v s="$1" -v p="$2" '$1 == s && $3 == p { print $6, $7, $8, $9, $10, $11, $12, $13, $14; exit }' cand.tsv; }
+
+check "sites 29 and exactly 50 bp apart chain into one locus, counted once per sample" \
+    'grep -q "^chr1	999	1081	ALU	1	3	3$" "${bed}"'
+check "a site starting 51 bp after the locus ends starts another" 'grep -q "^chr1	1132	1133	ALU	0.333333	1	3$" "${bed}"'
+check "a gap of 79 bp keeps two loci apart" \
+    'grep -q "^chr1	4999	5000	ALU	0.333333	1	3$" "${bed}" && grep -q "^chr1	5079	5080	ALU	0.333333	1	3$" "${bed}"'
+check "a non-PASS site is no carrier" 'grep -q "^chr2	299	300	ALU	0.333333	1	3$" "${bed}"'
+check "a class with no PASS site has no locus, and n_total counts its VCFs" \
+    '! grep -q "LINE1" "${bed}" && grep -q "^chr3	69999	70000	SVA	0.333333	1	3$" "${bed}"'
+check "a VCF of another label is ignored" '[ "$(wc -l < "${bed}")" -eq 6 ]'
+
+# S1 chr1:1000 ALU, exonic in an NDD gene: 2*(1-0.05) + 2*(1-1) + 1 + 2 + 0.5*5/5 = 5.4
+check "every term of the score of an exonic NDD insertion" \
+    '[ "$(row S1 1000)" = "GENEA 1 exonic 0.05 1.0 PASS 5.0 0/1 5.4" ]'
+# chr1:5000: AF 0.2 with no GRPMAX_AF; intergenic; 2*0.8 + 2*(1-0.333333) + 0 + 0 + 0.3 = 3.233334
+check "AF stands in for a missing GRPMAX_AF, and an intergenic insertion scores no impact" \
+    '[ "$(row S1 5000)" = ". 0 intergenic 0.2 0.333333 PASS 3.0 0/1 3.2333" ]'
+check "gnomAD sites of another class are not matched" '[ "$(row S1 1000 | cut -d" " -f4)" = "0.05" ]'
+check "the gene BED wins over MELT's gene, and a genic insertion outside an exon scores 0.5" \
+    '[ "$(row S3 300)" = "GENEB 0 genic 0.0 0.333333 PASS 0.0 0/1 3.8333" ]'
+check "a gene in only an unselected NDD column is not NDD" '[ "$(row S1 70000 | cut -d" " -f1-3)" = "GENEC 0 genic" ]'
+check "non-PASS insertions are not candidates" '! awk -F"\t" "\$11 != \"PASS\" && NR > 1" cand.tsv | grep -q .'
+check "every PASS insertion is a candidate, a duplicated one twice" '[ "$(($(wc -l < cand.tsv) - 1))" -eq 9 ]'
+check "candidates are ranked by score, highest first" \
+    '[ "$(tail -n +2 cand.tsv | cut -f14)" = "$(tail -n +2 cand.tsv | cut -f14 | sort -gr)" ] && [ "$(sed -n 2p cand.tsv | cut -f1,3)" = "S3	1133" ]'
+check "the header is the prioritisation's columns, less hpo_match" \
+    '[ "$(head -1 cand.tsv)" = "sample	chrom	pos	end	mei_class	gene	ndd	impact	gnomad_af	internal_af	melt_filter	assess	gt	composite_score" ]'
+
+if command -v bedtools > /dev/null 2>&1; then
+    for f in vcfs/*."${L}".ALU.vcf; do
+        s=$(basename "${f}" ".${L}.ALU.vcf")
+        awk -v s="${s}" 'BEGIN { OFS = "\t" } !/^#/ && $7 == "PASS" { print $1, $2 - 1, $2, s }' "${f}"
+    done | sort -k1,1 -k2,2n | bedtools merge -d 50 -c 4 -o count_distinct -i - > bedtools.bed
+    check "the ALU loci are bedtools merge -d 50's" \
+        '[ "$(cut -f1-3,6 bedtools.bed)" = "$(awk -F"\t" "\$4 == \"ALU\"" "${bed}" | cut -f1-3,6)" ]'
+else
+    echo "  skip  bedtools is not on PATH: no comparison with bedtools merge"
+fi
+
+printf '##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS9.GRCh38\n' > "vcfs/S9.${L}.ALU.vcf"
+check "a VCF naming another sample is refused" '! run > bad.log 2>&1 && grep -q "names its sample" bad.log'
+
+[ "${fail}" -eq 0 ] && echo "melt_cohort_score: all checks passed" || echo "melt_cohort_score: FAILURES"
+exit "${fail}"

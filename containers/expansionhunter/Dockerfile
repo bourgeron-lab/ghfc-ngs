@@ -9,11 +9,15 @@
 #   docker build --platform linux/amd64 -t fcliquet/expansionhunter:5.0.0 containers/expansionhunter
 #   docker push fcliquet/expansionhunter:5.0.0
 #
+# Boost is pinned to the 1.85 that build links against: its recipe leaves boost-cpp unpinned,
+# and the solver came to pick boost-cpp 1.77, which has no libboost_program_options.so.1.85.0.
+#
 # procps is there for Nextflow, which reads task metrics with ps.
 FROM mambaorg/micromamba:2.0.5
 
 RUN micromamba install -y -n base -c conda-forge -c bioconda \
         expansionhunter=5.0.0=hc26b3af_5 \
+        "libboost=1.85" \
         "htslib>=1.22.1,<1.23" \
         "samtools>=1.22,<1.23" \
         "bcftools>=1.22,<1.23" \
