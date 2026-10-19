@@ -29,23 +29,10 @@ workflow SAMPLEQC {
     def ref = file(params.ref)
     def ref_fai = file("${params.ref}.fai")
     def sites = file(params.somalier_sites)
-    def cov_tag = "cov_b${params.cnv_cov_bin}q${params.cnv_cov_mapq}"
 
     // Staged as a process input rather than referenced through projectDir: the pipeline
     // directory is not mounted inside the task container.
     def classify = file("${projectDir}/modules/sampleqc/scripts/sampleqc_classify", checkIfExists: true)
-
-    // Read from their sharded paths, never globbed
-    def extract_file = { barcode ->
-        file("${Sharding.getSampleDir(params.data, barcode)}/qc/somalier/${barcode}.${label}.somalier")
-    }
-    def coverage_file = { barcode ->
-        file("${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${cov_tag}.json")
-    }
-    def published_tables = { fid ->
-        def prefix = "${Sharding.getFamilyDir(params.data, fid)}/qc/${fid}.${label}"
-        ['samples', 'pairs', 'flags'].collect { kind -> file("${prefix}.${kind}.tsv") }
-    }
 
     // =====================================================================
     // Step 1: Extract each sample
@@ -72,10 +59,10 @@ workflow SAMPLEQC {
         def from_disk = []
         qc.need_family.each { fid ->
             qc.extract_members[fid].findAll { barcode -> !(barcode in qc.needed) }.each { barcode ->
-                from_disk << tuple(fid, 'extract', extract_file(barcode))
+                from_disk << tuple(fid, 'extract', sampleqcExtractFile(barcode))
             }
             qc.coverage_members[fid].findAll { barcode -> !(barcode in qc.coverage_from_run) }.each { barcode ->
-                from_disk << tuple(fid, 'coverage', coverage_file(barcode))
+                from_disk << tuple(fid, 'coverage', sampleqcCoverageFile(barcode))
             }
         }
 
@@ -108,8 +95,8 @@ workflow SAMPLEQC {
             }
             .map { fid, kinds, payloads ->
                 def key = fid.toString()
-                def of = { kind -> [kinds, payloads].transpose().findAll { it[0] == kind }.collectMany { it[1] instanceof List ? it[1] : [it[1]] } }
-                tuple(key, of('extract'), of('coverage'), of('norm'), qc.snapshots[key], sites, label, classify)
+                tuple(key, sampleqcFilesOf(kinds, payloads, 'extract'), sampleqcFilesOf(kinds, payloads, 'coverage'),
+                      sampleqcFilesOf(kinds, payloads, 'norm'), qc.snapshots[key], sites, label, classify)
             }
 
         SAMPLEQC_FAMILY(family_inputs)
@@ -130,15 +117,14 @@ workflow SAMPLEQC {
         cohort_input = new_extracts
             .map { barcode, extract -> tuple('extract', barcode, [extract]) }
             .concat(channel.fromList((all_samples - qc.needed).collect { barcode ->
-                tuple('extract', barcode, [extract_file(barcode)]) }))
+                tuple('extract', barcode, [sampleqcExtractFile(barcode)]) }))
             .concat(new_family_tables
                 .map { fid, samples, pairs, flags, _inputs -> tuple('family', fid, [samples, pairs, flags]) })
             .concat(channel.fromList((all_families - qc.need_family).collect { fid ->
-                tuple('family', fid, published_tables(fid)) }))
+                tuple('family', fid, sampleqcFamilyTables(fid)) }))
             .toList()
             .filter { rows ->
-                def have = { kind -> rows.findAll { it[0] == kind }.collect { it[1] } as Set }
-                def missing = (all_samples - have('extract')) + (all_families - have('family'))
+                def missing = (all_samples - sampleqcIdsOf(rows, 'extract')) + (all_families - sampleqcIdsOf(rows, 'family'))
                 if (missing) {
                     log.warn "Skipping the cohort's sample QC: nothing for ${missing.sort().take(20).join(', ')}${missing.size() > 20 ? ' and others' : ''}"
                     return false
@@ -147,8 +133,8 @@ workflow SAMPLEQC {
             }
             .map { rows ->
                 tuple(params.cohort_name,
-                      rows.findAll { it[0] == 'extract' }.collectMany { it[2] },
-                      rows.findAll { it[0] == 'family' }.collectMany { it[2] },
+                      rows.findAll { row -> row[0] == 'extract' }.collectMany { row -> row[2] },
+                      rows.findAll { row -> row[0] == 'family' }.collectMany { row -> row[2] },
                       qc.cohort_snapshot, sites, label, classify)
             }
 
@@ -162,4 +148,31 @@ workflow SAMPLEQC {
     extracts = new_extracts
     family_tables = new_family_tables
     cohort_tables = cohort_tables_output
+}
+
+// Read from their sharded paths, never globbed
+def sampleqcExtractFile(barcode) {
+    return file("${Sharding.getSampleDir(params.data, barcode)}/qc/somalier/${barcode}.${params.sampleqc_label}.somalier")
+}
+
+def sampleqcCoverageFile(barcode) {
+    return file("${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.cov_b${params.cnv_cov_bin}q${params.cnv_cov_mapq}.json")
+}
+
+def sampleqcFamilyTables(fid) {
+    def prefix = "${Sharding.getFamilyDir(params.data, fid)}/qc/${fid}.${params.sampleqc_label}"
+    return ['samples', 'pairs', 'flags'].collect { kind -> file("${prefix}.${kind}.tsv") }
+}
+
+// A grouped family's files of one kind, from the kinds and payloads groupTuple collected; the
+// family BCF's payload is the pair of the BCF and its index
+def sampleqcFilesOf(kinds, payloads, kind) {
+    return [kinds, payloads].transpose()
+        .findAll { pair -> pair[0] == kind }
+        .collectMany { pair -> pair[1] instanceof List ? pair[1] : [pair[1]] }
+}
+
+// The IDs of one kind among the cohort's [kind, id, files] rows
+def sampleqcIdsOf(rows, kind) {
+    return rows.findAll { row -> row[0] == kind }.collect { row -> row[1] } as Set
 }

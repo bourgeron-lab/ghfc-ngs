@@ -72,7 +72,7 @@ process SAMPLEQC_FAMILY {
 
   script:
   prefix = "${fid}.${label}"
-  def bcf = (norm instanceof List ? norm : [norm]).find { it.name.endsWith('.bcf') }
+  def bcf = (norm instanceof List ? norm : [norm]).find { staged -> staged.name.endsWith('.bcf') }
 
   """
   set -euo pipefail
