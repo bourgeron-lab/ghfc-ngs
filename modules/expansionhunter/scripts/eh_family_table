@@ -206,7 +206,9 @@ def main():
 
     def counts(sample, locus):
         rec = calls[sample].get(locus)
-        return [int(x) for x in alleles(rec["fmt"].get("REPCN"))] if rec else []
+        # a no-call (LowDepth) gives './.': None keeps the allele's place but goes unclassified
+        values = alleles(rec["fmt"].get("REPCN")) if rec else []
+        return [None if x == "." else int(x) for x in values]
 
     n_rows = 0
     with open(a.out, "w") as fo:
@@ -240,7 +242,8 @@ def main():
                     row[key] = t[key] if t else "."
                 for key in ("normal_max", "intermediate_min", "pathogenic_min"):
                     row[key] = fmt_value(t[key]) if t else "."
-                parental = [c for p in (father, mother) if p != "." for c in counts(p, locus)]
+                parental = [c for p in (father, mother) if p != "." for c in counts(p, locus)
+                            if c is not None]
                 row["parents_max_allele"] = str(max(parental)) if parental else "."
                 fo.write("\t".join(row[c] for c in COLUMNS) + "\n")
                 n_rows += 1
