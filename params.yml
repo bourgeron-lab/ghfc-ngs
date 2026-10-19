@@ -14,7 +14,9 @@ steps: [
     # "ancestry",
     # "expansionhunter",
     # "melt",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
+    # "cnv_coverage",
+    # "cnv_panel", # only in the controls cohort's file
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -170,6 +172,27 @@ melt_label: "melt222"
 melt_gnomad_sv: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/gnomAD/gnomad.v4.1.sv.sites.vcf.gz"
 melt_ndd_genes: "/pasteur/helix/projects/ghfc_wgs/references/genesets/NCBI_data_HomoSapiens9606_NDD_DD_gene_lists_v5_20240308.txt"
 melt_ndd_columns: "High Confidence NDD genes v3" # '|'-separated columns of melt_ndd_genes that mark a gene NDD
+
+# CNV coverage (step "cnv_coverage")
+# Normalised coverage of every sample for genetics-viz: samples/.../coverage/<ID>.cov_b250q1.{bw,json},
+# each bin 2 x depth / autosomal median (about 2 on a normal autosome, 1 for a heterozygous
+# deletion). cnv_cov_bin and cnv_cov_mapq make the tag cov_b<bin>q<mapq> in every file name, which
+# genetics-viz matches a sample to a panel by: keep them those of the panel.
+cnv_cov_bin: 250 # Bin size in bp (default: 250)
+cnv_cov_mapq: 1 # Minimum mapping quality (default: 1)
+cnv_cov_round: 0.01 # Precision of the stored values; not in the tag (default: 0.01)
+# A control panel to fit the cohort against, a version directory built by the cnv_panel step of the
+# controls cohort. Writes cohorts/<cohort>/coverage/<cohort>.cov_b250q1.panel_v<version>.fit.tsv.
+cnv_panel_dir: "" # e.g. /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/CNV_CONTROLS/cnv_panel/v1
+
+# CNV control panel (step "cnv_panel"), only in the dedicated controls cohort's file
+# Builds cohorts/<cohort>/cnv_panel/v<version>/: per-bin median and MAD of the controls' normalised
+# coverage for the autosomes, XX chrX and XY chrX/chrY, with panel.json and controls.tsv. A version
+# is built once and never overwritten; a complete one is skipped, so a new set of controls is a new
+# version. Controls whose fit to the others is poor, or whose pedigree and coverage sex disagree,
+# are left out (of the sex groups only, for the latter), and controls.tsv says why.
+cnv_panel_version: "" # TODO: e.g. "1", making the directory v1; required by cnv_panel
+cnv_panel_max_fit_mad: 0.3 # Controls fitting the others worse than this MAD of log2 ratios are excluded (default: 0.3)
 
 # Extractor configuration
 extractor_tsvs_list: [] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])

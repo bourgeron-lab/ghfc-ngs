@@ -48,6 +48,10 @@ for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz \
          melt/me_refs/Hg38/SVA_MELT.zip melt/add_bed_files/Hg38/Hg38.genes.bed; do
     touch "${refs}/${f}"
 done
+# A CNV panel for the cohort fit: main.nf reads its panel.json before the run
+mkdir -p "${refs}/cnv_panel/v0"
+printf '{"panel_version": "0", "tag": "cov_b250q1"}\n' > "${refs}/cnv_panel/v0/panel.json"
+echo stub > "${refs}/cnv_panel/v0/panel.cov_b250q1.autosomes.median.bw"
 # The expansionhunter workflow reads the catalog itself, for the loci of multi-variant entries
 cat > "${refs}/eh_catalog.json" <<'JSON'
 [

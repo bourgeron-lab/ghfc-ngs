@@ -315,6 +315,8 @@ The pipeline supports thirteen main steps that must be explicitly listed in the 
 - **`roh`**: Runs of homozygosity and inbreeding using `ancestry-pgs roh`. Calls ROH on the ancestry step's family panel, scores each individual's F_ROH and its population-vs-recent split against unrelated reference genomes of the same ancestry region, reports the parents' kinship, and lists the genes in ROH.
 - **`expansionhunter`**: Short tandem repeat genotyping with ExpansionHunter v5.0.0 on each sample's CRAM, against a variant catalog. Merges each family's calls into one VCF and a genotype table that classes every allele against published thresholds, then merges the families into cohort files with each allele's place in the cohort's distribution. Draws a REViewer read pileup of every flagged genotype.
 - **`melt`**: Mobile element insertion (ALU, LINE1, SVA) calling with MELT v2.2.2 Single on each sample's CRAM. Merges each family's calls into one VCF and tabulates each child's insertions against its parents' calls, then chains the cohort's insertions into loci with their carrier frequency and ranks every PASS insertion against gnomAD-SV, the cohort, the genes and the NDD gene set.
+- **`cnv_coverage`**: Normalised coverage of each sample's CRAM on a fixed bin grid, as a bigWig for [genetics-viz](https://github.com/bourgeron-lab/genetics-viz) to show CNVs and SVs, with a JSON of its autosomal depth and sex-chromosome ratios. With `cnv_panel_dir`, also fits every sample of the cohort against a control panel.
+- **`cnv_panel`**: Builds a versioned control panel - per-bin median and MAD of the controls' normalised coverage, for the autosomes, XX and XY - from every sample of a dedicated controls cohort.
 
 **Step Dependencies:**
 
@@ -330,6 +332,8 @@ The pipeline supports thirteen main steps that must be explicitly listed in the 
 - `roh` requires the ancestry step's family panel and ancestry table (needs `ancestry` in `steps` if they are missing). Like `ancestry` it never reads the call sets, so `steps: ["ancestry", "roh"]` runs on its own
 - `expansionhunter` requires CRAM files. Like `wisecondorx`, a sample with no CRAM is not sent to alignment: it is left out of its family's ExpansionHunter files, with a warning
 - `melt` requires CRAM files, and treats a sample with none as `expansionhunter` does
+- `cnv_coverage` requires CRAM files, and treats a sample with none as `expansionhunter` does
+- `cnv_panel` requires every sample's coverage files (needs `cnv_coverage` in `steps` if any is missing)
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -599,6 +603,28 @@ scripts/melt/melt_import_existing_test
 
 **Outputs:** Per sample: one VCF per class, as MELT writes it. Per family: merged VCF and transmission table. Per cohort: the loci BED and the ranked candidates.
 
+#### CNV Coverage and Control Panel Workflows
+
+Normalised coverage for viewing CNVs and SVs in genetics-viz, which reads these files directly and divides a sample by a panel's median at view time: corrected copy number = expected ploidy × sample / panel median. The per-sample files therefore never depend on a panel.
+
+1. **Sample coverage** (`cnv_coverage`) - mosdepth bins the CRAM (`-n --fast-mode --by <cnv_cov_bin> -Q <cnv_cov_mapq>`, its default flag filter). chr1-22, chrX and chrY are kept, on mosdepth's grid from 0 with the last bin of each contig truncated, and every bin is written, zeros included, so a homozygous deletion reads 0 rather than missing. Each bin holds `2 × depth / autosomal median`, the median of the chr1-22 bins with coverage, rounded to `cnv_cov_round`
+2. **Control panel** (`cnv_panel`, in the controls cohort only) - per bin, the median and the unscaled MAD of the controls' values, for `autosomes` (chr1-22, every retained control), `XX` (chrX) and `XY` (chrX and chrY). Each control is fitted against the median of the others, as the MAD of the log2 ratio over the autosomal bins where that median is at least 1; controls above `cnv_panel_max_fit_mad` are excluded and the panel computed once more. Sex comes from the pedigree, and is checked against the coverage: a control whose two disagree, or that looks aneuploid, stays out of the sex groups but in `autosomes`
+3. **Cohort fit** (`cnv_coverage` with `cnv_panel_dir`) - the same fit of every sample against the panel's autosomal median, so that genetics-viz can flag samples that match it poorly
+
+**Sex.** `chrX_ratio` is the median normalised value over the non-PAR chrX bins with coverage, halved; `chrY_ratio` the same over the non-PAR chrY bins less than half N in the reference, so that an XX sample reads about 0 rather than the level of its mismapped reads. XX reads about 1/0, XY 0.5/0.5. Twice each ratio estimates a copy number, which must be within 0.25 of a whole number, or the sample is `ambiguous`; otherwise it is spelled out: `XX`, `XY`, `X0`, `XXY`, ... The PARs are those of GRCh38; with the no-alt analysis set the chrY PARs are N-masked, so PAR reads land on chrX.
+
+**A panel version is built once.** `cohorts/<cohort>/cnv_panel/v<cnv_panel_version>/` is self-contained, to be referenced as it is by other cohorts' `cnv_panel_dir` and by genetics-viz, and is never overwritten: a complete one is skipped, a partial one stops the run. Controls added since it was built are reported, and need a new version.
+
+**The tag.** `cov_b<bin>q<mapq>` is in every file name. genetics-viz refuses to divide a sample by a panel of another tag, and so does the fit, which is skipped with a warning.
+
+The script behind all three ships with a self-contained test, which needs `python3` with numpy, pandas and pyBigWig:
+
+```bash
+modules/cnv/scripts/cnv_coverage_test
+```
+
+**Outputs:** Per sample: the bigWig and its JSON. Per cohort: the fit table, and in the controls cohort the panel version directory.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -664,14 +690,18 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **MELT calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${melt_label}.{ALU,LINE1,SVA}.vcf` (all three non-empty)
 - **MELT files (family)**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${melt_label}.{vcf.gz,vcf.gz.tbi,transmission.tsv}`
 - **MELT files (cohort)**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${melt_label}.{internal_af.bed,candidates.tsv.gz}`
+- **CNV coverage (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/coverage/${barcode}.cov_b${cnv_cov_bin}q${cnv_cov_mapq}.{bw,json}` (both non-empty)
+- **CNV coverage fit (cohort)**: `${data}/cohorts/${cohort_name}/coverage/${cohort_name}.cov_b${cnv_cov_bin}q${cnv_cov_mapq}.panel_v${version}.fit.tsv`, `version` from the `panel.json` of `cnv_panel_dir`
+- **CNV panel (cohort)**: every file of `${data}/cohorts/${cohort_name}/cnv_panel/v${cnv_panel_version}/` (six bigWigs, `panel.json`, `controls.tsv`)
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
 Cohort-level files are the exception: each is merged again, from every family, whenever a family
 that feeds it is built or rebuilt in the run - the common-variant BCF when a family is annotated,
 the Wombat tables when a family's Wombat results are written, the WisecondorX, ancestry, ROH
-and ExpansionHunter cohort files when their family files are, and the MELT cohort files when a
-sample is called. Adding a family to the pedigree is
+and ExpansionHunter cohort files when their family files are, and the MELT cohort files and the
+CNV coverage fit when a sample is called. The CNV panel is the one exception: a version is built
+once and never rebuilt. Adding a family to the pedigree is
 enough to have it in every cohort file. A cohort merge skipped in that run - its step not
 listed, or the run stopped first - is not caught up later unless the cohort file is deleted.
 
@@ -742,6 +772,9 @@ data/
 │                       ├── BC001.melt222.ALU.vcf              # Insertions, as MELT writes them
 │                       ├── BC001.melt222.LINE1.vcf
 │                       └── BC001.melt222.SVA.vcf
+│               └── coverage/
+│                   ├── BC001.cov_b250q1.bw                    # Normalised coverage, every 250 bp bin
+│                   └── BC001.cov_b250q1.json                  # Autosomal depth, chrX/chrY ratios
 ├── families/                      # Family-specific output directories (sharded)
 │   └── {S1}/                      # Shard level 1 (single character)
 │       └── {S2}/                  # Shard level 2 (single character)
@@ -824,6 +857,13 @@ data/
 │           └── melt/
 │               ├── COHORT_NAME.melt222.internal_af.bed        # Insertion loci, carrier frequency
 │               └── COHORT_NAME.melt222.candidates.tsv.gz      # Every PASS insertion, ranked
+│       └── coverage/
+│           └── COHORT_NAME.cov_b250q1.panel_v1.fit.tsv        # Each sample's fit to a CNV panel
+│       └── cnv_panel/                                         # Controls cohort only
+│           └── v1/
+│               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
+│               ├── panel.json
+│               └── controls.tsv                               # Each control, and why it was left out
 └── extractor/                     # Extractor outputs (if TSV lists provided)
     └── VARIANT_LIST/
         ├── VARIANT_LIST.extracted.tsv               # Extracted variants
@@ -1001,6 +1041,17 @@ Paths use `${L}` as shorthand for `${melt_label}`.
 - **Family transmission table**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${L}.transmission.tsv` - one row per PASS insertion of each child with a genotyped parent, by child, chromosome and position: `family_id child father mother mei_class chrom pos gene region child_gt child_assess child_sr child_lp child_rp`, then `{father,mother}_{pos,filter,gt,distance}` of each parent's nearest call of the class within 50 bp, any FILTER (`.` when none, or the parent is not genotyped), then `transmission`. `gene` and `region` are MELT's `INTERNAL`; `child_sr`, `child_lp`, `child_rp` its split reads and left and right discordant pairs. A family with no parent-child pair has a header only
 - **Cohort loci**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.internal_af.bed` - `chrom start end mei_class internal_af n_carriers n_total`, per class, from PASS sites only
 - **Cohort candidates**: `${data}/cohorts/${cohort_name}/mei/melt/${cohort_name}.${L}.candidates.tsv.gz` - every PASS insertion of every sample, highest score first: `sample chrom pos end mei_class gene ndd impact gnomad_af internal_af melt_filter assess gt composite_score`. `gene` is the gencode gene overlapping the insertion, else MELT's; `gnomad_af` is gnomAD-SV's highest `GRPMAX_AF` (else `AF`) for the class within 50 bp
+
+### CNV Coverage Outputs
+
+Paths use `${T}` as shorthand for the tag `cov_b${cnv_cov_bin}q${cnv_cov_mapq}`.
+
+- **Sample bigWig**: `${data}/samples/{S1}/{S2}/${barcode}/coverage/${barcode}.${T}.bw` - chr1-22, chrX and chrY, every bin of the grid as float32 `2 × depth / autosomal_median`, rounded to `cnv_cov_round`, zeros included
+- **Sample JSON**: `${data}/samples/{S1}/{S2}/${barcode}/coverage/${barcode}.${T}.json` - `sample tag bin mapq round autosomal_median_depth mosdepth_version reference frac_autosomal_bins_zero chrX_ratio chrY_ratio par`, `reference` the FASTA's basename and `par` the GRCh38 PAR1/PAR2 of chrX and chrY, 1-based inclusive
+- **Panel bigWigs**: `${data}/cohorts/${cohort_name}/cnv_panel/v${version}/panel.${T}.{autosomes,XX,XY}.{median,mad}.bw` - per bin, on the same grid, float32 and unrounded, 0 where there is no data; `autosomes` holds chr1-22, `XX` chrX, `XY` chrX and chrY
+- **panel.json**: `panel_version tag bin mapq reference created source_cohort n_controls mad_scale max_fit_mad par expected_ploidy`, `n_controls` per group, `mad_scale` 1.0 (unscaled MAD), and the expected ploidy: autosomes 2; XX chrX 2; XY chrX 1 outside the PARs and 2 in them, chrY 1 outside the PARs
+- **controls.tsv**: one row per pedigree sample of the controls cohort: `family_id sample pedigree_sex coverage_sex in_autosomes in_sex_panel autosomal_median_depth chrX_ratio chrY_ratio fit_mad exclusion_reason`, `family_id` comma-separated for a sample in two families
+- **Cohort fit**: `${data}/cohorts/${cohort_name}/coverage/${cohort_name}.${T}.panel_v${version}.fit.tsv` - one row per `(family_id, sample)` with coverage: `family_id sample pedigree_sex coverage_sex fit_mad chrX_ratio chrY_ratio`
 
 ### Pipeline Reports
 

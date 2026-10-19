@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-63 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+69 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -76,6 +76,12 @@ program can see is in this table. A key that is not here is not read by anything
 | `bin_size` ✗ | never — you want `bin` | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `bwa_mem2` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `clean_stale_families` | optional — a repair flag, not a run setting | [Core paths and identity](#core-paths-and-identity) |
+| `cnv_cov_bin` 📄 | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_cov_mapq` 📄 | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_cov_round` | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_panel_dir` | `cnv_coverage` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_panel_max_fit_mad` | `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_panel_version` 📄 | `cnv_panel` — **required** | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
 | `cohort_name` 📄 | always — **required** | [Core paths and identity](#core-paths-and-identity) |
 | `cram4realignment_pattern` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `data` | always — **required** | [Core paths and identity](#core-paths-and-identity) |
@@ -196,7 +202,7 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these thirteen:
+the command line. Every entry must be one of these fifteen:
 
 | Step | Produces |
 |---|---|
@@ -213,6 +219,8 @@ the command line. Every entry must be one of these thirteen:
 | `roh` | Runs of homozygosity and inbreeding (F_ROH) per individual, genes in ROH, per family and per cohort |
 | `expansionhunter` | Short tandem repeat genotypes per sample, merged and classed per family, merged and summarised per cohort |
 | `melt` | Mobile element insertions (ALU, LINE1, SVA) per sample, merged per family, with their cohort frequency and a ranking of every insertion per cohort |
+| `cnv_coverage` | Normalised coverage per sample on a fixed bin grid, as a bigWig for genetics-viz, and with `cnv_panel_dir` the cohort's fit against a control panel |
+| `cnv_panel` | A versioned control panel, per-bin median and MAD of the controls' normalised coverage, built once from a dedicated controls cohort |
 
 ### The rule that catches people out
 
@@ -237,6 +245,9 @@ missing prerequisite is only an error when something in *this* run would consume
 - `expansionhunter` demands nothing. Like `wisecondorx`, it reads the CRAMs, and a sample with
   no CRAM is left out of its family's files, with a warning, rather than sent to alignment.
 - `melt` demands nothing either, for the same reason.
+- `cnv_coverage` demands nothing either, for the same reason. `cnv_panel` demands
+  `cnv_coverage` when the panel is still to be built and a sample with a CRAM has no coverage
+  file yet: a panel is only ever built from every sample of the cohort.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -273,6 +284,12 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: the 'melt' step requires ...` | `melt` listed without `melt_dir`, `melt_label`, `melt_gnomad_sv`, `melt_ndd_genes`, `ref`, or the gencode settings `annotation_annotation_path` and `annotation_gencode` |
 | `ERROR: the 'melt' step cannot find ...` | a file of the MELT distribution, gnomAD-SV, the NDD table, the gencode gene BED or the reference's `.fai` does not exist |
 | `ERROR: melt_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: cnv_cov_bin '...' must be ...`, and the same for `cnv_cov_mapq`, `cnv_cov_round` | `cnv_coverage` or `cnv_panel` listed with a bin, MAPQ or rounding that is not a number of the right kind |
+| `ERROR: the reference ... or its .fai does not exist` | `cnv_coverage` or `cnv_panel` listed, and `ref` or its `.fai` is missing |
+| `ERROR: the 'cnv_panel' step requires cnv_panel_version to be set` | `cnv_panel` listed without `cnv_panel_version` |
+| `ERROR: cnv_panel_version '...' may only hold ...` / `... is written without its v` | a version that cannot be a directory name, or `v1` where `1` was meant |
+| `ERROR: the CNV panel directory ... exists but is incomplete` | a partial `cnv_panel/v<version>/`, from a build that died or a hand edit: it is never overwritten |
+| `ERROR: cnv_panel_dir: ...` | `cnv_panel_dir` set to a directory with no readable `panel.json` or no autosomal median bigWig |
 | `ERROR: Pedigree file not found: ...` | `pedigree`, or the cohort's default pedigree path, does not exist |
 | `... is required for N individuals but not included in steps parameter` | the rule above |
 
@@ -539,6 +556,26 @@ These three are the only keys in the whole file with a **hard requirement check*
 - **Scoring.** The cohort's candidates table ranks every PASS insertion by `2(1 - gnomAD AF) + 2(1 - cohort AF) + impact (1 exonic, 0.5 genic) + 2 NDD + 0.5 ASSESS/5`, the weights of the cohort's first MEI analysis. None of these settings is in a file name: the cohort files are rebuilt whenever a sample is called, or after you delete them.
 - **Calls made before the step.** `scripts/melt/melt_import_existing` copies the calls of the first analysis (`<ID>/meis/{ALU,LINE1,SVA}.final_comp.vcf`) to `mei/melt/<ID>.<label>.<CLASS>.vcf`, after checking each one. Without `--apply` it only reports.
 
+### CNV coverage and control panel
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `cnv_cov_bin` 📄 | integer | `250` | Bin size in bp. Part of the tag `cov_b<bin>q<mapq>` in every file name. |
+| `cnv_cov_mapq` 📄 | integer | `1` | Minimum mapping quality of the reads counted (mosdepth `-Q`). Part of the tag. |
+| `cnv_cov_round` | number | `0.01` | Precision the normalised values are stored at. Coarser makes smaller bigWigs. Not in the tag. |
+| `cnv_panel_dir` | directory | `""` | A panel version directory, `.../cnv_panel/v<version>`, to fit the cohort against. Empty: no fit. |
+| `cnv_panel_version` 📄 | string | `""` | The version `cnv_panel` builds, as `cohorts/<cohort_name>/cnv_panel/v<version>/`. **Required** by `cnv_panel`. Letters, digits, `.`, `_` and `-`, without a leading `v`. |
+| `cnv_panel_max_fit_mad` | number | `0.3` | Controls whose fit MAD is above this are left out of the panel, which is then computed again. |
+
+genetics-viz reads these files directly, so their names, keys and values are a contract with it.
+
+- **Per sample** (`cnv_coverage`, any cohort): `samples/{S1}/{S2}/<ID>/coverage/<ID>.cov_b<bin>q<mapq>.bw` and `.json`. mosdepth bins the CRAM (`-n --fast-mode --by <bin> -Q <mapq>`, its default flag filter, so duplicates, secondary and QC-fail reads are out). Only chr1-22, chrX and chrY are kept, and every bin is written, zeros included, on mosdepth's grid: from 0, the last bin of each contig truncated. A bin holds `2 × depth / autosomal_median`, rounded to `cnv_cov_round`, where the autosomal median is that of the chr1-22 bins with depth above 0. So a normal autosome reads about 2, a heterozygous deletion about 1, a homozygous one 0. The JSON gives the median, `frac_autosomal_bins_zero`, and `chrX_ratio` and `chrY_ratio`, about 1/0 for XX and 0.5/0.5 for XY: the median normalised value over non-PAR chrX bins with coverage, and over the non-PAR chrY bins that are less than half N in the reference, each halved.
+- **The panel** (`cnv_panel`, only in the controls cohort's file): `cohorts/<cohort_name>/cnv_panel/v<version>/` holds `panel.cov_b<bin>q<mapq>.<group>.<stat>.bw` for the groups `autosomes`, `XX` and `XY` and the stats `median` and `mad` (unscaled), with `panel.json` and `controls.tsv`. Each control is fitted against the median of the others (the MAD of the log2 ratio over the autosomes). Controls above `cnv_panel_max_fit_mad` are excluded, and the panel is computed once more without them. A control enters `XX` or `XY` only when its pedigree sex and its coverage sex agree; a mismatch, an aneuploidy or an unknown sex keeps it in `autosomes` only. `controls.tsv` says what happened to each one, and why.
+- **A panel version is built once.** A complete `v<version>/` counts as done and is never rebuilt or overwritten, even if the cohort has gained samples since (the run warns about them): set a new `cnv_panel_version` for that. A partial one stops the run. The directory is self-contained, to be referenced as it is by other cohorts and genetics-viz.
+- **The fit** (`cnv_coverage` with `cnv_panel_dir`): `cohorts/<cohort_name>/coverage/<cohort_name>.cov_b<bin>q<mapq>.panel_v<version>.fit.tsv`, one row per family and sample, with its fit MAD against the panel, sex and ratios. It is rebuilt whenever a sample's coverage is. A panel of another tag is skipped, with a warning.
+- **The tag is the cache.** Changing `cnv_cov_bin` or `cnv_cov_mapq` makes new files beside the old ones. `cnv_cov_round` is not in the tag, so changing it leaves the existing samples as they are: delete their `coverage/` files to have them written again.
+- **Reference.** The coverage is measured against `ref`, which must be the reference the CRAMs were aligned to and have a `.fai`. The PAR coordinates are those of GRCh38.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -674,7 +711,9 @@ ancestry_panel_name: "apgs_b1.0.0_dp10gq20"
 **`expansionhunter_catalog_name`** works the same way for the ExpansionHunter calls. Pointing
 `expansionhunter_catalog` at another catalog without a new label reuses every existing call,
 made with the old catalog, and mixes in new ones made with the new catalog. **`melt_label`**
-does the same for the MELT calls.
+does the same for the MELT calls. **`cnv_cov_bin`** and **`cnv_cov_mapq`** make the tag
+`cov_b<bin>q<mapq>` of every CNV coverage file, and **`cnv_panel_version`** the directory of a
+panel, which is built once and never rebuilt under the same version.
 
 ### Three different directories
 

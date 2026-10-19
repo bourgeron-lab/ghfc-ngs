@@ -145,6 +145,19 @@ flowchart TB
         melt_sample --> melt_score --> melt_cohort
     end
 
+    subgraph cnvcoverage [**CNV coverage**]
+        direction TB
+        cnv_mosdepth["mosdepth --by 250 -Q 1, normalised to the autosomal median"]
+        cnv_sample["samples/**{barcode}**/coverage/**{barcode}**.cov_b250q1.{bw,json}"]:::os
+        cnv_panel["controls cohort: per-bin median + MAD (autosomes, XX, XY)"]
+        cnv_panel_out["cohorts/**{controls}**/cnv_panel/v**{version}**/"]:::oc
+        cnv_fit["fit MAD against a panel"]
+        cnv_fit_out["cohorts/**{cohort}**/coverage/**{cohort}**.cov_b250q1.panel_v**{version}**.fit.tsv"]:::oc
+        cnv_mosdepth --> cnv_sample --> cnv_panel --> cnv_panel_out
+        cnv_sample --> cnv_fit --> cnv_fit_out
+        cnv_panel_out -.-> cnv_fit
+    end
+
     subgraph wisecondorx [**WisecondorX**]
         direction TB
         wcx_call["WisecondorX call"]
@@ -155,6 +168,7 @@ flowchart TB
     alignment ==> bedgraph
     alignment ==> expansionhunter
     alignment ==> melt
+    alignment ==> cnvcoverage
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus
