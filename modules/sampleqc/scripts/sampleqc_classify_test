@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+# Self-contained check of sampleqc_classify.
+#
+# The expected kinships of a pedigree with grandparents, an uncle, half-sibs, cousins and an
+# inbred child. Then four families of synthetic somalier tables, each pair built to a chosen
+# kinship and IBS0:
+#   FAM1  a quartet plus a child whose father is not the recorded one, so that the father
+#         pair is NOT_PARENT and the siblings HALF_SIB_NOT_FULL; a son recorded female
+#         (SEX_MISMATCH, from his coverage JSON), an XXY son, an X0 mother (from somalier's
+#         depth, with no JSON) and a father with no sex in the pedigree; mendelian counts on
+#         the trio from a bcftools query stream
+#   FAM2  grandparents, half-sibs recorded as such but observed full (FULL_SIB_NOT_HALF),
+#         spouses related at the third degree (UNEXPECTED_RELATED_IN_FAMILY), a pair with too
+#         few sites to classify, and a CRAM-less member left out
+#   FAM3  a trio whose child is related to neither parent (NOT_PARENT twice, and
+#         SAMPLE_UNRELATED_TO_FAMILY)
+#   FAM4  a singleton, the FAM3 child's parent (SAMPLE_SWAP_CANDIDATE), FAM1's father's
+#         duplicate, and FAM2's grandmother's cousin
+# and the cohort tables made from them. Also that the family level refuses a pairs table
+# with a stranger, and the cohort level family tables that miss a sample. Needs only python3.
+#
+#   modules/sampleqc/scripts/sampleqc_classify_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/sampleqc_classify"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+# --- the expected kinships, through the script's own Pedigree --------------------------------
+python3 - "${script}" <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("sampleqc_classify", sys.argv[1])
+spec = importlib.util.spec_from_loader("sampleqc_classify", loader)
+q = importlib.util.module_from_spec(spec)
+loader.exec_module(q)
+
+rows = {  # sample: (father, mother)
+    "GF": ("0", "0"), "GM": ("0", "0"), "P1": ("GF", "GM"), "UNC": ("GF", "GM"), "SP": ("0", "0"),
+    "C1": ("P1", "SP"), "C2": ("P1", "SP"), "HS": ("P1", "OTHER"), "AUNTSP": ("0", "0"),
+    "COUS": ("UNC", "AUNTSP"), "INB": ("C1", "HS"),
+}
+ped = q.Pedigree({s: {"father": f, "mother": m} for s, (f, m) in rows.items()})
+cases = [
+    ("GF", "GM", 0.0, "unrelated"), ("GF", "P1", 0.25, "parent-offspring"), ("P1", "UNC", 0.25, "full-sibs"),
+    ("GF", "C1", 0.125, "second-degree"), ("UNC", "C1", 0.125, "second-degree"),
+    ("C1", "HS", 0.125, "half-sibs"), ("C1", "C2", 0.25, "full-sibs"), ("C1", "COUS", 0.0625, "third-degree"),
+    ("SP", "UNC", 0.0, "unrelated"), ("INB", "INB", 0.5625, None), ("INB", "C1", 0.3125, "parent-offspring"),
+    ("OTHER", "HS", 0.25, "parent-offspring"),
+]
+for a, b, phi, rel in cases:
+    got = ped.kinship(a, b)
+    assert abs(got - phi) < 1e-9, (a, b, got, phi)
+    assert abs(ped.kinship(b, a) - phi) < 1e-9, (b, a)
+    if rel:
+        assert ped.relationship(a, b) == rel, (a, b, ped.relationship(a, b), rel)
+assert q.kinship_class(0.4, 0.0) == "duplicate"
+assert q.kinship_class(0.25, 0.002) == "parent-offspring" and q.kinship_class(0.25, 0.03) == "full-sibs"
+assert q.kinship_class(0.1, 0.1) == "second-degree" and q.kinship_class(0.05, 0.1) == "third-degree"
+assert q.kinship_class(0.04, 0.1) == "unrelated" and q.kinship_class(0.2, None) == "first-degree"
+for x, y, k in [(2, 0, "XX"), (1, 1, "XY"), (1, 0, "X0"), (2, 1, "XXY"), (1, 2, "XYY"), (3, 0, "XXX"),
+                (1.5, 0, "ambiguous"), (0.1, 1, "ambiguous"), (None, 1, "unknown"), (2.2, 0.1, "XX")]:
+    assert q.karyotype(x, y) == k, (x, y, q.karyotype(x, y), k)
+print("ok    expected kinships, classes and karyotypes")
+PY
+
+# --- synthetic somalier tables -----------------------------------------------------------------
+L=t1
+TAG=cov_b250q1
+mkdir cov fam1 fam2 fam3 fam4
+
+# snapshot <file> then one "fid sample father mother sex somalier coverage" per row
+snapshot() {
+    local out=$1; shift
+    { printf '#sampleqc_inputs\tv1\n#label\t%s\n' "${L}"
+      for r in "$@"; do printf '%s\n' "${r}" | tr ' ' '\t'; done; } > "${out}"
+}
+snapshot fam1/inputs.tsv "FAM1 DAD 0 0 0 yes -" "FAM1 MUM 0 0 2 yes -" "FAM1 KID1 DAD MUM 1 yes ${TAG}" \
+    "FAM1 KID2 DAD MUM 2 yes ${TAG}" "FAM1 NPK DAD MUM 2 yes ${TAG}"
+snapshot fam2/inputs.tsv "FAM2 GF 0 0 1 yes -" "FAM2 GM 0 0 2 yes -" "FAM2 H1 GF GM 1 yes -" \
+    "FAM2 H2 GF OTHER 1 yes -" "FAM2 LOW GF GM 2 yes -" "FAM2 NOCRAM GF GM 2 no -"
+snapshot fam3/inputs.tsv "FAM3 A 0 0 1 yes -" "FAM3 B 0 0 2 yes -" "FAM3 C A B 1 yes -"
+snapshot fam4/inputs.tsv "FAM4 X 0 0 1 yes -"
+{ head -2 fam1/inputs.tsv; for f in fam1 fam2 fam3 fam4; do grep -v '^#' "${f}/inputs.tsv"; done; } > cohort_inputs.tsv
+
+python3 - <<'PY'
+import json
+
+SAMPLE_HEADER = ("#family_id\tsample_id\tpaternal_id\tmaternal_id\tsex\tphenotype\toriginal_pedigree_sex\t"
+                 "gt_depth_mean\tgt_depth_sd\tdepth_mean\tdepth_sd\tab_mean\tab_std\tn_hom_ref\tn_het\tn_hom_alt\t"
+                 "n_unknown\tp_middling_ab\tcontamination_charr\tcontamination_charr_n_sites\t"
+                 "X_depth_mean\tX_n\tX_hom_ref\tX_het\tX_hom_alt\tY_depth_mean\tY_n")
+PAIR_HEADER = ("#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\thets_a\thets_b\thets_ab\tshared_hets\t"
+               "hom_alts_a\thom_alts_b\tshared_hom_alts\tn\tx_ibs0\tx_ibs2\texpected_relatedness")
+
+# x/y: copies from somalier's depth (gt_depth_mean 30, depth_mean, which counts sites with no reads,
+# 15); xhet: X het / (het + hom-alt)
+def sample(fid, s, x=2, y=0, xhet=0.6, called=19000, charr=0.01):
+    het = int(150 * xhet)
+    return "\t".join(map(str, [fid, s, 0, 0, 0, -9, 0, 30, 5, 15, 5, 0.5, 0.1, called - 9000, 6000, 3000, 100,
+                               0.01, charr, 500, 15 * x, 365, 200, het, 150 - het, 15 * y, 17]))
+
+# kinship = (shared_hets - 2 ibs0) / hets_ab, 6000; ibs0 / ibs2 sets parent-offspring against
+# siblings. hets_a and hets_b, each sample's over all its sites, are set apart so that using them
+# would show
+REL = {"dup": (0, 3000, 9000), "po": (0, 1500, 6000), "fs": (150, 1800, 5000), "second": (300, 1350, 4500),
+       "third": (450, 1275, 4000), "unrel": (600, 1200, 3500)}
+
+def pair(a, b, rel, n=10000):
+    ibs0, shared, ibs2 = REL[rel]
+    return "\t".join(map(str, [a, b, 0.0, ibs0, ibs2, 0.9, 9000, 3000, 6000, shared, 1500, 1500, 500, n, 0, 0, -1]))
+
+def write(path, header, rows):
+    with open(path, "w") as fh:
+        fh.write(header + "\n" + "".join(r + "\n" for r in rows))
+
+write("fam1/samples.tsv", SAMPLE_HEADER, [
+    sample("FAM1", "DAD", x=1, y=1, xhet=0.02), sample("FAM1", "MUM", x=1, y=0, xhet=0.02),
+    sample("FAM1", "KID1"), sample("FAM1", "KID2", xhet=0.01), sample("FAM1", "NPK", charr=0.08)])
+write("fam1/pairs.tsv", PAIR_HEADER, [
+    pair("DAD", "MUM", "unrel"), pair("DAD", "KID1", "po"), pair("KID2", "DAD", "po"), pair("DAD", "NPK", "unrel"),
+    pair("MUM", "KID1", "po"), pair("MUM", "KID2", "po"), pair("MUM", "NPK", "po"),
+    pair("KID1", "KID2", "fs"), pair("KID1", "NPK", "second"), pair("KID2", "NPK", "second")])
+# KID1 XXY, KID2 XY (recorded female), NPK XX
+for s, x, y in [("KID1", 1.0, 0.5), ("KID2", 0.5, 0.5), ("NPK", 1.0, 0.0)]:
+    json.dump({"sample": s, "chrX_ratio": x, "chrY_ratio": y}, open(f"cov/{s}.cov_b250q1.json", "w"))
+
+write("fam2/samples.tsv", SAMPLE_HEADER, [
+    sample("FAM2", "GF", x=1, y=1, xhet=0), sample("FAM2", "GM"), sample("FAM2", "H1", x=1, y=1, xhet=0),
+    sample("FAM2", "H2", x=1, y=1, xhet=0), sample("FAM2", "LOW", called=3000)])
+write("fam2/pairs.tsv", PAIR_HEADER, [
+    pair("GF", "GM", "third"), pair("GF", "H1", "po"), pair("GF", "H2", "po"), pair("GM", "H1", "po"),
+    pair("GM", "H2", "unrel"), pair("H1", "H2", "fs"), pair("GF", "LOW", "po", n=1000),
+    pair("GM", "LOW", "po", n=1000), pair("H1", "LOW", "fs", n=1000), pair("H2", "LOW", "fs", n=1000)])
+
+write("fam3/samples.tsv", SAMPLE_HEADER, [
+    sample("FAM3", "A", x=1, y=1, xhet=0), sample("FAM3", "B"), sample("FAM3", "C", x=1, y=1, xhet=0)])
+write("fam3/pairs.tsv", PAIR_HEADER, [pair("A", "B", "unrel"), pair("A", "C", "unrel"), pair("B", "C", "unrel")])
+
+write("fam4/samples.tsv", SAMPLE_HEADER, [sample("FAM4", "X", x=1, y=1, xhet=0)])
+write("fam4/pairs.tsv", PAIR_HEADER, [])
+
+within = []
+for f in ("fam1", "fam2", "fam3"):
+    within += open(f + "/pairs.tsv").read().splitlines()[1:]
+write("cohort_pairs.tsv", PAIR_HEADER, within + [
+    pair("X", "C", "po"), pair("DAD", "X", "dup"), pair("GM", "X", "third"), pair("A", "X", "unrel"),
+    pair("KID1", "GF", "unrel"), pair("B", "H1", "po", n=500)])
+
+# The trio's genotypes, GT GQ DP per sample in BCF order MUM KID1 DAD: 4 sites informative for
+# the trio, two of them Mendelian errors (0/0 x 0/0 -> 0/1, and 0/0 x 1/1 -> 1/1, which is also
+# KID1 and DAD's opposite homozygote); a site with no ALT anywhere counts for none, and one
+# where MUM has a low GQ or no call counts only for the KID1-DAD pair
+rows = [("0/1", 30, 20, "0/1", 30, 20, "0/0", 30, 20),
+        ("0/0", 30, 20, "0/1", 30, 20, "0/0", 30, 20),
+        ("1/1", 30, 20, "1/1", 30, 20, "0/0", 30, 20),
+        ("0|1", 30, 20, "1|1", 30, 20, "1/1", 30, 20),
+        ("0/1", 5, 20, "0/1", 30, 20, "0/1", 30, 20),
+        ("0/0", 30, 20, "0/0", 30, 20, "0/0", 30, 20),
+        ("./.", ".", ".", "0/1", 30, 20, "0/1", 30, 20)]
+with open("fam1/query.tsv", "w") as fh:
+    for r in rows:
+        fh.write("".join(f"{v}\t" for v in r) + "\n")
+PY
+
+python3 "${script}" mendelian --snapshot fam1/inputs.tsv --samples MUM,KID1,DAD --out fam1/mendel.tsv < fam1/query.tsv
+mkdir tables
+for f in 1 2 3 4; do
+    extra=()
+    [[ ${f} == 1 ]] && extra=(--coverage-dir cov --mendelian fam1/mendel.tsv)
+    python3 "${script}" family --snapshot "fam${f}/inputs.tsv" --somalier-samples "fam${f}/samples.tsv" \
+        --somalier-pairs "fam${f}/pairs.tsv" ${extra[@]+"${extra[@]}"} --out-prefix "tables/FAM${f}.${L}" > "fam${f}/log.txt"
+done
+python3 "${script}" cohort --cohort COH --snapshot cohort_inputs.tsv --somalier-pairs cohort_pairs.tsv \
+    --family-dir tables --label "${L}" --out-prefix "COH.${L}" > cohort_log.txt
+
+# --- assertions ----------------------------------------------------------------------------------
+python3 - "${L}" <<'PY'
+import sys
+L = sys.argv[1]
+
+def table(path):
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        return [dict(zip(header, line.rstrip("\n").split("\t"))) for line in fh]
+
+mendel = {(r["kind"], r["child"], r["father"], r["mother"]): (r["informative_sites"], r["errors"])
+          for r in table("fam1/mendel.tsv")}
+assert mendel == {("trio", "KID1", "DAD", "MUM"): ("4", "2"), ("pair", "KID1", "DAD", "."): ("6", "1"),
+                  ("pair", "KID1", ".", "MUM"): ("4", "0")}, mendel
+
+flags = table(f"COH.{L}.flags.tsv")
+got = {(f["level"], f["flag"], f["sample_a"], f["sample_b"], f["severity"]) for f in flags}
+want = {
+    ("family", "NOT_PARENT", "DAD", "NPK", "high"),
+    ("family", "HALF_SIB_NOT_FULL", "KID1", "NPK", "high"),
+    ("family", "HALF_SIB_NOT_FULL", "KID2", "NPK", "high"),
+    ("family", "SEX_MISMATCH", "KID2", ".", "high"),
+    ("family", "KARYOTYPE_XXY", "KID1", ".", "high"),
+    ("family", "KARYOTYPE_X0", "MUM", ".", "high"),
+    ("family", "SEX_UNKNOWN_IN_PED", "DAD", ".", "info"),
+    ("family", "POSSIBLE_CONTAMINATION", "NPK", ".", "medium"),
+    ("family", "FULL_SIB_NOT_HALF", "H1", "H2", "high"),
+    ("family", "UNEXPECTED_RELATED_IN_FAMILY", "GF", "GM", "medium"),
+    ("family", "LOW_INFORMATIVE_SITES", "LOW", ".", "medium"),
+    ("family", "NOT_PARENT", "A", "C", "high"),
+    ("family", "NOT_PARENT", "B", "C", "high"),
+    ("family", "SAMPLE_UNRELATED_TO_FAMILY", "C", ".", "high"),
+    ("cohort", "CRYPTIC_RELATED", "C", "X", "high"),
+    ("cohort", "DUPLICATE_OR_MZ", "DAD", "X", "high"),
+    ("cohort", "CRYPTIC_RELATED", "GM", "X", "medium"),
+    ("cohort", "SAMPLE_SWAP_CANDIDATE", "C", ".", "high"),
+}
+assert got == want, "unexpected flags:\n  extra {}\n  missing {}".format(sorted(got - want), sorted(want - got))
+swap = [f for f in flags if f["flag"] == "SAMPLE_SWAP_CANDIDATE"][0]
+assert "parent-offspring of X (FAM4)" in swap["evidence"], swap
+not_parent = [f for f in flags if f["flag"] == "NOT_PARENT" and f["sample_b"] == "NPK"][0]
+assert not_parent["evidence"].startswith("DAD is not the father of NPK"), not_parent
+assert "in the family BCF" not in not_parent["evidence"], "NPK is in no mendelian pair"
+
+samples = {r["sample"]: r for r in table(f"COH.{L}.samples.tsv")}
+assert set(samples) == {"DAD", "MUM", "KID1", "KID2", "NPK", "GF", "GM", "H1", "H2", "LOW", "A", "B", "C", "X"}
+assert "NOCRAM" not in samples
+k = {s: (r["karyotype"], r["inferred_sex"], r["sex_evidence"]) for s, r in samples.items()}
+assert k["KID1"] == ("XXY", "male", "coverage") and k["KID2"] == ("XY", "male", "coverage"), k
+assert k["MUM"] == ("X0", "female", "somalier") and k["DAD"] == ("XY", "male", "somalier"), k
+assert k["NPK"] == ("XX", "female", "coverage"), k
+assert samples["KID1"]["trio_informative_sites"] == "4" and samples["KID1"]["trio_mendelian_error_rate"] == "0.5000"
+assert samples["C"]["flags"] == "CRYPTIC_RELATED,NOT_PARENT,SAMPLE_SWAP_CANDIDATE,SAMPLE_UNRELATED_TO_FAMILY", samples["C"]
+assert samples["H1"]["flags"] == "FULL_SIB_NOT_HALF" and samples["GF"]["flags"] == "UNEXPECTED_RELATED_IN_FAMILY"
+
+pairs = {(r["sample_a"], r["sample_b"]): r for r in table(f"COH.{L}.pairs.tsv")}
+# 10 + 10 + 3 within families, and three related pairs across them; the unrelated and the
+# low-confidence ones across families are left out
+assert len(pairs) == 26, len(pairs)
+assert ("A", "X") not in pairs and ("B", "H1") not in pairs and ("H1", "B") not in pairs
+assert ("DAD", "KID2") in pairs, "a pair is written member order first"
+p = pairs[("DAD", "KID2")]
+assert p["king_kinship"] == "0.2500" and p["observed_relationship"] == "parent-offspring" and p["status"] == "ok", p
+p = pairs[("DAD", "NPK")]
+assert p["expected_relationship"] == "parent-offspring" and p["observed_relationship"] == "unrelated"
+assert p["status"] == "mismatch" and p["expected_kinship"] == "0.2500", p
+p = pairs[("DAD", "KID1")]
+assert p["po_informative_sites"] == "6" and p["po_opposite_hom_rate"] == "0.1667", p
+assert pairs[("GF", "LOW")]["status"] == "low_confidence" and pairs[("GF", "LOW")]["observed_relationship"] == "low_confidence"
+assert pairs[("H1", "H2")]["expected_relationship"] == "half-sibs" and pairs[("H1", "H2")]["expected_kinship"] == "0.1250"
+p = pairs[("C", "X")]
+assert p["family_id_a"] == "FAM3" and p["family_id_b"] == "FAM4" and p["expected_relationship"] == "unrelated"
+assert pairs[("DAD", "X")]["observed_relationship"] == "duplicate"
+assert pairs[("GM", "X")]["observed_relationship"] == "third-degree"
+
+fam4 = table(f"tables/FAM4.{L}.pairs.tsv")
+assert fam4 == [], "a singleton has no pair"
+print("ok    family and cohort flags, samples and pairs")
+PY
+
+grep -q "FAM1: 5 samples, 10 pairs" fam1/log.txt
+echo "ok    family summary"
+
+# --- refusals ------------------------------------------------------------------------------------
+refuse() {
+    local name=$1 message=$2; shift 2
+    if "$@" > refusal.txt 2>&1; then
+        echo "FAIL  ${name}: accepted"; exit 1
+    fi
+    grep -qF -- "${message}" refusal.txt || { echo "FAIL  ${name}: no '${message}' in:"; cat refusal.txt; exit 1; }
+    echo "ok    refuses ${name}"
+}
+cp fam3/pairs.tsv stranger.tsv
+printf 'A\tZ\t0\t600\t3500\t0.9\t3000\t3000\t0\t1200\t1500\t1500\t500\t10000\t0\t0\t-1\n' >> stranger.tsv
+refuse "a stranger in the family pairs" "not both members of FAM3" \
+    python3 "${script}" family --snapshot fam3/inputs.tsv --somalier-samples fam3/samples.tsv \
+        --somalier-pairs stranger.tsv --out-prefix x
+head -3 fam3/pairs.tsv > short.tsv
+refuse "a missing family pair" "has 2 pairs, FAM3 has 3" \
+    python3 "${script}" family --snapshot fam3/inputs.tsv --somalier-samples fam3/samples.tsv \
+        --somalier-pairs short.tsv --out-prefix x
+refuse "a coverage JSON missing" "has coverage ${TAG} in the snapshot" \
+    python3 "${script}" family --snapshot fam1/inputs.tsv --somalier-samples fam1/samples.tsv \
+        --somalier-pairs fam1/pairs.tsv --coverage-dir fam2 --out-prefix x
+mkdir partial
+cp tables/FAM1.* tables/FAM2.* tables/FAM3.* partial/
+refuse "family tables missing a sample" "do not hold exactly the cohort's samples" \
+    python3 "${script}" cohort --cohort COH --snapshot cohort_inputs.tsv --somalier-pairs cohort_pairs.tsv \
+        --family-dir partial --label "${L}" --out-prefix y
+
+echo "sampleqc_classify: all checks passed"

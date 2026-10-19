@@ -4,16 +4,20 @@
 #
 #   1. validation - parameter mistakes the run must refuse before doing anything, each with
 #      its message (-preview, so nothing is written even if a check stops working);
-#   2. fresh      - all 15 steps with -stub-run on the untouched cohort;
+#   2. fresh      - all 16 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
-#                   the pedigree.
+#                   the pedigree;
+#   5. editpedigree - the same again, after FAM01's child loses its recorded father: every file
+#                   is in place, and only the steps that compare the pedigree they were built
+#                   from (sampleqc) redo the family and the cohort.
 #
 # A pass fails on any FAILED task, and when the tasks it ran - name and tag, sorted - differ from
 # expected/<pass>.tasks.txt. The rerun is the planner's own test: anything it schedules is
 # something it did not recognise as done. Only the extractor, which has no completeness check,
 # is expected there. The addfamily pass checks the other half: the new family is processed,
 # and every cohort merge is redone to take it in, even though each cohort file already exists.
+# The editpedigree pass checks that a pedigree edit that keeps every member is seen at all.
 #
 # A change that means to alter which tasks run regenerates the lists; review their diff:
 #
@@ -50,11 +54,12 @@ params() {
 
 valid_scenario=(
     'cohort_name: "STUB"'
-    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel"]'
+    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc"]'
     "ancestry_reference: \"${fixture}/refs/bundle\""
     'expansionhunter_catalog_name: "eh_stub"'
     'melt_label: "melt_stub"'
     'cnv_panel_version: "stub1"'
+    'sampleqc_label: "sqc_stub"'
     "cnv_panel_dir: \"${fixture}/refs/cnv_panel/v0\""
 )
 
@@ -93,6 +98,10 @@ expect_refusal cnv_bad_panel_dir "panel.json does not exist" "${v[0]}" 'steps: [
 mkdir -p "${fixture}/data/cohorts/STUB/cnv_panel/v9"
 echo '{}' > "${fixture}/data/cohorts/STUB/cnv_panel/v9/panel.json"
 expect_refusal cnv_partial_panel "exists but is incomplete" "${v[0]}" 'steps: ["cnv_panel"]' 'cnv_panel_version: "9"'
+expect_refusal sampleqc_bad_label "sampleqc_label 'sqc/stub' may only hold" "${v[0]}" 'steps: ["sampleqc"]' \
+    'sampleqc_label: "sqc/stub"'
+expect_refusal sampleqc_no_sites "the 'sampleqc' step cannot find somalier_sites" "${v[0]}" 'steps: ["sampleqc"]' \
+    'sampleqc_label: "sqc_stub"' "somalier_sites: \"${fixture}/refs/absent.vcf.gz\""
 expect_refusal resources_typo "no process is called PYWOMBATT" "${v[@]}" 'resources: {PYWOMBATT: {cpus: 2}}'
 
 # --- 2. and 3. stub runs ------------------------------------------------------------------
@@ -159,11 +168,30 @@ for merge in 'SNVS_COHORT:SNVS_COHORT_MERGE (STUB)' \
              'EXPANSIONHUNTER:EXPANSIONHUNTER_COHORT (STUB)' \
              'MELT:MELT_COHORT (STUB)' \
              'CNV_COVERAGE:CNV_COVERAGE_FIT (STUB)' \
+             'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
+             'SAMPLEQC:SAMPLEQC_FAMILY (FAM03)' \
              'DEEPVARIANT_FAMILY:GLNEXUS_FAMILY (FAM03)'; do
     if ! grep -qxF -- "${merge}" "${out}/addfamily.tasks.txt"; then
         echo "  FAIL  addfamily: ${merge} was not run"; fail=1
     fi
 done
+
+# --- 5. a family's pedigree edited, its members unchanged ---------------------------------
+
+awk -F '\t' -v OFS='\t' '$2 == "BC003" { $3 = "0" } { print }' "${data}/cohorts/STUB/STUB.pedigree.tsv" \
+    > "${out}/edited.pedigree.tsv"
+mv "${out}/edited.pedigree.tsv" "${data}/cohorts/STUB/STUB.pedigree.tsv"
+stub_pass editpedigree
+
+# Exactly the edited family and the cohort, as above regenerated lists do not prove it
+for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM01)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)'; do
+    if ! grep -qxF -- "${task}" "${out}/editpedigree.tasks.txt"; then
+        echo "  FAIL  editpedigree: ${task} was not run"; fail=1
+    fi
+done
+if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT' "${out}/editpedigree.tasks.txt"; then
+    echo "  FAIL  editpedigree: the unedited families or the extracts were redone"; fail=1
+fi
 
 if (( fail )); then
     echo "stub runs FAILED - logs in ${out}"

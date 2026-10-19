@@ -105,6 +105,7 @@ across many cohorts into one list without losing track of which is which.
     "melt":               null,
     "cnv_coverage":       null,
     "cnv_panel":          null,
+    "sampleqc":           null,
     "snvs_cohort":        { "done": 1, "total": 1, "pct": 100.0 },
     "wombat_cohort":      { "done": 1, "total": 1, "pct": 100.0 },
     "extractor":          null
@@ -223,9 +224,9 @@ with no shutdown hook, so a SLURM walltime kill, a Ctrl-C, or a lost launch node
 Each step is either `null` or `{done, total, pct}`, where `pct` is `done/total` as a percentage
 rounded to two decimals.
 
-**`null` means unmeasured, not 0%.** Eight steps can be null:
+**`null` means unmeasured, not 0%.** Nine steps can be null:
 
-- `ancestry`, `roh`, `wisecondorx`, `expansionhunter`, `melt`, `cnv_coverage` and `cnv_panel` — when the step is not in `steps_requested`. The pipeline skips
+- `ancestry`, `roh`, `wisecondorx`, `expansionhunter`, `melt`, `cnv_coverage`, `cnv_panel` and `sampleqc` — when the step is not in `steps_requested`. The pipeline skips
   that whole part of the planning pass, so there is nothing to report.
 - `extractor` — always. The pipeline has no on-disk completeness check for it.
 
@@ -246,12 +247,14 @@ Other things worth knowing before you quote a number:
 - **`cnv_coverage` counts samples** with both coverage files; the cohort fit table is not
   counted. **`cnv_panel` is 1 of 1** once its version directory is complete, and stays 1 when
   samples are added since: a panel version is never rebuilt.
+- **`sampleqc` counts samples** with a somalier extract. The family and cohort tables are not
+  counted: they are redone from the extracts whenever the pedigree changes.
 - **`completion_measured: "before"` means the numbers predate the run.** A validation failure and
   a `running` record both report the tree as it was at launch.
 
 | Step | Denominator |
 | --- | --- |
-| `alignment`, `deepvariant_sample`, `wisecondorx`, `expansionhunter`, `melt`, `cnv_coverage` | `pedigree.individuals` |
+| `alignment`, `deepvariant_sample`, `wisecondorx`, `expansionhunter`, `melt`, `cnv_coverage`, `sampleqc` | `pedigree.individuals` |
 | `deepvariant_family`, `annotation`, `wombat`, `ancestry`, `roh` | `pedigree.families` |
 | `snvs_cohort`, `wombat_cohort`, `cnv_panel` | 1 |
 

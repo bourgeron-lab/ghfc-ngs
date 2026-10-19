@@ -158,6 +158,18 @@ flowchart TB
         cnv_panel_out -.-> cnv_fit
     end
 
+    subgraph sampleqc [**Sample QC**]
+        direction TB
+        sqc_extract["somalier extract (17k autosomal, 365 chrX, 17 chrY sites)"]
+        sqc_sample["samples/**{barcode}**/qc/somalier/**{barcode}**.**{label}**.somalier"]:::os
+        sqc_family_relate["somalier relate + sampleqc_classify family (pedigree, sex, Mendelian)"]
+        sqc_family["families/**{FID}**/qc/**{FID}**.**{label}**.{samples,pairs,flags,inputs}.tsv"]:::of
+        sqc_cohort_relate["somalier relate of every sample + sampleqc_classify cohort"]
+        sqc_cohort["cohorts/**{cohort}**/qc/**{cohort}**.**{label}**.{samples,pairs,flags,inputs}.tsv, .html"]:::oc
+        sqc_extract --> sqc_sample --> sqc_family_relate --> sqc_family --> sqc_cohort_relate --> sqc_cohort
+        sqc_sample --> sqc_cohort_relate
+    end
+
     subgraph wisecondorx [**WisecondorX**]
         direction TB
         wcx_call["WisecondorX call"]
@@ -169,6 +181,9 @@ flowchart TB
     alignment ==> expansionhunter
     alignment ==> melt
     alignment ==> cnvcoverage
+    alignment ==> sampleqc
+    cnv_sample -.-> sqc_family_relate
+    glnexus_vcf -.-> sqc_family_relate
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus

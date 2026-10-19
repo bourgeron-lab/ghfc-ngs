@@ -1,0 +1,703 @@
+#!/usr/bin/env python3
+
+"""Relatedness, pedigree and sex QC, from somalier's relate tables and the pedigree.
+
+Three subcommands, one for each place the sampleqc step runs them.
+
+mendelian
+    Reads `bcftools query -f '[%GT\\t%GQ\\t%DP\\t]\\n'` of a family's biallelic autosomal SNVs on
+    stdin, its sample order from --samples, and writes the parent-child counts the family
+    level reads: one row per trio (child, father, mother all in the BCF) and one per
+    parent-child pair. A genotype counts when GQ >= 20 and DP >= 10; a site counts for a
+    trio or a pair when every one of its members is called there and one of them carries
+    the ALT.
+
+      trio   errors: the child's genotype cannot come from the parents' (Mendelian error)
+      pair   errors: opposite homozygotes, 0/0 against 1/1, which a parent and its child
+                     never are but by a genotyping error or a deletion
+
+family
+    From somalier relate's samples.tsv and pairs.tsv of one family, the family's inputs
+    snapshot (written by the pipeline: its pedigree rows, normalised, with which members
+    have a somalier extract and a coverage JSON), the coverage JSONs and the mendelian
+    counts, writes <prefix>.samples.tsv, <prefix>.pairs.tsv and <prefix>.flags.tsv.
+
+cohort
+    From somalier relate's pairs.tsv of every sample of the cohort, the cohort snapshot and
+    every family's three tables, writes the cohort's: the family tables concatenated, with
+    the pairs of different families related at the third degree or closer added, and the
+    flags only the cohort can raise.
+
+Relatedness. somalier counts, for each pair, at the sites both are called: ibs0 (one 0/0,
+the other 1/1), ibs2 (same genotype), shared_hets, and hets_ab, the two samples'
+heterozygous sites summed. The kinship is KING-robust's, (shared_hets - 2 ibs0) / hets_ab:
+0.5 for a duplicate or MZ twin,
+0.25 for a parent-offspring pair or full siblings, 0.125 for the second degree. The
+classes are KING's, with parent-offspring told from full siblings by IBS0, which a parent
+and its child share at no site and siblings at about a quarter of an unrelated pair's:
+
+    kinship > 0.354                       duplicate (or MZ twin)
+    0.177 - 0.354, ibs0/ibs2 < 0.01       parent-offspring
+    0.177 - 0.354, ibs0/ibs2 >= 0.01      full-sibs
+    0.0884 - 0.177                        second-degree (half-sibs, grandparent, avuncular)
+    0.0442 - 0.0884                       third-degree (first cousins, ...)
+    below 0.0442                          unrelated
+
+A pair with fewer than 2,000 sites called in both is low_confidence and is never flagged.
+
+The expected kinship is the pedigree's, by the recursive definition, founders unrelated:
+phi(a, a) = (1 + phi(father, mother)) / 2, and for a not an ancestor of b,
+phi(a, b) = (phi(father_a, b) + phi(mother_a, b)) / 2. A parent named in the pedigree
+without a row of its own is a founder.
+
+Sex. The X and Y copy numbers are 2 x the chromosome's depth over the autosomes': from the
+coverage JSON of the cnv_coverage step when the sample has one (its chrX_ratio and
+chrY_ratio, over whole chromosomes), from somalier's depth at its sites otherwise, over its
+mean depth at the autosomal sites it genotypes (gt_depth_mean). The
+karyotype is cnv_coverage's rule: each rounded to the nearest copy, ambiguous when either
+is more than 0.25 from it or X rounds to 0. A karyotype with a Y is male, one without
+female. The X heterozygosity, het / (het + hom-alt) at somalier's X sites, should be near
+0 with one X and well above it with two: below 0.1 with two X, or above 0.25 with one, is
+X_HET_INCONSISTENT.
+"""
+
+import argparse
+import glob
+import json
+import math
+import os
+import re
+import sys
+
+KING_DUPLICATE = 0.354
+KING_FIRST = 0.177
+KING_SECOND = 0.0884
+KING_THIRD = 0.0442
+PO_IBS0_IBS2_MAX = 0.01
+MIN_PAIR_SITES = 2000
+MIN_SAMPLE_SITES = 5000
+MIN_X_SITES = 50
+SEX_TOLERANCE = 0.25
+X_HET_ONE_X_MAX = 0.25
+X_HET_TWO_X_MIN = 0.1
+CHARR_MAX = 0.05
+MIN_GQ = 20
+MIN_DP = 10
+MENDEL_MIN_SITES = 1000
+PO_OPPOSITE_HOM_MAX = 0.01
+
+# Degree of each relationship class, for comparing expected and observed
+DEGREE = {
+    "duplicate": 0,
+    "parent-offspring": 1, "full-sibs": 1, "first-degree": 1,
+    "half-sibs": 2, "second-degree": 2,
+    "third-degree": 3,
+    "unrelated": 4,
+}
+
+SAMPLE_COLUMNS = ["family_id", "sample", "father", "mother", "pedigree_sex", "inferred_sex", "karyotype",
+                  "sex_evidence", "x_copies", "y_copies", "somalier_x_copies", "somalier_y_copies",
+                  "x_het_rate", "x_sites", "depth_mean", "n_sites_called", "het_hom_alt_ratio",
+                  "contamination_charr", "p_middling_ab", "trio_informative_sites", "trio_mendelian_error_rate",
+                  "flags"]
+PAIR_COLUMNS = ["family_id_a", "sample_a", "family_id_b", "sample_b", "n_sites", "ibs0", "ibs2",
+                "ibs0_ibs2_ratio", "king_kinship", "somalier_relatedness", "hom_concordance", "x_ibs0", "x_ibs2",
+                "expected_kinship", "expected_relationship", "observed_relationship",
+                "po_informative_sites", "po_opposite_hom_rate", "status"]
+FLAG_COLUMNS = ["level", "family_id", "sample_a", "sample_b", "flag", "severity", "evidence"]
+MENDEL_COLUMNS = ["kind", "child", "father", "mother", "informative_sites", "errors"]
+
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fmt(value, digits=4):
+    if value is None:
+        return "."
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "."
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def as_float(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
+
+
+def write_tsv(path, columns, rows):
+    with open(path, "w") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for row in rows:
+            fh.write("\t".join(fmt(row.get(c)) for c in columns) + "\n")
+
+
+def read_tsv(path):
+    """Rows of a TSV as dicts. A header starting with '#' (somalier's) loses it."""
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").lstrip("#").split("\t")
+        rows = []
+        for line in fh:
+            line = line.rstrip("\n")
+            if line:
+                rows.append(dict(zip(header, line.split("\t"))))
+    return header, rows
+
+
+# ---------------------------------------------------------------------------------------------
+# Snapshot (the pedigree as the pipeline wrote it for this run)
+# ---------------------------------------------------------------------------------------------
+
+def read_snapshot(path):
+    """Members in pedigree order: sample -> dict(fid, father, mother, sex, somalier, coverage).
+    Header lines start with '#'; parents are '0' when unknown, sex 1, 2 or 0."""
+    members = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) != 7:
+                die(f"{path}: snapshot row with {len(cols)} columns instead of 7: {line}")
+            fid, sample, father, mother, sex, somalier, coverage = cols
+            members[sample] = {"fid": fid, "father": father, "mother": mother,
+                               "sex": {"1": "male", "2": "female"}.get(sex, "unknown"),
+                               "somalier": somalier == "yes", "coverage": coverage}
+    if not members:
+        die(f"{path} has no member")
+    return members
+
+
+# ---------------------------------------------------------------------------------------------
+# Expected kinship
+# ---------------------------------------------------------------------------------------------
+
+class Pedigree:
+    """Kinship coefficients of a pedigree, founders unrelated and not inbred."""
+
+    def __init__(self, members):
+        self.parents = {}
+        for sample, m in members.items():
+            self.parents[sample] = tuple(p if p != "0" else None for p in (m["father"], m["mother"]))
+        # A parent with no row of its own is a founder
+        for father, mother in list(self.parents.values()):
+            for p in (father, mother):
+                if p is not None and p not in self.parents:
+                    self.parents[p] = (None, None)
+        self.depth = {}
+        for sample in self.parents:
+            self._depth(sample, set())
+        self.memo = {}
+
+    def _depth(self, sample, seen):
+        if sample in self.depth:
+            return self.depth[sample]
+        if sample in seen:
+            die(f"the pedigree has a cycle through {sample}")
+        seen.add(sample)
+        parents = [p for p in self.parents[sample] if p is not None]
+        d = 1 + max(self._depth(p, seen) for p in parents) if parents else 0
+        seen.discard(sample)
+        self.depth[sample] = d
+        return d
+
+    def kinship(self, a, b):
+        if a is None or b is None:
+            return 0.0
+        key = (a, b) if a <= b else (b, a)
+        if key in self.memo:
+            return self.memo[key]
+        if a == b:
+            father, mother = self.parents[a]
+            value = 0.5 * (1 + self.kinship(father, mother))
+        else:
+            # Expand the one further down: an ancestor is always less deep than its descendant
+            if self.depth[a] < self.depth[b]:
+                a, b = b, a
+            father, mother = self.parents[a]
+            value = 0.5 * (self.kinship(father, b) + self.kinship(mother, b))
+        self.memo[key] = value
+        return value
+
+    def relationship(self, a, b):
+        """The expected relationship class of two different members."""
+        pa, pb = self.parents[a], self.parents[b]
+        if a in pb or b in pa:
+            return "parent-offspring"
+        shared = {p for p in pa if p is not None} & {p for p in pb if p is not None}
+        if len(shared) == 2:
+            return "full-sibs"
+        if len(shared) == 1:
+            return "half-sibs"
+        return kinship_class(self.kinship(a, b), None)
+
+
+def kinship_class(phi, ibs0_ibs2):
+    """The class of a kinship, observed (with its IBS0 ratio) or expected (without)."""
+    if phi > KING_DUPLICATE:
+        return "duplicate"
+    if phi > KING_FIRST:
+        if ibs0_ibs2 is None:
+            return "first-degree"
+        return "parent-offspring" if ibs0_ibs2 < PO_IBS0_IBS2_MAX else "full-sibs"
+    if phi > KING_SECOND:
+        return "second-degree"
+    if phi > KING_THIRD:
+        return "third-degree"
+    return "unrelated"
+
+
+# ---------------------------------------------------------------------------------------------
+# Pairs
+# ---------------------------------------------------------------------------------------------
+
+def observed_pair(row):
+    """A somalier pairs.tsv row as a pair record with its kinship and observed class."""
+    n = int(row["n"])
+    ibs0, ibs2 = int(row["ibs0"]), int(row["ibs2"])
+    # hets_a and hets_b are each sample's over all its sites; hets_ab is over both's
+    hets = int(row["hets_ab"])
+    phi = (int(row["shared_hets"]) - 2 * ibs0) / hets if hets else None
+    ratio = ibs0 / ibs2 if ibs2 else None
+    if n < MIN_PAIR_SITES or phi is None:
+        observed = "low_confidence"
+    else:
+        observed = kinship_class(phi, ratio if ratio is not None else 1.0)
+    return {
+        "sample_a": row["sample_a"], "sample_b": row["sample_b"], "n_sites": n,
+        "ibs0": ibs0, "ibs2": ibs2, "ibs0_ibs2_ratio": ratio, "king_kinship": phi,
+        "somalier_relatedness": as_float(row.get("relatedness")),
+        "hom_concordance": as_float(row.get("hom_concordance")),
+        "x_ibs0": row.get("x_ibs0"), "x_ibs2": row.get("x_ibs2"),
+        "observed_relationship": observed,
+    }
+
+
+def describe(pair):
+    return "observed {} (kinship {}, ibs0/ibs2 {}, {} sites)".format(
+        pair["observed_relationship"], fmt(pair["king_kinship"]), fmt(pair["ibs0_ibs2_ratio"]),
+        pair["n_sites"])
+
+
+def compare(pair, roles):
+    """(flag, severity, evidence) of a within-family pair whose expected and observed
+    relationships disagree, or None. roles names a parent-offspring pair's parent."""
+    expected, observed = pair["expected_relationship"], pair["observed_relationship"]
+    if observed == "low_confidence":
+        return None
+    evidence = "expected {} (kinship {}), {}".format(expected, fmt(pair["expected_kinship"]), describe(pair))
+    if observed == "duplicate":
+        return "DUPLICATE_OR_MZ", "high", evidence
+    exp_d, obs_d = DEGREE[expected], DEGREE[observed]
+    if expected == observed or (exp_d == obs_d and exp_d != 1) or (expected == "first-degree" and obs_d == 1):
+        return None
+    if expected == "parent-offspring":
+        return "NOT_PARENT", "high", "{} is not the {}: {}".format(roles[0], roles[1], evidence)
+    if expected == "full-sibs" and observed == "second-degree":
+        return "HALF_SIB_NOT_FULL", "high", evidence
+    if expected == "half-sibs" and observed == "full-sibs":
+        return "FULL_SIB_NOT_HALF", "high", evidence
+    if expected == "unrelated":
+        return "UNEXPECTED_RELATED_IN_FAMILY", "high" if obs_d <= 2 else "medium", evidence
+    if observed == "unrelated":
+        return "EXPECTED_RELATED_UNRELATED", "high" if exp_d <= 2 else "medium", evidence
+    # Off by one degree past the first is within the estimates' noise more often than not
+    severity = "high" if min(exp_d, obs_d) == 1 or abs(exp_d - obs_d) > 1 else "medium"
+    return "RELATIONSHIP_MISMATCH", severity, evidence
+
+
+# ---------------------------------------------------------------------------------------------
+# Sex
+# ---------------------------------------------------------------------------------------------
+
+def karyotype(x_copies, y_copies):
+    """cnv_coverage's coverage_sex, on copy numbers."""
+    if x_copies is None or y_copies is None:
+        return "unknown"
+    nx, ny = int(round(x_copies)), int(round(y_copies))
+    if abs(x_copies - nx) > SEX_TOLERANCE or abs(y_copies - ny) > SEX_TOLERANCE or nx == 0:
+        return "ambiguous"
+    if nx == 1 and ny == 0:
+        return "X0"
+    return "X" * nx + "Y" * ny
+
+
+def sample_record(sample, member, row, coverage):
+    """The per-sample QC record and its flags."""
+    flags = []
+    # Over the sites genotyped, so that sites with no reads do not pull it down
+    depth = as_float(row.get("gt_depth_mean")) or as_float(row.get("depth_mean"))
+    x_depth, y_depth = as_float(row.get("X_depth_mean")), as_float(row.get("Y_depth_mean"))
+    som_x = 2 * x_depth / depth if depth and x_depth is not None else None
+    som_y = 2 * y_depth / depth if depth and y_depth is not None else None
+    if coverage is not None and coverage.get("chrX_ratio") is not None and coverage.get("chrY_ratio") is not None:
+        x_copies, y_copies, evidence = 2 * coverage["chrX_ratio"], 2 * coverage["chrY_ratio"], "coverage"
+    else:
+        x_copies, y_copies, evidence = som_x, som_y, "somalier"
+    k = karyotype(x_copies, y_copies)
+    inferred = "unknown" if k in ("unknown", "ambiguous") else ("male" if "Y" in k else "female")
+
+    x_het, x_hom_alt = int(row.get("X_het", 0)), int(row.get("X_hom_alt", 0))
+    x_sites = x_het + x_hom_alt + int(row.get("X_hom_ref", 0))
+    x_het_rate = x_het / (x_het + x_hom_alt) if x_het + x_hom_alt else None
+
+    n_het, n_hom_alt = int(row.get("n_het", 0)), int(row.get("n_hom_alt", 0))
+    n_called = int(row.get("n_hom_ref", 0)) + n_het + n_hom_alt
+    charr = as_float(row.get("contamination_charr"))
+
+    copies = "X {} Y {} ({})".format(fmt(x_copies, 2), fmt(y_copies, 2), evidence)
+    if k == "ambiguous":
+        flags.append(("SEX_AMBIGUOUS", "medium", f"copy numbers {copies} are not whole: mosaicism, or a "
+                                                 "coverage artefact"))
+    elif k not in ("XX", "XY", "unknown"):
+        flags.append((f"KARYOTYPE_{k}", "high", f"copy numbers {copies}"))
+    if member["sex"] == "unknown":
+        flags.append(("SEX_UNKNOWN_IN_PED", "info", f"inferred {inferred} ({k})"))
+    elif inferred != "unknown" and inferred != member["sex"]:
+        flags.append(("SEX_MISMATCH", "high", "pedigree {}, inferred {} ({}, copy numbers {})".format(
+            member["sex"], inferred, k, copies)))
+    if x_het_rate is not None and x_sites >= MIN_X_SITES and k not in ("unknown", "ambiguous"):
+        n_x = k.count("X")
+        if (n_x == 1 and x_het_rate > X_HET_ONE_X_MAX) or (n_x >= 2 and x_het_rate < X_HET_TWO_X_MIN):
+            flags.append(("X_HET_INCONSISTENT", "medium", "X heterozygosity {} at {} sites with {} X in {}".format(
+                fmt(x_het_rate, 3), x_sites, n_x, k)))
+    if n_called < MIN_SAMPLE_SITES:
+        flags.append(("LOW_INFORMATIVE_SITES", "medium", f"{n_called} somalier sites called"))
+    if charr is not None and charr > CHARR_MAX:
+        flags.append(("POSSIBLE_CONTAMINATION", "medium", f"CHARR {fmt(charr, 3)}"))
+
+    record = {
+        "family_id": member["fid"], "sample": sample, "father": member["father"], "mother": member["mother"],
+        "pedigree_sex": member["sex"], "inferred_sex": inferred, "karyotype": k, "sex_evidence": evidence,
+        "x_copies": x_copies, "y_copies": y_copies, "somalier_x_copies": som_x, "somalier_y_copies": som_y,
+        "x_het_rate": x_het_rate, "x_sites": x_sites, "depth_mean": depth, "n_sites_called": n_called,
+        "het_hom_alt_ratio": n_het / n_hom_alt if n_hom_alt else None, "contamination_charr": charr,
+        "p_middling_ab": as_float(row.get("p_middling_ab")),
+    }
+    return record, flags
+
+
+# ---------------------------------------------------------------------------------------------
+# mendelian
+# ---------------------------------------------------------------------------------------------
+
+def dosage(gt, gq, dp):
+    if as_float(gq) is None or as_float(dp) is None or float(gq) < MIN_GQ or float(dp) < MIN_DP:
+        return None
+    alleles = re.split(r"[/|]", gt)
+    if len(alleles) != 2 or any(a not in ("0", "1") for a in alleles):
+        return None
+    return int(alleles[0]) + int(alleles[1])
+
+
+TRANSMITTED = {0: (0,), 1: (0, 1), 2: (1,)}
+
+
+def cmd_mendelian(args):
+    members = read_snapshot(args.snapshot)
+    order = [s for s in args.samples.split(",") if s]
+    index = {s: i for i, s in enumerate(order)}
+    trios, pairs = [], []
+    for child, m in members.items():
+        if child not in index:
+            continue
+        father = m["father"] if m["father"] in index else None
+        mother = m["mother"] if m["mother"] in index else None
+        if father and mother:
+            trios.append((child, father, mother))
+        for parent in (father, mother):
+            if parent:
+                pairs.append((child, parent))
+    trio_counts = [[0, 0] for _ in trios]
+    pair_counts = [[0, 0] for _ in pairs]
+    possible = {(f, m): {a + b for a in TRANSMITTED[f] for b in TRANSMITTED[m]} for f in range(3) for m in range(3)}
+
+    if trios or pairs:
+        for line in sys.stdin:
+            fields = line.rstrip("\n").rstrip("\t").split("\t")
+            if len(fields) != 3 * len(order):
+                die(f"a bcftools query line has {len(fields)} fields, not 3 for each of {len(order)} samples")
+            d = [dosage(fields[3 * i], fields[3 * i + 1], fields[3 * i + 2]) for i in range(len(order))]
+            for t, (c, f, mo) in enumerate(trios):
+                dc, df, dm = d[index[c]], d[index[f]], d[index[mo]]
+                if dc is None or df is None or dm is None or dc + df + dm == 0:
+                    continue
+                trio_counts[t][0] += 1
+                if dc not in possible[(df, dm)]:
+                    trio_counts[t][1] += 1
+            for p, (c, parent) in enumerate(pairs):
+                dc, dp = d[index[c]], d[index[parent]]
+                if dc is None or dp is None or dc + dp == 0:
+                    continue
+                pair_counts[p][0] += 1
+                if abs(dc - dp) == 2:
+                    pair_counts[p][1] += 1
+
+    rows = [{"kind": "trio", "child": c, "father": f, "mother": m,
+             "informative_sites": n, "errors": e} for (c, f, m), (n, e) in zip(trios, trio_counts)]
+    for (c, parent), (n, e) in zip(pairs, pair_counts):
+        role = "father" if members[c]["father"] == parent else "mother"
+        rows.append({"kind": "pair", "child": c, "father": parent if role == "father" else ".",
+                     "mother": parent if role == "mother" else ".", "informative_sites": n, "errors": e})
+    write_tsv(args.out, MENDEL_COLUMNS, rows)
+
+
+def read_mendelian(path):
+    trios, pairs = {}, {}
+    if not path:
+        return trios, pairs
+    for row in read_tsv(path)[1]:
+        n, e = int(row["informative_sites"]), int(row["errors"])
+        rate = e / n if n else None
+        if row["kind"] == "trio":
+            trios[row["child"]] = (n, rate)
+        else:
+            parent = row["father"] if row["father"] != "." else row["mother"]
+            pairs[frozenset((row["child"], parent))] = (n, rate)
+    return trios, pairs
+
+
+# ---------------------------------------------------------------------------------------------
+# family
+# ---------------------------------------------------------------------------------------------
+
+def read_coverage(directory, sample, tag):
+    if not directory or tag in ("-", ""):
+        return None
+    path = os.path.join(directory, f"{sample}.{tag}.json")
+    if not os.path.exists(path):
+        die(f"{sample} has coverage {tag} in the snapshot, and no {path}")
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def flag_row(level, fid, a, b, flag):
+    name, severity, evidence = flag
+    return {"level": level, "family_id": fid, "sample_a": a, "sample_b": b or ".", "flag": name,
+            "severity": severity, "evidence": evidence}
+
+
+def cmd_family(args):
+    members = read_snapshot(args.snapshot)
+    fids = {m["fid"] for m in members.values()}
+    if len(fids) != 1:
+        die(f"{args.snapshot} holds the families {', '.join(sorted(fids))}, not one")
+    fid = fids.pop()
+    pedigree = Pedigree(members)
+    qc = [s for s, m in members.items() if m["somalier"]]
+
+    _, somalier_samples = read_tsv(args.somalier_samples)
+    by_sample = {r["sample_id"]: r for r in somalier_samples}
+    missing = [s for s in qc if s not in by_sample]
+    if missing:
+        die(f"somalier's samples.tsv has no row for {', '.join(missing)}")
+    trios, po = read_mendelian(args.mendelian)
+
+    samples, flags = [], []
+    for sample in qc:
+        record, sample_flags = sample_record(sample, members[sample], by_sample[sample],
+                                             read_coverage(args.coverage_dir, sample, members[sample]["coverage"]))
+        n, rate = trios.get(sample, (None, None))
+        record["trio_informative_sites"], record["trio_mendelian_error_rate"] = n, rate
+        samples.append(record)
+        flags += [flag_row("family", fid, sample, None, f) for f in sample_flags]
+
+    order = {s: i for i, s in enumerate(qc)}
+    pairs = []
+    for row in read_tsv(args.somalier_pairs)[1]:
+        a, b = row["sample_a"], row["sample_b"]
+        if a not in order or b not in order:
+            die(f"somalier's pairs.tsv has the pair {a} {b}, not both members of {fid} with an extract")
+        if order[a] > order[b]:
+            row = dict(row, sample_a=b, sample_b=a)
+            a, b = b, a
+        pair = observed_pair(row)
+        pair["family_id_a"] = pair["family_id_b"] = fid
+        pair["expected_kinship"] = pedigree.kinship(a, b)
+        pair["expected_relationship"] = pedigree.relationship(a, b)
+        n, rate = po.get(frozenset((a, b)), (None, None))
+        pair["po_informative_sites"], pair["po_opposite_hom_rate"] = n, rate
+        roles = (None, None)
+        if pair["expected_relationship"] == "parent-offspring":
+            parent, child = (a, b) if a in pedigree.parents[b] else (b, a)
+            roles = (parent, "{} of {}".format("father" if pedigree.parents[child][0] == parent else "mother", child))
+        flag = compare(pair, roles)
+        if flag is not None and flag[0] == "NOT_PARENT" and n is not None:
+            flag = flag[:2] + ("{}; opposite homozygotes at {} of {} sites in the family BCF".format(
+                flag[2], fmt(rate, 4), n),)
+        if flag is None and pair["observed_relationship"] == "parent-offspring" and n is not None and \
+                n >= MENDEL_MIN_SITES and rate > PO_OPPOSITE_HOM_MAX:
+            # The extracts, from the CRAMs, say parent and child; the family's calls, from the
+            # gVCFs, do not: one of the two is not the sample it is named after
+            flag = ("MENDELIAN_INCONSISTENT", "medium", "opposite homozygotes at {} of {} sites in the family "
+                    "BCF, against {} from the CRAMs".format(fmt(rate, 4), n, describe(pair)))
+        if pair["observed_relationship"] == "low_confidence":
+            pair["status"] = "low_confidence"
+        else:
+            pair["status"] = "ok" if flag is None else "mismatch"
+        if flag is not None:
+            flags.append(flag_row("family", fid, a, b, flag))
+        pairs.append(pair)
+    expected_pairs = len(qc) * (len(qc) - 1) // 2
+    if len(pairs) != expected_pairs:
+        die(f"somalier's pairs.tsv has {len(pairs)} pairs, {fid} has {expected_pairs}")
+    pairs.sort(key=lambda p: (order[p["sample_a"]], order[p["sample_b"]]))
+
+    # A member related to none of the relatives it should be is the likeliest swap. With a
+    # single such relative, as a parent of a swapped child has, it is the one flagged only
+    # when that relative is confirmed related to someone else of the family.
+    close_ok = set()
+    for p in pairs:
+        if DEGREE[p["expected_relationship"]] <= 2 and p["observed_relationship"] != "low_confidence" and \
+                DEGREE[p["observed_relationship"]] <= 2:
+            close_ok.update((p["sample_a"], p["sample_b"]))
+    for sample in qc:
+        close = [p for p in pairs if sample in (p["sample_a"], p["sample_b"]) and
+                 DEGREE[p["expected_relationship"]] <= 2 and p["observed_relationship"] != "low_confidence"]
+        others = [p["sample_b"] if p["sample_a"] == sample else p["sample_a"] for p in close]
+        if close and all(DEGREE[p["observed_relationship"]] >= 3 for p in close) and \
+                (len(others) >= 2 or any(o in close_ok for o in others)):
+            flags.append(flag_row("family", fid, sample, None, (
+                "SAMPLE_UNRELATED_TO_FAMILY", "high",
+                "related to none of {}, all expected within the second degree: a sample swap, or a "
+                "member of another family".format(", ".join(others)))))
+
+    attach_flags(samples, flags)
+    write_tsv(f"{args.out_prefix}.samples.tsv", SAMPLE_COLUMNS, samples)
+    write_tsv(f"{args.out_prefix}.pairs.tsv", PAIR_COLUMNS, pairs)
+    write_tsv(f"{args.out_prefix}.flags.tsv", FLAG_COLUMNS, flags)
+    summary(fid, samples, pairs, flags)
+
+
+def attach_flags(samples, flags):
+    by_sample = {}
+    for f in flags:
+        for s in (f["sample_a"], f["sample_b"]):
+            if s != ".":
+                by_sample.setdefault(s, []).append(f["flag"])
+    for record in samples:
+        names = by_sample.get(record["sample"], [])
+        record["flags"] = ",".join(sorted(set(names))) if names else "."
+
+
+def summary(name, samples, pairs, flags):
+    high = sum(1 for f in flags if f["severity"] == "high")
+    print(f"{name}: {len(samples)} samples, {len(pairs)} pairs, {len(flags)} flags ({high} high)")
+    for f in flags:
+        if f["severity"] == "high":
+            print("  {} {} {} {}".format(f["flag"], f["sample_a"], f["sample_b"], f["evidence"]))
+
+
+# ---------------------------------------------------------------------------------------------
+# cohort
+# ---------------------------------------------------------------------------------------------
+
+def read_family_tables(directory, label, kind):
+    rows = []
+    for path in sorted(glob.glob(os.path.join(directory, f"*.{label}.{kind}.tsv"))):
+        rows += read_tsv(path)[1]
+    return rows
+
+
+def cmd_cohort(args):
+    members = read_snapshot(args.snapshot)
+    qc = {s for s, m in members.items() if m["somalier"]}
+    samples = read_family_tables(args.family_dir, args.label, "samples")
+    pairs = read_family_tables(args.family_dir, args.label, "pairs")
+    flags = read_family_tables(args.family_dir, args.label, "flags")
+    tabled = {r["sample"] for r in samples}
+    if tabled != qc:
+        absent = sorted(qc - tabled) or sorted(tabled - qc)
+        die("the family tables do not hold exactly the cohort's samples with an extract: {}".format(
+            ", ".join(absent[:20])))
+
+    cohort_flags = []
+    cross = []
+    for row in read_tsv(args.somalier_pairs)[1]:
+        a, b = row["sample_a"], row["sample_b"]
+        if a not in qc or b not in qc:
+            die(f"somalier's pairs.tsv has {a if a not in qc else b}, which is not in the cohort snapshot")
+        fa, fb = members[a]["fid"], members[b]["fid"]
+        if fa == fb:
+            continue
+        pair = observed_pair(row)
+        if pair["observed_relationship"] in ("low_confidence", "unrelated"):
+            continue
+        if (fa, a) > (fb, b):
+            pair["sample_a"], pair["sample_b"] = b, a
+            fa, fb = fb, fa
+        pair.update(family_id_a=fa, family_id_b=fb, expected_kinship=0.0, expected_relationship="unrelated",
+                    status="mismatch")
+        cross.append(pair)
+        observed = pair["observed_relationship"]
+        evidence = "families {} and {}: {}".format(fa, fb, describe(pair))
+        if observed == "duplicate":
+            flag = ("DUPLICATE_OR_MZ", "high", evidence)
+        else:
+            flag = ("CRYPTIC_RELATED", "high" if DEGREE[observed] <= 2 else "medium", evidence)
+        cohort_flags.append(flag_row("cohort", f"{fa},{fb}", pair["sample_a"], pair["sample_b"], flag))
+    cross.sort(key=lambda p: (p["family_id_a"], p["sample_a"], p["family_id_b"], p["sample_b"]))
+
+    # A member unrelated to its own family, and close to someone of another one
+    unrelated = {f["sample_a"] for f in flags if f["flag"] == "SAMPLE_UNRELATED_TO_FAMILY"}
+    for sample in sorted(unrelated):
+        links = []
+        for p in cross:
+            if sample in (p["sample_a"], p["sample_b"]) and DEGREE[p["observed_relationship"]] <= 2:
+                other, ofid = (p["sample_b"], p["family_id_b"]) if p["sample_a"] == sample else \
+                    (p["sample_a"], p["family_id_a"])
+                links.append(f"{p['observed_relationship']} of {other} ({ofid})")
+        if links:
+            cohort_flags.append(flag_row("cohort", members[sample]["fid"], sample, None, (
+                "SAMPLE_SWAP_CANDIDATE", "high",
+                "unrelated to its family {}, but {}".format(members[sample]["fid"], "; ".join(links)))))
+
+    flags += cohort_flags
+    attach_flags(samples, flags)
+    write_tsv(f"{args.out_prefix}.samples.tsv", SAMPLE_COLUMNS, samples)
+    write_tsv(f"{args.out_prefix}.pairs.tsv", PAIR_COLUMNS, pairs + cross)
+    write_tsv(f"{args.out_prefix}.flags.tsv", FLAG_COLUMNS, flags)
+    summary(args.cohort, samples, pairs + cross, flags)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("mendelian", help="parent-child genotype counts from a family BCF, on stdin")
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--samples", required=True, help="the BCF's samples, comma-separated, in its order")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_mendelian)
+
+    p = sub.add_parser("family", help="one family's QC tables")
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--somalier-samples", required=True)
+    p.add_argument("--somalier-pairs", required=True)
+    p.add_argument("--coverage-dir")
+    p.add_argument("--mendelian")
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_family)
+
+    p = sub.add_parser("cohort", help="the cohort's QC tables")
+    p.add_argument("--cohort", required=True)
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--somalier-pairs", required=True)
+    p.add_argument("--family-dir", required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_cohort)
+
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
