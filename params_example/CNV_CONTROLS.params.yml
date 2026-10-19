@@ -1,0 +1,42 @@
+# Parameters of the dedicated controls cohort the CNV control panel is built from.
+#
+# The cohort holds the controls only, ~500 samples with a CRAM, and runs two steps: cnv_coverage
+# writes each control's normalised coverage, and cnv_panel builds from all of them the panel that
+# other cohorts fit against and that genetics-viz divides by:
+#     <data>/cohorts/CNV_CONTROLS/cnv_panel/v<cnv_panel_version>/
+# Every other cohort points cnv_panel_dir at that directory.
+#
+# A panel version is built once. Rerunning this file with the same version does nothing to the
+# panel, even after controls are added to the pedigree (the run warns about them): bump
+# cnv_panel_version to build a new panel beside the old one.
+
+cohort_name: "CNV_CONTROLS"
+
+steps: [
+    "cnv_coverage",
+    "cnv_panel",
+  ]
+
+data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
+scratch: "/pasteur/appa/scratch/ghfc"
+work_dir: "/pasteur/appa/scratch/ghfc/work-cnv-controls"
+
+# The pedigree, with the controls' sex, is read from its default location:
+#     <data>/cohorts/CNV_CONTROLS/CNV_CONTROLS.pedigree.tsv
+# Sex coded 1/2 (or 1.0/2.0); anything else is unknown, and keeps a control out of the XX and XY
+# groups.
+
+# The reference the CRAMs were aligned to, with its .fai
+ref: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/chr/GRCh38.fasta"
+ref_name: "GRCh38_GIABv3"
+
+# The samples' tag, cov_b<bin>q<mapq>: a cohort can only be fitted against a panel of its own tag
+cnv_cov_bin: 250
+cnv_cov_mapq: 1
+cnv_cov_round: 0.01
+
+cnv_panel_version: "1"
+cnv_panel_max_fit_mad: 0.3
+
+apptainer_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
+singularity_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"

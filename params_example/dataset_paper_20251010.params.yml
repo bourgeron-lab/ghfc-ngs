@@ -16,6 +16,7 @@ steps: [
     "wombat",
     # "extractor",
     # "ancestry",
+    # "cnv_coverage",
   ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
 
 # Input/Output paths
@@ -170,6 +171,18 @@ slurm_partition: "ghfc"
 # Container cache directory
 apptainer_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
 singularity_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
+
+# CNV coverage (step "cnv_coverage")
+# Normalised coverage of every sample for genetics-viz: samples/.../coverage/<ID>.cov_b250q1.{bw,json},
+# each bin 2 x depth / autosomal median (about 2 on a normal autosome, 1 for a heterozygous
+# deletion). cnv_cov_bin and cnv_cov_mapq make the tag cov_b<bin>q<mapq> in every file name, which
+# genetics-viz matches a sample to a panel by: keep them those of the panel.
+cnv_cov_bin: 250 # Bin size in bp (default: 250)
+cnv_cov_mapq: 1 # Minimum mapping quality (default: 1)
+cnv_cov_round: 0.01 # Precision of the stored values; not in the tag (default: 0.01)
+# A control panel to fit the cohort against, a version directory built by the cnv_panel step of the
+# controls cohort. Writes cohorts/<cohort>/coverage/<cohort>.cov_b250q1.panel_v<version>.fit.tsv.
+cnv_panel_dir: "" # e.g. /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/CNV_CONTROLS/cnv_panel/v1
 
 # Resource limits
 max_memory: "460.GB"

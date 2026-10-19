@@ -1,0 +1,701 @@
+#!/usr/bin/env python3
+
+"""Normalised coverage for CNV/SV viewing: per-sample bigWigs, a control panel, a cohort fit.
+
+Three subcommands, which share one bin grid, one notion of sex and one set of PAR coordinates.
+genetics-viz reads every file they write directly, so names, keys and value definitions are a
+contract: change none of them without changing the viewer.
+
+sample
+    From mosdepth's --by <bin> regions.bed.gz of one CRAM, writes <id>.cov_b<bin>q<mapq>.bw and
+    .json. The contigs are chr1-22, chrX and chrY, with the reference's lengths; the bins are
+    mosdepth's grid, from 0, the last bin of each contig truncated. Every bin is written, zeros
+    included, so that "no coverage" can be told from "no data". The value of a bin is
+    2 x depth / autosomal_median, rounded to --round and stored as float32: a normal autosome
+    reads about 2, a heterozygous deletion about 1, a male chrX outside the PARs about 1.
+
+    autosomal_median_depth  median depth of the chr1-22 bins with depth > 0, so that the N gaps
+                            do not pull it down
+    chrX_ratio              median normalised value / 2 over the non-PAR chrX bins with depth > 0
+    chrY_ratio              the same over the non-PAR chrY bins that are less than half N in
+                            the reference: depth > 0 there would leave an XX sample's ratio to
+                            its mismapped reads. About 1/0 for XX, 0.5/0.5 for XY.
+    frac_autosomal_bins_zero  fraction of all chr1-22 bins with depth 0, N gaps included
+
+    A bin is non-PAR when it overlaps no PAR.
+
+panel
+    From the sample files of a controls cohort, writes a versioned panel directory: per-bin median
+    and MAD (unscaled) of the controls' normalised values, for three groups - autosomes (chr1-22,
+    every retained control), XX (chrX, retained XX controls) and XY (chrX and chrY, retained XY
+    controls) - as panel.cov_b<bin>q<mapq>.<group>.<stat>.bw, with panel.json and controls.tsv.
+
+    Each control's fit is the MAD of log2(sample / median of the other controls) over the
+    autosomal bins where that median is at least 1. Controls above --max-fit-mad are excluded
+    from every group and the panel is computed again, once. A control enters a sex group only
+    when its pedigree sex and its coverage sex agree (female and XX, male and XY): a mismatch,
+    an aneuploidy or an unknown pedigree sex keeps it out of the sex groups only.
+
+fit
+    The same fit, of every sample of a cohort against a panel's autosomal median, as one row per
+    (family_id, sample) of the pedigree: a sample in two families has two rows.
+
+Coverage sex: X = 2 x chrX_ratio and Y = 2 x chrY_ratio estimate the copy numbers. Each must be
+within 0.25 of a whole number, or the sex is 'ambiguous'; otherwise it is spelled out, XX, XY,
+X0, XXY, XXX, XYY, ... A sample with no coverage file is 'unknown'.
+"""
+
+import argparse
+import json
+import math
+import multiprocessing
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyBigWig
+
+AUTOSOMES = ["chr{}".format(i) for i in range(1, 23)]
+CONTIGS = AUTOSOMES + ["chrX", "chrY"]
+
+# GRCh38, 1-based inclusive. With the no-alt analysis set the chrY PARs are N-masked, so the
+# PAR reads of both sexes land on chrX.
+PAR_GRCH38 = {
+    "chrX": {"PAR1": [10001, 2781479], "PAR2": [155701383, 156030895]},
+    "chrY": {"PAR1": [10001, 2781479], "PAR2": [56887903, 57217415]},
+}
+
+# Bins whose median of the other controls is below this are left out of a fit: a region the
+# panel itself barely covers says nothing about how well a sample matches it
+FIT_MIN_MEDIAN = 1.0
+# The fit's log2 ratios are binned at this resolution to take their median and MAD in one pass
+FIT_HIST_STEP = 0.001
+FIT_HIST_LIMIT = 16.0
+SEX_TOLERANCE = 0.25
+
+GROUPS = ("autosomes", "XX", "XY")
+STATS = ("median", "mad")
+
+
+def fail(message):
+    sys.exit("cnv_coverage: ERROR: {}".format(message))
+
+
+def log(message):
+    print("cnv_coverage: {}".format(message), file=sys.stderr, flush=True)
+
+
+def tag_of(bin_size, mapq):
+    return "cov_b{}q{}".format(bin_size, mapq)
+
+
+def par_block(par):
+    return {"build": "GRCh38", "coordinates": "1-based inclusive",
+            "chrX": par["chrX"], "chrY": par["chrY"]}
+
+
+# ---------------------------------------------------------------------------------------------
+# The grid
+# ---------------------------------------------------------------------------------------------
+
+def n_bins(length, bin_size):
+    return -(-length // bin_size)
+
+
+def read_fai(path):
+    fai = {}
+    with open(path) as handle:
+        for line in handle:
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) >= 5:
+                fai[cols[0]] = (int(cols[1]), int(cols[2]), int(cols[3]), int(cols[4]))
+    missing = [c for c in CONTIGS if c not in fai]
+    if missing:
+        fail("{} has no {}".format(path, ", ".join(missing)))
+    return fai
+
+
+def par_mask(chrom, length, bin_size, par):
+    """Bins overlapping a PAR of chrom."""
+    mask = np.zeros(n_bins(length, bin_size), dtype=bool)
+    for start, end in par.get(chrom, {}).values():
+        first = (int(start) - 1) // bin_size
+        last = (min(int(end), length) - 1) // bin_size
+        if first <= last:
+            mask[first:last + 1] = True
+    return mask
+
+
+def n_fraction(fasta, fai_entry, bin_size):
+    """Fraction of N in each bin of one contig, read through its .fai entry."""
+    length, offset, line_bases, line_width = fai_entry
+    n_bytes = (length // line_bases) * line_width + length % line_bases
+    with open(fasta, "rb") as handle:
+        handle.seek(offset)
+        seq = handle.read(n_bytes).translate(None, b"\r\n")
+    if len(seq) != length:
+        fail("{}: read {} bases of a {} bp contig".format(fasta, len(seq), length))
+    bases = np.frombuffer(seq, dtype=np.uint8)
+    is_n = (bases == ord("N")) | (bases == ord("n"))
+    nb = n_bins(length, bin_size)
+    padded = np.zeros(nb * bin_size, dtype=np.int32)
+    padded[:length] = is_n
+    counts = padded.reshape(nb, bin_size).sum(axis=1)
+    widths = np.full(nb, bin_size)
+    widths[-1] = length - (nb - 1) * bin_size
+    return counts / widths
+
+
+def write_bigwig(path, lengths, values, bin_size):
+    """One value per bin of every contig: fixedStep for the full bins, then the truncated last
+    bin as a bedGraph entry ending at the contig's end."""
+    bw = pyBigWig.open(str(path), "w")
+    bw.addHeader([(chrom, lengths[chrom]) for chrom in values])
+    for chrom, vals in values.items():
+        length = lengths[chrom]
+        vals = np.asarray(vals, dtype=np.float32)
+        full = length // bin_size
+        if full:
+            bw.addEntries(chrom, 0, values=vals[:full].astype(np.float64), span=bin_size, step=bin_size)
+        if length % bin_size:
+            bw.addEntries([chrom], [full * bin_size], ends=[length], values=[float(vals[full])])
+    bw.close()
+
+
+def read_bigwig_contig(path, chrom, length, bin_size):
+    """A contig's per-bin values, checked against the grid."""
+    bw = pyBigWig.open(str(path))
+    try:
+        intervals = bw.intervals(chrom) or ()
+    finally:
+        bw.close()
+    nb = n_bins(length, bin_size)
+    if len(intervals) != nb:
+        raise ValueError("{}: {} has {} bins, the grid {}".format(path, chrom, len(intervals), nb))
+    starts = np.fromiter((iv[0] for iv in intervals), dtype=np.int64, count=nb)
+    if not np.array_equal(starts, np.arange(nb, dtype=np.int64) * bin_size) or intervals[-1][1] != length:
+        raise ValueError("{}: {} is not on the {} bp grid".format(path, chrom, bin_size))
+    return np.fromiter((iv[2] for iv in intervals), dtype=np.float32, count=nb)
+
+
+def bigwig_lengths(path):
+    bw = pyBigWig.open(str(path))
+    try:
+        return dict(bw.chroms())
+    finally:
+        bw.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Pedigree and sex
+# ---------------------------------------------------------------------------------------------
+
+def read_pedigree(path):
+    """(family_id, sample, sex) per row, as main.nf's parsePedigreeFile reads it: a trailing .0
+    is dropped from the sex code, 1 is male, 2 female, anything else unknown."""
+    rows = []
+    with open(path) as handle:
+        for index, line in enumerate(handle):
+            line = line.rstrip("\n")
+            if line.startswith("#") or not line.strip():
+                continue
+            cols = line.split("\t")
+            if index == 0 and cols[0] == "FID":
+                continue
+            if len(cols) < 6:
+                fail("{}: pedigree row with {} columns instead of 6: {}".format(path, len(cols), line))
+            code = re.sub(r"\.0+$", "", cols[4].strip())
+            rows.append((cols[0], cols[1], {"1": "male", "2": "female"}.get(code, "unknown")))
+    return rows
+
+
+def coverage_sex(chrx_ratio, chry_ratio):
+    if chrx_ratio is None or chry_ratio is None:
+        return "unknown"
+    x, y = 2 * chrx_ratio, 2 * chry_ratio
+    nx, ny = int(round(x)), int(round(y))
+    if abs(x - nx) > SEX_TOLERANCE or abs(y - ny) > SEX_TOLERANCE or nx == 0:
+        return "ambiguous"
+    if nx == 1 and ny == 0:
+        return "X0"
+    return "X" * nx + "Y" * ny
+
+
+def expected_karyotype(pedigree_sex):
+    return {"female": "XX", "male": "XY"}.get(pedigree_sex)
+
+
+# ---------------------------------------------------------------------------------------------
+# sample
+# ---------------------------------------------------------------------------------------------
+
+def read_mosdepth(path, fai, bin_size):
+    df = pd.read_csv(path, sep="\t", header=None, usecols=[0, 1, 2, 3],
+                     names=["chrom", "start", "end", "depth"],
+                     dtype={"chrom": str, "start": np.int64, "end": np.int64, "depth": np.float64})
+    groups = df.groupby("chrom", sort=False).indices
+    depth = {}
+    for chrom in CONTIGS:
+        if chrom not in groups:
+            fail("{} has no {} bins".format(path, chrom))
+        rows = df.iloc[groups[chrom]]
+        length = fai[chrom][0]
+        nb = n_bins(length, bin_size)
+        starts = rows["start"].to_numpy()
+        ends = rows["end"].to_numpy()
+        expected = np.arange(nb, dtype=np.int64) * bin_size
+        if len(rows) != nb or not np.array_equal(starts, expected) or \
+                not np.array_equal(ends, np.minimum(expected + bin_size, length)):
+            fail("{}: {} is not on the {} bp grid of a {} bp contig - was mosdepth run with --by {}?"
+                 .format(path, chrom, bin_size, length, bin_size))
+        depth[chrom] = rows["depth"].to_numpy()
+    return depth
+
+
+def cmd_sample(args):
+    par = json.loads(args.par_json) if args.par_json else PAR_GRCH38
+    fai = read_fai(args.fai)
+    lengths = {chrom: fai[chrom][0] for chrom in CONTIGS}
+    depth = read_mosdepth(args.regions, fai, args.bin)
+
+    autosomal = np.concatenate([depth[chrom] for chrom in AUTOSOMES])
+    covered = autosomal[autosomal > 0]
+    if covered.size == 0:
+        fail("{}: no autosomal bin has any coverage".format(args.sample))
+    median = float(np.median(covered))
+
+    normalised = {chrom: 2.0 * depth[chrom] / median for chrom in CONTIGS}
+    stored = {chrom: (np.round(values / args.round) * args.round).astype(np.float32)
+              for chrom, values in normalised.items()}
+
+    x_bins = ~par_mask("chrX", lengths["chrX"], args.bin, par) & (depth["chrX"] > 0)
+    y_bins = ~par_mask("chrY", lengths["chrY"], args.bin, par) & \
+        (n_fraction(args.fasta, fai["chrY"], args.bin) < 0.5)
+    chrx = float(np.median(normalised["chrX"][x_bins])) / 2 if x_bins.any() else None
+    chry = float(np.median(normalised["chrY"][y_bins])) / 2 if y_bins.any() else None
+
+    tag = tag_of(args.bin, args.mapq)
+    prefix = "{}.{}".format(args.sample, tag)
+    write_bigwig("{}.bw".format(prefix), lengths, stored, args.bin)
+
+    version = args.mosdepth_version.strip()
+    version = version.split()[-1] if version else version
+    summary = {
+        "sample": args.sample,
+        "tag": tag,
+        "bin": args.bin,
+        "mapq": args.mapq,
+        "round": args.round,
+        "autosomal_median_depth": round(median, 4),
+        "mosdepth_version": version,
+        "reference": os.path.basename(args.fasta),
+        "frac_autosomal_bins_zero": round(float(np.mean(autosomal == 0)), 6),
+        "chrX_ratio": None if chrx is None else round(chrx, 4),
+        "chrY_ratio": None if chry is None else round(chry, 4),
+        "par": par_block(par),
+    }
+    with open("{}.json".format(prefix), "w") as handle:
+        json.dump(summary, handle, indent=2)
+        handle.write("\n")
+    log("{}: autosomal median depth {:.2f}, chrX ratio {}, chrY ratio {}, coverage sex {}".format(
+        args.sample, median, summary["chrX_ratio"], summary["chrY_ratio"],
+        coverage_sex(summary["chrX_ratio"], summary["chrY_ratio"])))
+
+
+# ---------------------------------------------------------------------------------------------
+# Order statistics and the fit
+# ---------------------------------------------------------------------------------------------
+
+def median_rows(sorted_part, n):
+    """Median of each row, from a partition that holds the middle order statistics."""
+    if n % 2:
+        return sorted_part[:, (n - 1) // 2]
+    return (sorted_part[:, n // 2 - 1] + sorted_part[:, n // 2]) / 2
+
+
+def median_and_mad(matrix):
+    """Per-bin median and unscaled MAD of a bins x samples matrix."""
+    n = matrix.shape[1]
+    middle = sorted({(n - 1) // 2, n // 2})
+    median = median_rows(np.partition(matrix, middle, axis=1), n).astype(np.float32)
+    deviation = np.abs(matrix - median[:, None])
+    mad = median_rows(np.partition(deviation, middle, axis=1), n).astype(np.float32)
+    return median, mad
+
+
+class Histogram:
+    """log2 ratios binned at FIT_HIST_STEP, for their median and MAD without keeping them."""
+
+    def __init__(self):
+        self.size = int(round(2 * FIT_HIST_LIMIT / FIT_HIST_STEP)) + 1
+        self.counts = np.zeros(self.size, dtype=np.int64)
+
+    def add(self, x):
+        index = np.rint((np.clip(x, -FIT_HIST_LIMIT, FIT_HIST_LIMIT) + FIT_HIST_LIMIT) / FIT_HIST_STEP)
+        self.counts += np.bincount(index.astype(np.int64), minlength=self.size)
+
+    def mad(self):
+        total = self.counts.sum()
+        if total == 0:
+            return None
+        centres = np.arange(self.size) * FIT_HIST_STEP - FIT_HIST_LIMIT
+        middle = centres[np.searchsorted(np.cumsum(self.counts), total / 2)]
+        distance = np.abs(centres - middle)
+        order = np.argsort(distance, kind="stable")
+        return float(distance[order][np.searchsorted(np.cumsum(self.counts[order]), total / 2)])
+
+
+def log_ratio(values, reference, floor):
+    keep = reference >= FIT_MIN_MEDIAN
+    return np.log2(np.maximum(values[keep], floor) / reference[keep])
+
+
+def leave_one_out_fits(matrix, histograms, floor):
+    """Add each control's log2 ratio to the median of the others into its histogram, and return
+    the median and MAD of all of them. The median without control i is, on each bin, one of the
+    two or three order statistics around the middle, picked by where control i's value falls:
+    removing a value at or below s[k] shifts s[k+1] into position k."""
+    n = matrix.shape[1]
+    m = n - 1
+    k0 = (m - 1) // 2 if m % 2 else m // 2 - 1
+    kth = sorted({min(k, n - 1) for k in (k0, k0 + 1, k0 + 2, (n - 1) // 2, n // 2)})
+    part = np.partition(matrix, kth, axis=1)
+
+    def without(values, k):
+        return np.where(values <= part[:, k], part[:, k + 1], part[:, k])
+
+    for i in range(n):
+        values = matrix[:, i]
+        if m % 2:
+            loo = without(values, k0)
+        else:
+            loo = (without(values, k0) + without(values, k0 + 1)) / 2
+        histograms[i].add(log_ratio(values, loo, floor))
+    median = median_rows(part, n).astype(np.float32)
+    mad = median_rows(np.partition(np.abs(matrix - median[:, None]), sorted({(n - 1) // 2, n // 2}), axis=1),
+                      n).astype(np.float32)
+    return median, mad
+
+
+def _read_task(task):
+    path, chrom, length, bin_size = task
+    return read_bigwig_contig(path, chrom, length, bin_size)
+
+
+def read_matrix(pool, paths, chrom, length, bin_size):
+    """bins x samples, one sample per column."""
+    columns = pool.map(_read_task, [(p, chrom, length, bin_size) for p in paths])
+    if not columns:
+        return np.zeros((n_bins(length, bin_size), 0), dtype=np.float32)
+    return np.ascontiguousarray(np.stack(columns, axis=1))
+
+
+# ---------------------------------------------------------------------------------------------
+# Inputs shared by panel and fit
+# ---------------------------------------------------------------------------------------------
+
+def load_samples(pedigree, input_dir, tag):
+    """Per pedigree sample, in pedigree order: its families, pedigree sex, and its sample JSON
+    and bigWig when both are among the inputs."""
+    samples = {}
+    for fid, sample, sex in pedigree:
+        entry = samples.setdefault(sample, {"families": [], "pedigree_sex": sex, "summary": None, "bw": None})
+        if fid not in entry["families"]:
+            entry["families"].append(fid)
+    for sample, entry in samples.items():
+        json_path = Path(input_dir) / "{}.{}.json".format(sample, tag)
+        bw_path = Path(input_dir) / "{}.{}.bw".format(sample, tag)
+        if json_path.exists() and bw_path.exists():
+            with open(json_path) as handle:
+                entry["summary"] = json.load(handle)
+            entry["bw"] = bw_path
+            entry["coverage_sex"] = coverage_sex(entry["summary"]["chrX_ratio"], entry["summary"]["chrY_ratio"])
+        else:
+            entry["coverage_sex"] = "unknown"
+    return samples
+
+
+def check_consistent(samples, tag):
+    """Every input on the same tag, reference and grid; returns (reference, round, lengths)."""
+    covered = [(s, e) for s, e in samples.items() if e["summary"]]
+    if not covered:
+        fail("no sample has a {} coverage file".format(tag))
+    for key in ("tag", "reference"):
+        values = sorted({str(e["summary"][key]) for _, e in covered})
+        if len(values) > 1:
+            fail("the inputs mix {} values: {}".format(key, ", ".join(values)))
+    if covered[0][1]["summary"]["tag"] != tag:
+        fail("the inputs are {}, not {}".format(covered[0][1]["summary"]["tag"], tag))
+    rounds = sorted({float(e["summary"]["round"]) for _, e in covered})
+    if len(rounds) > 1:
+        log("WARNING: the inputs were rounded differently: {}".format(", ".join(map(str, rounds))))
+    lengths = bigwig_lengths(covered[0][1]["bw"])
+    for sample, entry in covered:
+        if bigwig_lengths(entry["bw"]) != lengths:
+            fail("{}'s bigWig does not have the contigs of {}'s".format(sample, covered[0][0]))
+    if set(lengths) != set(CONTIGS):
+        fail("the bigWigs hold {}, not chr1-22, chrX and chrY".format(", ".join(lengths)))
+    lengths = {chrom: lengths[chrom] for chrom in CONTIGS}
+    return covered[0][1]["summary"]["reference"], max(rounds), lengths
+
+
+def fmt(value, digits=4):
+    if value is None:
+        return "NA"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return "{:.{}f}".format(value, digits).rstrip("0").rstrip(".") if math.isfinite(value) else "NA"
+    return str(value)
+
+
+def bin_size_of(tag):
+    match = re.fullmatch(r"cov_b(\d+)q(\d+)", tag)
+    if not match:
+        fail("'{}' is not a cov_b<bin>q<mapq> tag".format(tag))
+    return int(match.group(1)), int(match.group(2))
+
+
+# ---------------------------------------------------------------------------------------------
+# panel
+# ---------------------------------------------------------------------------------------------
+
+def cmd_panel(args):
+    par = json.loads(args.par_json) if args.par_json else PAR_GRCH38
+    bin_size, mapq = bin_size_of(args.tag)
+    out_dir = Path(args.out_dir)
+    if out_dir.exists():
+        fail("{} already exists: a panel version is never overwritten".format(out_dir))
+
+    samples = load_samples(read_pedigree(args.pedigree), args.input_dir, args.tag)
+    reference, floor, lengths = check_consistent(samples, args.tag)
+
+    reasons = {sample: [] for sample in samples}
+    for sample, entry in samples.items():
+        if not entry["summary"]:
+            reasons[sample].append("no coverage")
+    controls = [s for s, e in samples.items() if e["summary"]]
+    if len(controls) < 3:
+        fail("{} controls have coverage, and a panel needs at least 3".format(len(controls)))
+    paths = {s: samples[s]["bw"] for s in controls}
+
+    pool = multiprocessing.Pool(args.threads)
+    try:
+        # Each control's fit against the others, over the autosomes, keeping the panel of every
+        # control in case nobody is excluded
+        histograms = [Histogram() for _ in controls]
+        auto_stats = {}
+        for chrom in AUTOSOMES:
+            matrix = read_matrix(pool, [paths[s] for s in controls], chrom, lengths[chrom], bin_size)
+            auto_stats[chrom] = leave_one_out_fits(matrix, histograms, floor)
+            log("fit pass: {} done".format(chrom))
+        fit_mad = {s: h.mad() for s, h in zip(controls, histograms)}
+
+        retained = []
+        for sample in controls:
+            if fit_mad[sample] is None or fit_mad[sample] > args.max_fit_mad:
+                reasons[sample].append("fit_mad {} > {}".format(fmt(fit_mad[sample]), fmt(args.max_fit_mad)))
+                log("excluded {}: fit_mad {} above {}".format(sample, fmt(fit_mad[sample]), args.max_fit_mad))
+            else:
+                retained.append(sample)
+        if len(retained) < 3:
+            fail("{} controls are left after the fit QC, and a panel needs at least 3".format(len(retained)))
+
+        if len(retained) < len(controls):
+            log("{} controls excluded on fit_mad: computing the autosomes again over {}".format(
+                len(controls) - len(retained), len(retained)))
+            for chrom in AUTOSOMES:
+                auto_stats[chrom] = median_and_mad(
+                    read_matrix(pool, [paths[s] for s in retained], chrom, lengths[chrom], bin_size))
+
+        groups = {"XX": [], "XY": []}
+        for sample in retained:
+            entry = samples[sample]
+            expected = expected_karyotype(entry["pedigree_sex"])
+            if expected is None:
+                reasons[sample].append("sex panel: pedigree sex unknown")
+            elif entry["coverage_sex"] != expected:
+                reasons[sample].append("sex panel: pedigree {}, coverage {}".format(
+                    entry["pedigree_sex"], entry["coverage_sex"]))
+            else:
+                groups[expected].append(sample)
+                continue
+            log("left out of the sex panels: {} ({})".format(sample, reasons[sample][-1]))
+        for group, members in groups.items():
+            if not members:
+                fail("no control is left for the {} group".format(group))
+
+        stats = {"autosomes": auto_stats}
+        sex_stats = {"XX": {}, "XY": {}}
+        both = groups["XX"] + groups["XY"]
+        chrx = read_matrix(pool, [paths[s] for s in both], "chrX", lengths["chrX"], bin_size)
+        sex_stats["XX"]["chrX"] = median_and_mad(chrx[:, :len(groups["XX"])])
+        sex_stats["XY"]["chrX"] = median_and_mad(chrx[:, len(groups["XX"]):])
+        del chrx
+        sex_stats["XY"]["chrY"] = median_and_mad(
+            read_matrix(pool, [paths[s] for s in groups["XY"]], "chrY", lengths["chrY"], bin_size))
+        stats.update(sex_stats)
+    finally:
+        pool.close()
+        pool.join()
+
+    out_dir.mkdir(parents=True)
+    for group in GROUPS:
+        for index, stat in enumerate(STATS):
+            write_bigwig(out_dir / "panel.{}.{}.{}.bw".format(args.tag, group, stat), lengths,
+                         {chrom: pair[index] for chrom, pair in stats[group].items()}, bin_size)
+
+    n_controls = {"autosomes": len(retained), "XX": len(groups["XX"]), "XY": len(groups["XY"])}
+    panel = {
+        "panel_version": args.version,
+        "tag": args.tag,
+        "bin": bin_size,
+        "mapq": mapq,
+        "reference": reference,
+        "created": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "source_cohort": args.cohort,
+        "n_controls": n_controls,
+        "mad_scale": 1.0,
+        "max_fit_mad": args.max_fit_mad,
+        "par": par_block(par),
+        "expected_ploidy": {
+            "autosomes": 2,
+            "XX": {"chrX": 2},
+            "XY": {"chrX": {"non_par": 1, "par": 2}, "chrY": {"non_par": 1}},
+        },
+    }
+    with open(out_dir / "panel.json", "w") as handle:
+        json.dump(panel, handle, indent=2)
+        handle.write("\n")
+
+    in_sex = set(both)
+    retained_set = set(retained)
+    with open(out_dir / "controls.tsv", "w") as handle:
+        handle.write("\t".join(["family_id", "sample", "pedigree_sex", "coverage_sex", "in_autosomes",
+                                "in_sex_panel", "autosomal_median_depth", "chrX_ratio", "chrY_ratio",
+                                "fit_mad", "exclusion_reason"]) + "\n")
+        for sample, entry in samples.items():
+            summary = entry["summary"] or {}
+            handle.write("\t".join([
+                ",".join(entry["families"]), sample, entry["pedigree_sex"], entry["coverage_sex"],
+                fmt(sample in retained_set), fmt(sample in in_sex),
+                fmt(summary.get("autosomal_median_depth")), fmt(summary.get("chrX_ratio")),
+                fmt(summary.get("chrY_ratio")), fmt(fit_mad.get(sample)),
+                "; ".join(reasons[sample]),
+            ]) + "\n")
+    log("panel v{}: {} autosomes, {} XX, {} XY controls".format(
+        args.version, n_controls["autosomes"], n_controls["XX"], n_controls["XY"]))
+
+
+# ---------------------------------------------------------------------------------------------
+# fit
+# ---------------------------------------------------------------------------------------------
+
+_PANEL = {}
+
+
+def _load_panel(panel_median, lengths, bin_size):
+    _PANEL.clear()
+    for chrom in AUTOSOMES:
+        _PANEL[chrom] = read_bigwig_contig(panel_median, chrom, lengths[chrom], bin_size)
+
+
+def _fit_task(task):
+    path, lengths, bin_size, floor = task
+    histogram = Histogram()
+    for chrom in AUTOSOMES:
+        histogram.add(log_ratio(read_bigwig_contig(path, chrom, lengths[chrom], bin_size), _PANEL[chrom], floor))
+    return histogram.mad()
+
+
+def cmd_fit(args):
+    panel_dir = Path(args.panel_dir)
+    with open(panel_dir / "panel.json") as handle:
+        panel = json.load(handle)
+    if panel["tag"] != args.tag:
+        fail("the panel is {}, the cohort {}".format(panel["tag"], args.tag))
+    bin_size, _ = bin_size_of(args.tag)
+    panel_median = panel_dir / "panel.{}.autosomes.median.bw".format(args.tag)
+
+    pedigree = read_pedigree(args.pedigree)
+    samples = load_samples(pedigree, args.input_dir, args.tag)
+    reference, floor, lengths = check_consistent(samples, args.tag)
+    if reference != panel["reference"]:
+        log("WARNING: the cohort is on {}, the panel on {}".format(reference, panel["reference"]))
+    if bigwig_lengths(panel_median) != {chrom: lengths[chrom] for chrom in AUTOSOMES}:
+        fail("the panel's contigs are not the cohort's")
+
+    covered = [s for s, e in samples.items() if e["summary"]]
+    pool = multiprocessing.Pool(args.threads, initializer=_load_panel, initargs=(panel_median, lengths, bin_size))
+    try:
+        mads = dict(zip(covered, pool.map(_fit_task, [(samples[s]["bw"], lengths, bin_size, floor) for s in covered])))
+    finally:
+        pool.close()
+        pool.join()
+
+    with open(args.out, "w") as handle:
+        handle.write("\t".join(["family_id", "sample", "pedigree_sex", "coverage_sex", "fit_mad",
+                                "chrX_ratio", "chrY_ratio"]) + "\n")
+        seen = set()
+        for fid, sample, sex in pedigree:
+            entry = samples[sample]
+            if not entry["summary"] or (fid, sample) in seen:
+                continue
+            seen.add((fid, sample))
+            handle.write("\t".join([fid, sample, sex, entry["coverage_sex"], fmt(mads[sample]),
+                                    fmt(entry["summary"]["chrX_ratio"]), fmt(entry["summary"]["chrY_ratio"])]) + "\n")
+    missing = [s for s, e in samples.items() if not e["summary"]]
+    if missing:
+        log("WARNING: {} samples have no coverage file and no row: {}".format(len(missing), ", ".join(missing[:20])))
+    log("fit of {} samples against panel v{}".format(len(covered), panel["panel_version"]))
+
+
+# ---------------------------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    par_help = "PAR coordinates as JSON, {\"chrX\": {\"PAR1\": [start, end], ...}, \"chrY\": {...}}; for tests"
+
+    sample = sub.add_parser("sample", help="one sample's bigWig and JSON from mosdepth's regions")
+    sample.add_argument("--regions", required=True, help="mosdepth <prefix>.regions.bed.gz")
+    sample.add_argument("--fasta", required=True, help="the reference, for its basename and chrY's N")
+    sample.add_argument("--fai", required=True)
+    sample.add_argument("--sample", required=True)
+    sample.add_argument("--bin", type=int, required=True)
+    sample.add_argument("--mapq", type=int, required=True)
+    sample.add_argument("--round", type=float, required=True)
+    sample.add_argument("--mosdepth-version", default="")
+    sample.add_argument("--par-json", default="", help=par_help)
+
+    panel = sub.add_parser("panel", help="a control panel from a cohort's sample files")
+    panel.add_argument("--pedigree", required=True)
+    panel.add_argument("--input-dir", required=True, help="the samples' <id>.<tag>.{bw,json}")
+    panel.add_argument("--tag", required=True)
+    panel.add_argument("--cohort", required=True)
+    panel.add_argument("--version", required=True)
+    panel.add_argument("--max-fit-mad", type=float, required=True)
+    panel.add_argument("--out-dir", required=True, help="the version directory, which must not exist")
+    panel.add_argument("--threads", type=int, default=1)
+    panel.add_argument("--par-json", default="", help=par_help)
+
+    fit = sub.add_parser("fit", help="every sample of a cohort fitted against a panel")
+    fit.add_argument("--pedigree", required=True)
+    fit.add_argument("--input-dir", required=True, help="the samples' <id>.<tag>.{bw,json}")
+    fit.add_argument("--tag", required=True)
+    fit.add_argument("--panel-dir", required=True, help="a panel version directory")
+    fit.add_argument("--out", required=True)
+    fit.add_argument("--threads", type=int, default=1)
+
+    args = parser.parse_args()
+    if getattr(args, "round", 1) <= 0:
+        fail("--round must be above 0")
+    {"sample": cmd_sample, "panel": cmd_panel, "fit": cmd_fit}[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+
+# Self-contained check of cnv_coverage.
+#
+# A reference of tiny chr1-22, chrX and chrY (an N block on chrY, PARs scaled to fit) and
+# synthetic mosdepth regions files for XX, XY and XXY samples, a sample with a sex mismatch,
+# one with no pedigree sex, a noisy one, one that is mostly gaps, and a pedigree with one sample
+# in two families and one with no coverage file, its sex codes written 1.0 / 2.0 / -9.0.
+#
+# sample: the grid (bin count, truncated last bin, zeros written, only chr1-22/X/Y), the
+#   normalisation and rounding, a median that ignores zero bins, both ratios and the exact keys.
+# panel: per-bin median and MAD against a brute-force computation, leave-one-out fit_mad, the
+#   noisy control excluded and the panel computed without it, the sex groups and the exclusions
+#   from them, controls.tsv, panel.json, and the refusals: an existing version directory, mixed
+#   references.
+# fit: a row per (family_id, sample), its columns, fit_mad against brute force, a tag refusal.
+#
+# Needs python3 with numpy, pandas and pyBigWig (PYTHON to use another interpreter).
+#
+#   modules/cnv/scripts/cnv_coverage_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/cnv_coverage"
+python=${PYTHON:-python3}
+if ! "${python}" -c 'import numpy, pandas, pyBigWig' 2> /dev/null; then
+    echo "cnv_coverage_test: ${python} needs numpy, pandas and pyBigWig (pip install numpy pandas pyBigWig)" >&2
+    exit 1
+fi
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+PAR='{"chrX": {"PAR1": [1, 1000], "PAR2": [19001, 20030]}, "chrY": {"PAR1": [1, 1000], "PAR2": [14001, 15010]}}'
+
+# The reference, the pedigree and every sample's mosdepth regions
+"${python}" - <<'PY'
+import gzip
+import numpy as np
+
+BIN = 100
+lengths = {"chr{}".format(i): 10050 for i in range(1, 23)}
+lengths.update({"chrX": 20030, "chrY": 15010, "chrM": 1600, "chrUn_decoy": 450})
+
+seqs = {}
+rng = np.random.default_rng(1)
+for chrom, length in lengths.items():
+    seq = bytearray(rng.choice(np.frombuffer(b"ACGT", dtype=np.uint8), size=length).tobytes())
+    if chrom == "chrY":
+        # The N-masked PARs of the no-alt set, and a heterochromatic block
+        seq[0:1000] = b"N" * 1000
+        seq[14000:] = b"N" * (length - 14000)
+        seq[5000:12000] = b"N" * 7000
+    seqs[chrom] = bytes(seq)
+with open("ref.fa", "w") as fa, open("ref.fa.fai", "w") as fai:
+    offset = 0
+    for chrom, seq in seqs.items():
+        header = ">{}\n".format(chrom)
+        offset += len(header)
+        fa.write(header)
+        body = "".join(seq[i:i + 60].decode() + "\n" for i in range(0, len(seq), 60))
+        fa.write(body)
+        fai.write("{}\t{}\t{}\t60\t61\n".format(chrom, len(seq), offset))
+        offset += len(body)
+
+with open("ped.tsv", "w") as ped:
+    ped.write("FID\tbarcode\tfather\tmother\tsex\tphenotype\n")
+    for fid, sample, sex in [("FAMA", "F1", "2.0"), ("FAMB", "F1", "2"), ("FAMA", "F2", "2.0"),
+                             ("FAMC", "F3", "2"), ("FAMC", "M1", "1.0"), ("FAMD", "M2", "1"),
+                             ("FAMD", "M3", "1.0"), ("FAME", "K1", "1"), ("FAME", "W1", "2.0"),
+                             ("FAMF", "U1", "-9.0"), ("FAMF", "N1", "2"), ("FAMG", "Z1", "1")]:
+        ped.write("{}\t{}\t0\t0\t{}\t1\n".format(fid, sample, sex))
+
+def par_bins(chrom):
+    nb = -(-lengths[chrom] // BIN)
+    mask = np.zeros(nb, bool)
+    for start, end in {"chrX": [(1, 1000), (19001, 20030)], "chrY": [(1, 1000), (14001, 15010)]}[chrom]:
+        mask[(start - 1) // BIN:(end - 1) // BIN + 1] = True
+    return mask
+
+def profile(seed, x_copies, y_copies, noisy=False, gappy=False):
+    rng = np.random.default_rng(seed)
+    depth = {}
+    for chrom, length in lengths.items():
+        nb = -(-length // BIN)
+        if chrom.startswith("chrUn") or chrom == "chrM":
+            depth[chrom] = np.full(nb, 500.0)
+            continue
+        base = np.full(nb, 30.0)
+        if chrom == "chrX":
+            base[~par_bins("chrX")] = 15.0 * x_copies
+        if chrom == "chrY":
+            base[:] = 15.0 * y_copies
+            base[par_bins("chrY")] = 0
+            base[50:120] = 0
+            if y_copies == 0:
+                base[20:23] = 6.0   # a few mismapped reads
+        if chrom == "chr1":
+            base[:5] = 0            # an N gap
+        if chrom == "chr2":
+            base[10:20] = 15.0      # a heterozygous deletion
+        if chrom == "chr3":
+            base[10:13] = 0         # a homozygous deletion
+        if gappy and chrom in ["chr{}".format(i) for i in range(1, 15)]:
+            base[:] = 0
+        noise = rng.normal(1, 0.05, nb)
+        if noisy:
+            noise = np.where(np.arange(nb) % 2, 0.35, 1.65) * rng.normal(1, 0.05, nb)
+        depth[chrom] = np.round(np.maximum(base * noise, 0), 2)
+    return depth
+
+samples = {"F1": (1, 2, 0), "F2": (2, 2, 0), "F3": (3, 2, 0), "M1": (4, 1, 1), "M2": (5, 1, 1),
+           "M3": (6, 1, 1), "K1": (7, 2, 1), "W1": (8, 1, 1), "U1": (9, 2, 0), "N1": (10, 2, 0)}
+for sample, (seed, nx, ny) in list(samples.items()) + [("GAPPY", (11, 2, 0))]:
+    depth = profile(seed, nx, ny, noisy=sample == "N1", gappy=sample == "GAPPY")
+    np.savez("{}.depth.npz".format(sample), **depth)
+    with gzip.open("{}.regions.bed.gz".format(sample), "wt") as out:
+        for chrom, values in depth.items():
+            for i, value in enumerate(values):
+                out.write("{}\t{}\t{}\t{:.2f}\n".format(chrom, i * BIN, min((i + 1) * BIN, lengths[chrom]), value))
+PY
+
+mkdir inputs
+for s in F1 F2 F3 M1 M2 M3 K1 W1 U1 N1 GAPPY; do
+    "${python}" "${script}" sample --regions "${s}.regions.bed.gz" --fasta ref.fa --fai ref.fa.fai \
+        --sample "${s}" --bin 100 --mapq 1 --round 0.01 --mosdepth-version "mosdepth 0.3.11" --par-json "${PAR}" \
+        2> "${s}.log" || { cat "${s}.log"; exit 1; }
+    mv "${s}.cov_b100q1.bw" "${s}.cov_b100q1.json" inputs/
+done
+mkdir gappy
+mv inputs/GAPPY.* gappy/
+
+# --- sample ----------------------------------------------------------------------------------
+"${python}" - <<'PY'
+import json
+import numpy as np
+import pyBigWig
+
+BIN = 100
+AUTOSOMES = ["chr{}".format(i) for i in range(1, 23)]
+fail = []
+def check(cond, what):
+    if not cond:
+        fail.append(what)
+
+keys = ["sample", "tag", "bin", "mapq", "round", "autosomal_median_depth", "mosdepth_version", "reference",
+        "frac_autosomal_bins_zero", "chrX_ratio", "chrY_ratio", "par"]
+expected_ratios = {"F1": (1, 0), "M1": (0.5, 0.5), "K1": (1, 0.5), "U1": (1, 0)}
+for sample in ["F1", "M1", "K1", "U1", "GAPPY"]:
+    where = "gappy" if sample == "GAPPY" else "inputs"
+    summary = json.load(open("{}/{}.cov_b100q1.json".format(where, sample)))
+    depth = np.load("{}.depth.npz".format(sample))
+    check(list(summary) == keys, "{}: JSON keys {}".format(sample, list(summary)))
+    check(summary["tag"] == "cov_b100q1" and summary["bin"] == 100 and summary["mapq"] == 1 and summary["round"] == 0.01,
+          "{}: tag, bin, mapq, round".format(sample))
+    check(summary["mosdepth_version"] == "0.3.11", "{}: mosdepth_version {}".format(sample, summary["mosdepth_version"]))
+    check(summary["reference"] == "ref.fa", "{}: reference".format(sample))
+    check(summary["par"]["build"] == "GRCh38" and summary["par"]["chrY"]["PAR2"] == [14001, 15010], "{}: par".format(sample))
+    auto = np.concatenate([depth[c] for c in AUTOSOMES])
+    median = np.median(auto[auto > 0])
+    check(abs(summary["autosomal_median_depth"] - median) < 1e-3,
+          "{}: median {} != {} (zero bins must be left out)".format(sample, summary["autosomal_median_depth"], median))
+    check(abs(summary["frac_autosomal_bins_zero"] - np.mean(auto == 0)) < 1e-6, "{}: frac zero".format(sample))
+    if sample in expected_ratios:
+        x, y = expected_ratios[sample]
+        check(abs(summary["chrX_ratio"] - x) < 0.05, "{}: chrX_ratio {} not ~{}".format(sample, summary["chrX_ratio"], x))
+        check(abs(summary["chrY_ratio"] - y) < 0.05, "{}: chrY_ratio {} not ~{}".format(sample, summary["chrY_ratio"], y))
+
+    bw = pyBigWig.open("{}/{}.cov_b100q1.bw".format(where, sample))
+    chroms = bw.chroms()
+    check(set(chroms) == set(AUTOSOMES + ["chrX", "chrY"]), "{}: contigs {}".format(sample, sorted(chroms)))
+    for chrom, length in chroms.items():
+        ivs = bw.intervals(chrom)
+        nb = -(-length // BIN)
+        check(len(ivs) == nb, "{} {}: {} bins, not {}".format(sample, chrom, len(ivs), nb))
+        check([iv[0] for iv in ivs] == [i * BIN for i in range(nb)], "{} {}: starts".format(sample, chrom))
+        check(ivs[-1][1] == length and ivs[-2][1] == (nb - 1) * BIN, "{} {}: last bin not truncated".format(sample, chrom))
+        values = np.array([iv[2] for iv in ivs])
+        check(np.allclose(values, 2 * depth[chrom] / summary["autosomal_median_depth"], atol=0.0051),
+              "{} {}: values are not 2 x depth / median".format(sample, chrom))
+        check(np.allclose(values * 100, np.round(values * 100), atol=1e-3), "{} {}: not rounded to 0.01".format(sample, chrom))
+    if sample == "F1":
+        chr3 = [iv[2] for iv in bw.intervals("chr3")]
+        check(chr3[10:13] == [0.0, 0.0, 0.0], "F1: the homozygous deletion is not written as 0")
+        chr2 = np.array([iv[2] for iv in bw.intervals("chr2")])
+        check(abs(np.median(chr2[10:20]) - 1) < 0.1, "F1: the heterozygous deletion does not read about 1")
+    bw.close()
+
+if fail:
+    print("\n".join("  FAIL  sample: " + f for f in fail))
+    raise SystemExit(1)
+print("  ok    sample")
+PY
+
+# Coverage sex as logged
+grep -q "coverage sex XXY" K1.log || { echo "  FAIL  sample: K1 is not called XXY"; cat K1.log; exit 1; }
+
+# --- panel -----------------------------------------------------------------------------------
+"${python}" "${script}" panel --pedigree ped.tsv --input-dir inputs --tag cov_b100q1 --cohort CONTROLS \
+    --version 7 --max-fit-mad 0.3 --out-dir v7 --threads 2 --par-json "${PAR}" 2> panel.log || { cat panel.log; exit 1; }
+
+"${python}" - <<'PY'
+import csv
+import json
+import numpy as np
+import pyBigWig
+
+AUTOSOMES = ["chr{}".format(i) for i in range(1, 23)]
+fail = []
+def check(cond, what):
+    if not cond:
+        fail.append(what)
+
+def values(path, chrom):
+    bw = pyBigWig.open(path)
+    v = np.array([iv[2] for iv in bw.intervals(chrom)], dtype=np.float64)
+    bw.close()
+    return v
+
+def sample_values(sample, chrom):
+    return values("inputs/{}.cov_b100q1.bw".format(sample), chrom)
+
+def fit_mad(sample, others, reference=None):
+    xs = []
+    for chrom in AUTOSOMES:
+        mine = sample_values(sample, chrom)
+        if reference is None:
+            ref = np.median(np.stack([sample_values(o, chrom) for o in others]), axis=0)
+        else:
+            ref = reference[chrom]
+        keep = ref >= 1.0
+        xs.append(np.log2(np.maximum(mine[keep], 0.01) / ref[keep]))
+    x = np.concatenate(xs)
+    return np.median(np.abs(x - np.median(x)))
+
+import os
+files = sorted(os.listdir("v7"))
+expected_files = sorted(["panel.json", "controls.tsv"] + ["panel.cov_b100q1.{}.{}.bw".format(g, s)
+                         for g in ("autosomes", "XX", "XY") for s in ("median", "mad")])
+check(files == expected_files, "files {}".format(files))
+
+covered = ["F1", "F2", "F3", "M1", "M2", "M3", "K1", "W1", "U1", "N1"]
+retained = [s for s in covered if s != "N1"]
+groups = {"autosomes": (retained, AUTOSOMES), "XX": (["F1", "F2", "F3"], ["chrX"]),
+          "XY": (["M1", "M2", "M3"], ["chrX", "chrY"])}
+for group, (members, chroms) in groups.items():
+    for stat in ("median", "mad"):
+        path = "v7/panel.cov_b100q1.{}.{}.bw".format(group, stat)
+        bw = pyBigWig.open(path)
+        check(set(bw.chroms()) == set(chroms), "{} {}: contigs {}".format(group, stat, sorted(bw.chroms())))
+        bw.close()
+    for chrom in chroms:
+        matrix = np.stack([sample_values(s, chrom) for s in members]).astype(np.float32)
+        median = np.median(matrix, axis=0)
+        mad = np.median(np.abs(matrix - median), axis=0)
+        got_median = values("v7/panel.cov_b100q1.{}.median.bw".format(group), chrom)
+        got_mad = values("v7/panel.cov_b100q1.{}.mad.bw".format(group), chrom)
+        check(np.allclose(got_median, median, atol=1e-5), "{} {}: median".format(group, chrom))
+        check(np.allclose(got_mad, mad, atol=1e-5), "{} {}: mad".format(group, chrom))
+
+panel = json.load(open("v7/panel.json"))
+check(list(panel) == ["panel_version", "tag", "bin", "mapq", "reference", "created", "source_cohort", "n_controls",
+                      "mad_scale", "max_fit_mad", "par", "expected_ploidy"], "panel.json keys {}".format(list(panel)))
+check(panel["panel_version"] == "7" and panel["tag"] == "cov_b100q1" and panel["bin"] == 100 and panel["mapq"] == 1,
+      "panel.json version, tag, bin, mapq")
+check(panel["reference"] == "ref.fa" and panel["source_cohort"] == "CONTROLS" and panel["mad_scale"] == 1.0,
+      "panel.json reference, source_cohort, mad_scale")
+check(panel["n_controls"] == {"autosomes": 9, "XX": 3, "XY": 3}, "n_controls {}".format(panel["n_controls"]))
+check(panel["expected_ploidy"] == {"autosomes": 2, "XX": {"chrX": 2},
+                                   "XY": {"chrX": {"non_par": 1, "par": 2}, "chrY": {"non_par": 1}}}, "expected_ploidy")
+
+rows = list(csv.DictReader(open("v7/controls.tsv"), delimiter="\t"))
+check(list(rows[0]) == ["family_id", "sample", "pedigree_sex", "coverage_sex", "in_autosomes", "in_sex_panel",
+                        "autosomal_median_depth", "chrX_ratio", "chrY_ratio", "fit_mad", "exclusion_reason"],
+      "controls.tsv columns {}".format(list(rows[0])))
+by = {r["sample"]: r for r in rows}
+check([r["sample"] for r in rows] == ["F1", "F2", "F3", "M1", "M2", "M3", "K1", "W1", "U1", "N1", "Z1"],
+      "controls.tsv rows {}".format([r["sample"] for r in rows]))
+check(by["F1"]["family_id"] == "FAMA,FAMB", "F1's families {}".format(by["F1"]["family_id"]))
+expect = {
+    "F1": ("female", "XX", "true", "true", ""),
+    "M1": ("male", "XY", "true", "true", ""),
+    "K1": ("male", "XXY", "true", "false", "sex panel: pedigree male, coverage XXY"),
+    "W1": ("female", "XY", "true", "false", "sex panel: pedigree female, coverage XY"),
+    "U1": ("unknown", "XX", "true", "false", "sex panel: pedigree sex unknown"),
+    "N1": ("female", None, "false", "false", "fit_mad "),
+    "Z1": ("male", "unknown", "false", "false", "no coverage"),
+}
+for sample, (ped, cov, auto, sex, reason) in expect.items():
+    row = by[sample]
+    check(row["pedigree_sex"] == ped, "{}: pedigree_sex {}".format(sample, row["pedigree_sex"]))
+    if cov:
+        check(row["coverage_sex"] == cov, "{}: coverage_sex {}".format(sample, row["coverage_sex"]))
+    check(row["in_autosomes"] == auto and row["in_sex_panel"] == sex, "{}: in_autosomes/in_sex_panel".format(sample))
+    check(row["exclusion_reason"].startswith(reason) if reason else row["exclusion_reason"] == "",
+          "{}: exclusion_reason '{}'".format(sample, row["exclusion_reason"]))
+check(by["Z1"]["fit_mad"] == "NA" and by["Z1"]["autosomal_median_depth"] == "NA", "Z1: NA columns")
+
+# Leave-one-out fit, over every control with coverage, before the exclusion
+for sample in covered:
+    expected = fit_mad(sample, [o for o in covered if o != sample])
+    got = float(by[sample]["fit_mad"])
+    check(abs(got - expected) < 0.002, "{}: fit_mad {} != {:.4f}".format(sample, got, expected))
+check(float(by["N1"]["fit_mad"]) > 0.3 > max(float(by[s]["fit_mad"]) for s in retained), "fit_mad separation")
+
+if fail:
+    print("\n".join("  FAIL  panel: " + f for f in fail))
+    raise SystemExit(1)
+print("  ok    panel")
+PY
+
+# Refusals: an existing version, mixed references
+if "${python}" "${script}" panel --pedigree ped.tsv --input-dir inputs --tag cov_b100q1 --cohort CONTROLS \
+    --version 7 --max-fit-mad 0.3 --out-dir v7 2> refuse.log; then
+    echo "  FAIL  panel: an existing version directory was overwritten"; exit 1
+fi
+grep -q "never overwritten" refuse.log || { echo "  FAIL  panel: refusal message"; cat refuse.log; exit 1; }
+mkdir mixed
+cp inputs/* mixed/
+sed -i.bak 's/"ref.fa"/"other.fa"/' mixed/F2.cov_b100q1.json
+if "${python}" "${script}" panel --pedigree ped.tsv --input-dir mixed --tag cov_b100q1 --cohort CONTROLS \
+    --version 8 --max-fit-mad 0.3 --out-dir v8 2> mixed.log; then
+    echo "  FAIL  panel: mixed references were accepted"; exit 1
+fi
+grep -q "mix reference" mixed.log || { echo "  FAIL  panel: mixed references message"; cat mixed.log; exit 1; }
+echo "  ok    panel refusals"
+
+# --- fit -------------------------------------------------------------------------------------
+"${python}" "${script}" fit --pedigree ped.tsv --input-dir inputs --tag cov_b100q1 --panel-dir v7 \
+    --out cohort.fit.tsv --threads 2 2> fit.log || { cat fit.log; exit 1; }
+
+"${python}" - <<'PY'
+import csv
+import numpy as np
+import pyBigWig
+
+AUTOSOMES = ["chr{}".format(i) for i in range(1, 23)]
+fail = []
+def check(cond, what):
+    if not cond:
+        fail.append(what)
+
+def values(path, chrom):
+    bw = pyBigWig.open(path)
+    v = np.array([iv[2] for iv in bw.intervals(chrom)], dtype=np.float64)
+    bw.close()
+    return v
+
+panel = {c: values("v7/panel.cov_b100q1.autosomes.median.bw", c) for c in AUTOSOMES}
+rows = list(csv.DictReader(open("cohort.fit.tsv"), delimiter="\t"))
+check(list(rows[0]) == ["family_id", "sample", "pedigree_sex", "coverage_sex", "fit_mad", "chrX_ratio", "chrY_ratio"],
+      "columns {}".format(list(rows[0])))
+keys = [(r["family_id"], r["sample"]) for r in rows]
+check(keys == [("FAMA", "F1"), ("FAMB", "F1"), ("FAMA", "F2"), ("FAMC", "F3"), ("FAMC", "M1"), ("FAMD", "M2"),
+               ("FAMD", "M3"), ("FAME", "K1"), ("FAME", "W1"), ("FAMF", "U1"), ("FAMF", "N1")], "rows {}".format(keys))
+for row in rows:
+    xs = []
+    for chrom in AUTOSOMES:
+        mine = values("inputs/{}.cov_b100q1.bw".format(row["sample"]), chrom)
+        keep = panel[chrom] >= 1.0
+        xs.append(np.log2(np.maximum(mine[keep], 0.01) / panel[chrom][keep]))
+    x = np.concatenate(xs)
+    expected = np.median(np.abs(x - np.median(x)))
+    check(abs(float(row["fit_mad"]) - expected) < 0.002, "{}: fit_mad {} != {:.4f}".format(row["sample"], row["fit_mad"], expected))
+check(rows[7]["coverage_sex"] == "XXY" and rows[0]["pedigree_sex"] == "female", "sex columns")
+
+if fail:
+    print("\n".join("  FAIL  fit: " + f for f in fail))
+    raise SystemExit(1)
+print("  ok    fit")
+PY
+
+if "${python}" "${script}" fit --pedigree ped.tsv --input-dir inputs --tag cov_b250q1 --panel-dir v7 \
+    --out other.fit.tsv 2> tag.log; then
+    echo "  FAIL  fit: a panel of another tag was accepted"; exit 1
+fi
+grep -q "the panel is cov_b100q1, the cohort cov_b250q1" tag.log || { echo "  FAIL  fit: tag message"; cat tag.log; exit 1; }
+echo "  ok    fit refusal"

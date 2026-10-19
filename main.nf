@@ -24,6 +24,8 @@ include { ANCESTRY } from './workflows/ancestry'
 include { ROH } from './workflows/roh'
 include { EXPANSIONHUNTER } from './workflows/expansionhunter'
 include { MELT } from './workflows/melt'
+include { CNV_COVERAGE } from './workflows/cnv_coverage'
+include { CNV_PANEL } from './workflows/cnv_panel'
 
 /*
 ========================================================================================
@@ -114,6 +116,14 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Same: samples called
         melt:               ('melt' in pipeline_steps)
                                 ? CohortState.progress(plan.melt.existing.size(), n_individuals)
+                                : null,
+        // Samples with their coverage files; the cohort fit follows from them
+        cnv_coverage:       ('cnv_coverage' in pipeline_steps)
+                                ? CohortState.progress(plan.cnv_coverage.existing.size(), n_individuals)
+                                : null,
+        // One sentinel entry: the panel version directory, complete or not
+        cnv_panel:          ('cnv_panel' in pipeline_steps)
+                                ? CohortState.progress(plan.cnv_panel.existing.contains('cohort') ? 1 : 0, 1)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
         snvs_cohort:        CohortState.progress(plan.snvs_cohort.existing.contains('cohort') ? 1 : 0, 1),
@@ -389,11 +399,11 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -490,6 +500,63 @@ if ('melt' in pipeline_steps) {
     if (absent) {
         recordFailedRun("melt inputs not found: ${absent.keySet().join(', ')}")
         exit 1, "ERROR: the 'melt' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+    }
+}
+
+// Both CNV steps bin the CRAMs on the grid of cnv_cov_bin and the reference's .fai, and name every
+// file after cov_b<bin>q<mapq>. Checked here, or every sample's task would fail on it one at a time.
+if ('cnv_coverage' in pipeline_steps || 'cnv_panel' in pipeline_steps) {
+    def cnv_failures = []
+    if (!(params.cnv_cov_bin.toString() ==~ /[1-9][0-9]*/)) {
+        cnv_failures << "cnv_cov_bin '${params.cnv_cov_bin}' must be a whole number of bp above 0"
+    }
+    if (!(params.cnv_cov_mapq.toString() ==~ /[0-9]+/)) {
+        cnv_failures << "cnv_cov_mapq '${params.cnv_cov_mapq}' must be a whole number"
+    }
+    if (!(params.cnv_cov_round.toString().isBigDecimal() && params.cnv_cov_round.toString().toBigDecimal() > 0)) {
+        cnv_failures << "cnv_cov_round '${params.cnv_cov_round}' must be a number above 0"
+    }
+    if (!params.ref) {
+        cnv_failures << "ref must be set"
+    } else if (!new File(params.ref.toString()).exists() || !new File("${params.ref}.fai").exists()) {
+        cnv_failures << "the reference ${params.ref} or its .fai does not exist"
+    }
+    if ('cnv_panel' in pipeline_steps) {
+        // It becomes the directory name v<version>, so no separators and no spaces
+        if (!params.cnv_panel_version) {
+            cnv_failures << "the 'cnv_panel' step requires cnv_panel_version to be set"
+        } else if (!(params.cnv_panel_version.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' may only hold letters, digits, '.', '_' and '-': it is the directory name v<version>"
+        } else if (params.cnv_panel_version.toString() ==~ /[vV][0-9].*/) {
+            cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' is written without its v: the directory is v<version>"
+        }
+        if (!params.cnv_panel_max_fit_mad.toString().isBigDecimal()) {
+            cnv_failures << "cnv_panel_max_fit_mad '${params.cnv_panel_max_fit_mad}' must be a number"
+        }
+    }
+    if (cnv_failures) {
+        recordFailedRun("invalid CNV coverage parameters: ${cnv_failures.join('; ')}")
+        exit 1, "ERROR: ${cnv_failures.join('\nERROR: ')}"
+    }
+    // A panel version is written once and never overwritten. A complete one is simply done; a
+    // partial one - a build that died while publishing, or a hand edit - is not something to
+    // finish or to rebuild over in silence.
+    if ('cnv_panel' in pipeline_steps && new File(cnvPanelVersionDir()).exists() && !cnvPanelComplete()) {
+        def absent = cnvPanelFiles().findAll { name -> new File("${cnvPanelVersionDir()}/${name}").length() == 0 }
+        recordFailedRun("CNV panel v${params.cnv_panel_version} is incomplete")
+        exit 1, "ERROR: the CNV panel directory ${cnvPanelVersionDir()} exists but is incomplete (${absent.join(', ')} missing or empty), and a panel version is never overwritten: remove it, or set another cnv_panel_version"
+    }
+    // The panel to fit the cohort against. One of another tag is not an error, only a fit that
+    // cannot be made; the plan skips it, with a warning.
+    if ('cnv_coverage' in pipeline_steps && params.cnv_panel_dir) {
+        def panel = readCnvPanel()
+        if (panel.error) {
+            recordFailedRun("cnv_panel_dir: ${panel.error}")
+            exit 1, "ERROR: cnv_panel_dir: ${panel.error}"
+        }
+        if (panel.tag != cnvTag()) {
+            log.warn "Skipping the CNV coverage fit: the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${cnvTag()} - genetics-viz will not divide one by the other either"
+        }
     }
 }
 
@@ -901,6 +968,45 @@ workflow {
             rohGeneBeds()[0]
         )
     }
+
+    // Run the CNV coverage if needed and allowed. Like melt it reads the CRAMs, existing and newly
+    // aligned; a sample with no CRAM is left out rather than sent to alignment.
+    cnv_new_coverage = Channel.empty()
+    if ((analysis_plan.cnv_coverage.needed.size() > 0 || analysis_plan.cnv_coverage.need_fit) &&
+        'cnv_coverage' in pipeline_steps) {
+
+        def cnv_tasks = []
+        if (analysis_plan.cnv_coverage.needed.size() > 0) {
+            cnv_tasks.add("coverage for ${analysis_plan.cnv_coverage.needed.size()} individuals")
+        }
+        if (analysis_plan.cnv_coverage.need_fit) {
+            cnv_tasks.add("cohort fit")
+        }
+        log.info "Running CNV coverage: ${cnv_tasks.join(', ')}..."
+
+        def cnv_panel_ref = analysis_plan.cnv_coverage.need_fit ? readCnvPanel() : null
+        CNV_COVERAGE(
+            all_available_crams,
+            pedigree_file,
+            analysis_plan.cnv_coverage.needed,
+            analysis_plan.cnv_coverage.existing,
+            analysis_plan.cnv_coverage.need_fit,
+            cnv_panel_ref ? [dir: cnv_panel_ref.dir, version: cnv_panel_ref.version] : null
+        )
+        cnv_new_coverage = CNV_COVERAGE.out.coverage
+    }
+
+    // Build the CNV control panel if needed and allowed, from every sample's coverage, this run's
+    // and the existing ones
+    if (analysis_plan.cnv_panel.needed && 'cnv_panel' in pipeline_steps) {
+        log.info "Building CNV panel v${params.cnv_panel_version} from ${analysis_plan.cnv_coverage.existing.size() + analysis_plan.cnv_coverage.needed.size()} samples..."
+        CNV_PANEL(
+            cnv_new_coverage,
+            pedigree_file,
+            analysis_plan.cnv_coverage.needed,
+            analysis_plan.cnv_coverage.existing
+        )
+    }
     
     // Run Extractor if TSV files are provided and step is allowed
     if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
@@ -1114,6 +1220,51 @@ def rohGeneBeds() {
             "${path}/gencode/${gencode}.ensg.genes.bed.gz".toString()]
 }
 
+// The tag of every CNV coverage file, which genetics-viz matches a sample to a panel by
+def cnvTag() {
+    return "cov_b${params.cnv_cov_bin}q${params.cnv_cov_mapq}".toString()
+}
+
+// The panel version directory the cnv_panel step writes, and the files that make it complete
+def cnvPanelVersionDir() {
+    return "${params.data}/cohorts/${params.cohort_name}/cnv_panel/v${params.cnv_panel_version}".toString()
+}
+
+def cnvPanelFiles() {
+    def bigwigs = ['autosomes', 'XX', 'XY'].collectMany { group ->
+        ['median', 'mad'].collect { stat -> "panel.${cnvTag()}.${group}.${stat}.bw".toString() }
+    }
+    return bigwigs + ['panel.json', 'controls.tsv']
+}
+
+def cnvPanelComplete() {
+    return cnvPanelFiles().every { name -> new File("${cnvPanelVersionDir()}/${name}").length() > 0 }
+}
+
+// The panel cnv_panel_dir points to, as [dir, version, tag] from its panel.json, or [error] when
+// it cannot be used. Null when no panel is set.
+def readCnvPanel() {
+    def dir = params.cnv_panel_dir ? params.cnv_panel_dir.toString().replaceAll('/+$', '') : ''
+    if (!dir) return null
+    def json = new File("${dir}/panel.json")
+    if (!json.exists()) return [error: "${json} does not exist - cnv_panel_dir must be a panel version directory, .../cnv_panel/v<version>"]
+    def panel
+    try {
+        panel = new groovy.json.JsonSlurper().parse(json)
+    }
+    catch (Exception e) {
+        return [error: "${json} cannot be read: ${e.message}"]
+    }
+    def version = panel.panel_version?.toString()
+    if (!version || !(version ==~ /[A-Za-z0-9_.-]+/) || !panel.tag) {
+        return [error: "${json} has no usable panel_version and tag"]
+    }
+    if (!new File("${dir}/panel.${panel.tag}.autosomes.median.bw").exists()) {
+        return [error: "${dir} has no panel.${panel.tag}.autosomes.median.bw"]
+    }
+    return [dir: dir, version: version, tag: panel.tag.toString()]
+}
+
 // The per-family ROH tables whose presence means a family is done. The kinship table is left
 // out: a singleton has none.
 def rohFamilyTableKinds() {
@@ -1147,6 +1298,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // As for expansionhunter: needed/existing/no_cram are samples, need_family and
         // family_existing families
         melt: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false],
+        // needed/existing/no_cram are samples. fit_path is the cohort fit table, null with no
+        // usable panel; fit_skip says why a panel was set and cannot be used.
+        cnv_coverage: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_fit: false, fit_path: null, fit_skip: null],
+        // One sentinel entry, 'cohort'. stale_controls: samples with coverage that a complete
+        // panel was built without.
+        cnv_panel: [needed: planBucket(), existing: planBucket(), stale_controls: []],
         pedigree_drift: [:]
     ]
 
@@ -1643,6 +1800,62 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         plan.melt.need_cohort_merge = any_call && (!cohort_exist || plan.melt.needed.size() > 0)
     }
 
+    // Check existing CNV coverage, when either step is requested: the panel is built from it. The
+    // tag is in every file name, as melt_label is: a new bin or MAPQ is a new set of files.
+    if ('cnv_coverage' in pipeline_steps || 'cnv_panel' in pipeline_steps) {
+        def tag = cnvTag()
+        individuals.each { barcode ->
+            def prefix = "${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${tag}"
+            if (new File("${prefix}.bw").length() > 0 && new File("${prefix}.json").length() > 0) {
+                plan.cnv_coverage.existing.add(barcode)
+            } else if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
+                plan.cnv_coverage.needed.add(barcode)
+            } else {
+                plan.cnv_coverage.no_cram.add(barcode)
+            }
+        }
+        def any_coverage = plan.cnv_coverage.existing || plan.cnv_coverage.needed
+
+        // The fit depends on every sample, as the MELT cohort files do, so it is rebuilt whenever
+        // one is (re)computed. A new panel version is a new file name.
+        def panel = ('cnv_coverage' in pipeline_steps) ? readCnvPanel() : null
+        if (panel && !panel.error) {
+            if (panel.tag != tag) {
+                plan.cnv_coverage.fit_skip = "the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${tag}".toString()
+            } else {
+                plan.cnv_coverage.fit_path = "${params.data}/cohorts/${params.cohort_name}/coverage/${params.cohort_name}.${tag}.panel_v${panel.version}.fit.tsv".toString()
+                plan.cnv_coverage.need_fit = any_coverage &&
+                    (!new File(plan.cnv_coverage.fit_path).exists() || plan.cnv_coverage.needed.size() > 0)
+            }
+        }
+
+        // A complete panel version is done for good. Samples that gained coverage since it was
+        // built are only reported: rebuilding it is a new cnv_panel_version.
+        if ('cnv_panel' in pipeline_steps) {
+            if (cnvPanelComplete()) {
+                plan.cnv_panel.existing.add('cohort')
+                def built_from = [] as Set
+                def lines = new File("${cnvPanelVersionDir()}/controls.tsv").readLines()
+                def header = lines ? lines[0].split('\t', -1) as List : []
+                def sample_col = header.indexOf('sample')
+                def reason_col = header.indexOf('exclusion_reason')
+                if (sample_col >= 0) {
+                    lines.drop(1).each { line ->
+                        def cols = line.split('\t', -1)
+                        def reason = reason_col >= 0 && reason_col < cols.size() ? cols[reason_col] : ''
+                        if (sample_col < cols.size() && !reason.startsWith('no coverage')) {
+                            built_from.add(cols[sample_col])
+                        }
+                    }
+                }
+                plan.cnv_panel.stale_controls = (plan.cnv_coverage.existing + plan.cnv_coverage.needed)
+                    .findAll { barcode -> !(barcode in built_from) }
+            } else if (any_coverage) {
+                plan.cnv_panel.needed.add('cohort')
+            }
+        }
+    }
+
     // Check existing Wombat files
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
@@ -1723,6 +1936,9 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}, ${analysis_plan.expansionhunter.need_reviewer.size()} individuals to draw with REViewer" : 'Skipped (step not requested)'}
     == Mobile Element Insertions ==
     MELT: ${'melt' in pipeline_steps ? "${analysis_plan.melt.existing.size()} individuals done and ${analysis_plan.melt.needed.size()} to do (${analysis_plan.melt.no_cram.size()} with no CRAM), ${analysis_plan.melt.need_family.size()} families to merge, cohort scoring: ${analysis_plan.melt.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    == Coverage for CNV/SV ==
+    CNV_COVERAGE: ${'cnv_coverage' in pipeline_steps ? "${analysis_plan.cnv_coverage.existing.size()} individuals done and ${analysis_plan.cnv_coverage.needed.size()} to do (${analysis_plan.cnv_coverage.no_cram.size()} with no CRAM), cohort fit: ${analysis_plan.cnv_coverage.need_fit ? 'Yes' : (analysis_plan.cnv_coverage.fit_skip ? 'Skipped (panel of another tag)' : 'No')}" : 'Skipped (step not requested)'}
+    CNV_PANEL: ${'cnv_panel' in pipeline_steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -1775,6 +1991,17 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.melt.no_cram) {
         // Not an error, as for expansionhunter: a gVCF-only sample has nothing to call insertions from
         log.warn "${analysis_plan.melt.no_cram.size()} individuals have no ${params.ref_name} CRAM and no MELT call, and are left out of their families' and the cohort's MELT files: ${analysis_plan.melt.no_cram.take(50).join(', ')}${analysis_plan.melt.no_cram.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.cnv_coverage.needed) {
+        log.info "Individuals needing CNV coverage: ${analysis_plan.cnv_coverage.needed.join(', ')}"
+    }
+    if (analysis_plan.cnv_coverage.no_cram) {
+        // Not an error, as for melt: a gVCF-only sample has nothing to measure coverage from
+        log.warn "${analysis_plan.cnv_coverage.no_cram.size()} individuals have no ${params.ref_name} CRAM and no CNV coverage, and are left out of the cohort's fit and panel: ${analysis_plan.cnv_coverage.no_cram.take(50).join(', ')}${analysis_plan.cnv_coverage.no_cram.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.cnv_panel.stale_controls) {
+        def stale = analysis_plan.cnv_panel.stale_controls
+        log.warn "CNV panel v${params.cnv_panel_version} is complete and is not rebuilt, but ${stale.size()} samples with coverage are not among its controls: ${stale.take(50).join(', ')}${stale.size() > 50 ? ' and others' : ''}. Set a new cnv_panel_version to build a panel with them"
     }
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
@@ -2077,6 +2304,13 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         errors.add("Wombat step is required for ${analysis_plan.wombat.needed.size()} families but not included in steps parameter")
     }
     
+    // The panel is built from every sample's coverage, so without the cnv_coverage step a sample
+    // that has none would only make the build skip itself with a warning
+    if ('cnv_panel' in pipeline_steps && analysis_plan.cnv_panel.needed && analysis_plan.cnv_coverage.needed.size() > 0 &&
+        !('cnv_coverage' in pipeline_steps)) {
+        errors.add("CNV coverage step is required for ${analysis_plan.cnv_coverage.needed.size()} individuals before the CNV panel can be built but not included in steps parameter")
+    }
+
     if (errors) {
         log.error """
         ========================================================================================
@@ -2085,7 +2319,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")
