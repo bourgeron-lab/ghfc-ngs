@@ -8,7 +8,8 @@
 # carrier and biallelic, XLR in a hemizygous male and a heterozygous female, a locus with no
 # normal bound, a locus with no thresholds row), the parents' longest allele, that the
 # cohort percentile is taken among founders only, the order of the flags table, and that a
-# stranger's VCF, a duplicated sample and mismatched headers are refused. Needs only python3.
+# stranger's VCF, a duplicated sample and mismatched headers are refused, and that a LowDepth
+# no-call ('./.' throughout) is written with empty alleles. Needs only python3.
 #
 #   modules/expansionhunter/scripts/eh_tables_test
 
@@ -148,6 +149,19 @@ check "a sample in two families is refused" \
 mkdir bad && cp tables/* bad/ && printf 'family_id\tsample\tother\n' > "bad/FAM4.${L}.genotypes.tsv"
 check "mismatched headers are refused" \
     '! python3 "${cohort_merge}" --input-dir bad --cohort B --label "${L}" >/dev/null 2>&1'
+
+# A LowDepth no-call, as ExpansionHunter writes it: every per-allele field is './.'
+mkdir nocall
+for s in KID DAD; do
+    grep '^#' "vcfs/${s}.${L}.vcf" > "nocall/${s}.vcf"
+done
+printf 'chr12\t111598950\t.\tC\t.\t.\tPASS\tEND=111599019;REF=23;RL=69;RU=CTG;VARID=ATXN2;REPID=ATXN2\tGT:SO:REPCN:REPCI:ADSP:ADFL:ADIR:LC\t0/1:SPANNING/SPANNING:22/31:22-22/31-31:9/9:2/2:0/0:30.0\n' >> nocall/KID.vcf
+printf 'chr12\t111598950\t.\tC\t.\t.\tLowDepth\tEND=111599019;REF=23;RL=69;RU=CTG;VARID=ATXN2;REPID=ATXN2\tGT:SO:REPCN:REPCI:ADSP:ADFL:ADIR:LC\t./.:./.:./.:./.:./.:./.:.:8.7\n' >> nocall/DAD.vcf
+check "a no-call is written, not refused" \
+    'python3 "${family_table}" --family FAM1 --pedigree ped.tsv --thresholds thr.tsv --out nocall.tsv nocall/KID.vcf nocall/DAD.vcf >/dev/null'
+check "a no-call leaves its alleles and status empty" \
+    'is nocall.tsv DAD ATXN2 allele1 . && is nocall.tsv DAD ATXN2 allele1_class . && is nocall.tsv DAD ATXN2 status .'
+check "a no-called parent gives no parents_max_allele" 'is nocall.tsv KID ATXN2 parents_max_allele .'
 
 [ "${fail}" -eq 0 ] && echo "eh_family_table / eh_cohort_merge: all checks passed" || echo "eh_family_table / eh_cohort_merge: FAILURES"
 exit "${fail}"
