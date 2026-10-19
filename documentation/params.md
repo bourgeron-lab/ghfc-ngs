@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-69 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+71 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -124,6 +124,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `roh_min_gene_roh_mb` | `roh` | [ROH and inbreeding](#roh-and-inbreeding) |
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
+| `sampleqc_label` 📄 | `sampleqc` — **required** | [Sample QC](#sample-qc) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `scratch` | `alignment` | [Core paths and identity](#core-paths-and-identity) |
 | `singularity_cache` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
@@ -132,6 +133,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `skip_deepvariant` ✗ | never — use `steps` | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `slurm_account` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `slurm_partition` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
+| `somalier_sites` | `sampleqc` — **required** | [Sample QC](#sample-qc) |
 | `steps` | always — **required** | [`steps`](#steps-the-key-that-decides-everything-else) |
 | `vaf_bedgraph` | always — decides what counts as a called sample | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `vep_config` | `annotation` | [Annotation](#annotation) |
@@ -202,7 +204,7 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these fifteen:
+the command line. Every entry must be one of these sixteen:
 
 | Step | Produces |
 |---|---|
@@ -221,6 +223,7 @@ the command line. Every entry must be one of these fifteen:
 | `melt` | Mobile element insertions (ALU, LINE1, SVA) per sample, merged per family, with their cohort frequency and a ranking of every insertion per cohort |
 | `cnv_coverage` | Normalised coverage per sample on a fixed bin grid, as a bigWig for genetics-viz, and with `cnv_panel_dir` the cohort's fit against a control panel |
 | `cnv_panel` | A versioned control panel, per-bin median and MAD of the controls' normalised coverage, built once from a dedicated controls cohort |
+| `sampleqc` | Relatedness (IBS0, IBS2, KING kinship) against the pedigree within each family and between families, sex and sex-chromosome karyotype, and Mendelian errors, as per-family and cohort tables of flags |
 
 ### The rule that catches people out
 
@@ -248,6 +251,8 @@ missing prerequisite is only an error when something in *this* run would consume
 - `cnv_coverage` demands nothing either, for the same reason. `cnv_panel` demands
   `cnv_coverage` when the panel is still to be built and a sample with a CRAM has no coverage
   file yet: a panel is only ever built from every sample of the cohort.
+- `sampleqc` demands nothing either: it reads the CRAMs, and uses the cnv_coverage JSONs and
+  the family `norm.bcf` when they exist or are made in the run, without them otherwise.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -286,6 +291,9 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: melt_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
 | `ERROR: cnv_cov_bin '...' must be ...`, and the same for `cnv_cov_mapq`, `cnv_cov_round` | `cnv_coverage` or `cnv_panel` listed with a bin, MAPQ or rounding that is not a number of the right kind |
 | `ERROR: the reference ... or its .fai does not exist` | `cnv_coverage` or `cnv_panel` listed, and `ref` or its `.fai` is missing |
+| `ERROR: the 'sampleqc' step requires ...` | `sampleqc` listed without `somalier_sites`, `sampleqc_label` or `ref` |
+| `ERROR: the 'sampleqc' step cannot find ...` | the sites VCF, the reference or its `.fai` does not exist |
+| `ERROR: sampleqc_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
 | `ERROR: the 'cnv_panel' step requires cnv_panel_version to be set` | `cnv_panel` listed without `cnv_panel_version` |
 | `ERROR: cnv_panel_version '...' may only hold ...` / `... is written without its v` | a version that cannot be a directory name, or `v1` where `1` was meant |
 | `ERROR: the CNV panel directory ... exists but is incomplete` | a partial `cnv_panel/v<version>/`, from a build that died or a hand edit: it is never overwritten |
@@ -576,6 +584,49 @@ genetics-viz reads these files directly, so their names, keys and values are a c
 - **The tag is the cache.** Changing `cnv_cov_bin` or `cnv_cov_mapq` makes new files beside the old ones. `cnv_cov_round` is not in the tag, so changing it leaves the existing samples as they are: delete their `coverage/` files to have them written again.
 - **Reference.** The coverage is measured against `ref`, which must be the reference the CRAMs were aligned to and have a `.fai`. The PAR coordinates are those of GRCh38.
 
+### Sample QC
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `somalier_sites` | file | `""` | somalier's sites VCF for `ref`: for GRCh38, `sites.hg38.vcf.gz` from somalier's README (17,384 autosomal SNPs, 365 on chrX, 17 on chrY). **Required** by `sampleqc`. |
+| `sampleqc_label` 📄 | string | `""` | Label for the extracts and tables in every output file name. **Required** by `sampleqc`. Letters, digits, `.`, `_` and `-` only. One label per sites file, e.g. `somalier_hg38`. |
+
+The step is report-only: nothing downstream reads its flags. Read the `flags.tsv` tables, fix the
+pedigree, and the next run redoes the families that changed.
+
+- **Per sample:** `samples/{S1}/{S2}/<ID>/qc/somalier/<ID>.<label>.somalier`, somalier's counts at its sites, from the CRAM, independent of the variant calls. The sample name inside is the barcode, whatever the CRAM's read group says.
+- **Per family:** `families/{S1}/{S2}/<FID>/qc/<FID>.<label>.{samples,pairs,flags,inputs}.tsv`.
+  - `pairs.tsv` has one row per pair of members, with IBS0, IBS2, their ratio, the KING-robust kinship `(shared_hets - 2 ibs0) / hets_ab`, both samples' heterozygous sites at the sites both are called, somalier's relatedness, the expected kinship and relationship from the pedigree, the observed relationship, and, for a parent and child, the opposite-homozygote rate in the family BCF.
+  - `samples.tsv` has one row per member, with the pedigree sex, the inferred sex and karyotype, the X and Y copy numbers (from the cnv_coverage JSON when there is one, from somalier's depth otherwise), the X heterozygosity, the depth, the het/hom-alt ratio, somalier's CHARR contamination estimate, the trio's Mendelian error rate, and the flags it carries.
+  - `flags.tsv` has one row per flag: `level, family_id, sample_a, sample_b, flag, severity, evidence`.
+- **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,pairs,flags,inputs}.tsv` and `.html`. These are the family tables concatenated, plus the pairs of different families related at the third degree or closer and the cohort-level flags. The HTML is somalier's interactive plot of every pair.
+- **Relationship classes** (KING): duplicate/MZ above 0.354; first degree 0.177-0.354, parent-offspring when IBS0/IBS2 is below 0.01 and full siblings otherwise; second degree 0.0884-0.177; third degree 0.0442-0.0884; unrelated below. A pair with fewer than 2,000 sites called in both is `low_confidence` and is never flagged.
+- **Flags.**
+
+  | Flag | Severity | Raised when |
+  |---|---|---|
+  | `NOT_PARENT` | high | a recorded parent and child are not parent-offspring; the evidence names which parent |
+  | `HALF_SIB_NOT_FULL`, `FULL_SIB_NOT_HALF` | high | siblings are of the other kind |
+  | `EXPECTED_RELATED_UNRELATED` | high, medium past the second degree | recorded relatives are unrelated |
+  | `UNEXPECTED_RELATED_IN_FAMILY` | high, medium at the third degree | members the pedigree does not relate are related, e.g. consanguineous parents |
+  | `RELATIONSHIP_MISMATCH` | high or medium | any other disagreement of degree |
+  | `DUPLICATE_OR_MZ` | high | two samples are the same person or MZ twins, in a family or across families |
+  | `SAMPLE_UNRELATED_TO_FAMILY` | high | a member is related to none of its relatives within the second degree |
+  | `SAMPLE_SWAP_CANDIDATE` | high | such a member is related to someone of another family |
+  | `CRYPTIC_RELATED` | high, medium at the third degree | members of different families are related |
+  | `MENDELIAN_INCONSISTENT` | medium | the CRAMs say parent and child, but the family BCF has too many opposite homozygotes: the CRAM and the gVCF may not be the same person |
+  | `SEX_MISMATCH` | high | the inferred sex is not the pedigree's |
+  | `KARYOTYPE_XXY`, `KARYOTYPE_X0`, `KARYOTYPE_XYY`, `KARYOTYPE_XXX`, ... | high | the copy numbers make a karyotype other than XX or XY |
+  | `SEX_AMBIGUOUS` | medium | the copy numbers are not near whole numbers: mosaicism or a coverage artefact |
+  | `X_HET_INCONSISTENT` | medium | the X heterozygosity disagrees with the number of X: two X and almost no heterozygous sites (X isodisomy, LOH), or one X and many |
+  | `SEX_UNKNOWN_IN_PED` | info | the pedigree has no sex; the evidence gives the inferred one |
+  | `LOW_INFORMATIVE_SITES` | medium | fewer than 5,000 somalier sites are called |
+  | `POSSIBLE_CONTAMINATION` | medium | CHARR is above 0.05 |
+
+- **Sex.** The copy numbers are `2 × chrX_ratio` and `2 × chrY_ratio` of the cnv_coverage JSON of the current `cnv_cov_bin` and `cnv_cov_mapq` when the sample has one, and somalier's X and Y depth over its autosomal depth otherwise. The karyotype is cnv_coverage's rule: each copy number rounded, `ambiguous` when either is more than 0.25 from a whole number. A karyotype with a Y is male.
+- **Mendelian errors** are counted from the family's `norm.bcf` when it has a parent and child: biallelic autosomal SNVs, genotypes of GQ ≥ 20 and DP ≥ 10.
+- **What reruns.** The label is the cache for the extracts. The family and cohort tables are also checked against `inputs.tsv`, the snapshot of what they were built from: the family's pedigree rows (without the phenotype), which members have an extract and a coverage JSON, and whether the BCF was read. A family is redone when its snapshot changes, so a corrected parent or sex reruns it even though every file is in place. The cohort is redone when any family is, or when a family is added or removed. A member with no CRAM is left out, with a warning.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -713,7 +764,9 @@ ancestry_panel_name: "apgs_b1.0.0_dp10gq20"
 made with the old catalog, and mixes in new ones made with the new catalog. **`melt_label`**
 does the same for the MELT calls. **`cnv_cov_bin`** and **`cnv_cov_mapq`** make the tag
 `cov_b<bin>q<mapq>` of every CNV coverage file, and **`cnv_panel_version`** the directory of a
-panel, which is built once and never rebuilt under the same version.
+panel, which is built once and never rebuilt under the same version. **`sampleqc_label`** does
+the same for the somalier extracts. The sample QC tables are the one exception to the rule:
+they are also rebuilt when the pedigree they were built from changes, see [Sample QC](#sample-qc).
 
 ### Three different directories
 

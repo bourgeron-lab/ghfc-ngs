@@ -26,6 +26,7 @@ include { EXPANSIONHUNTER } from './workflows/expansionhunter'
 include { MELT } from './workflows/melt'
 include { CNV_COVERAGE } from './workflows/cnv_coverage'
 include { CNV_PANEL } from './workflows/cnv_panel'
+include { SAMPLEQC } from './workflows/sampleqc'
 
 /*
 ========================================================================================
@@ -120,6 +121,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Samples with their coverage files; the cohort fit follows from them
         cnv_coverage:       ('cnv_coverage' in pipeline_steps)
                                 ? CohortState.progress(plan.cnv_coverage.existing.size(), n_individuals)
+                                : null,
+        // Samples extracted; the family and cohort tables follow from them and the pedigree
+        sampleqc:           ('sampleqc' in pipeline_steps)
+                                ? CohortState.progress(plan.sampleqc.existing.size(), n_individuals)
                                 : null,
         // One sentinel entry: the panel version directory, complete or not
         cnv_panel:          ('cnv_panel' in pipeline_steps)
@@ -399,11 +404,11 @@ if (!params.cohort_name) {
 
 if (pipeline_steps.isEmpty()) {
     recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel"
+    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc"
 }
 
 // Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel']
+def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc']
 def invalid_steps = pipeline_steps - valid_steps
 if (invalid_steps) {
     recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -557,6 +562,26 @@ if ('cnv_coverage' in pipeline_steps || 'cnv_panel' in pipeline_steps) {
         if (panel.tag != cnvTag()) {
             log.warn "Skipping the CNV coverage fit: the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${cnvTag()} - genetics-viz will not divide one by the other either"
         }
+    }
+}
+
+// The sample QC extracts every CRAM at somalier's sites, read against the alignment reference, and
+// names every file after sampleqc_label
+if ('sampleqc' in pipeline_steps) {
+    def missing_sampleqc_params = ['somalier_sites', 'sampleqc_label', 'ref'].findAll { key -> !params[key] }
+    if (missing_sampleqc_params) {
+        recordFailedRun("sampleqc step is missing ${missing_sampleqc_params.join(', ')}")
+        exit 1, "ERROR: the 'sampleqc' step requires ${missing_sampleqc_params.join(', ')} to be set"
+    }
+    if (!(params.sampleqc_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+        recordFailedRun("invalid sampleqc_label")
+        exit 1, "ERROR: sampleqc_label '${params.sampleqc_label}' may only hold letters, digits, '.', '_' and '-': it is part of every sample QC file name"
+    }
+    def sampleqc_files = [somalier_sites: params.somalier_sites, ref: params.ref, 'ref .fai': "${params.ref}.fai"]
+    def absent = sampleqc_files.findAll { _key, path -> !new File(path.toString()).exists() }
+    if (absent) {
+        recordFailedRun("sampleqc inputs not found: ${absent.keySet().join(', ')}")
+        exit 1, "ERROR: the 'sampleqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
     }
 }
 
@@ -1007,6 +1032,33 @@ workflow {
             analysis_plan.cnv_coverage.existing
         )
     }
+
+    // Run the sample QC if needed and allowed. Like melt it reads the CRAMs, existing and newly
+    // aligned, and the sex check reads the coverage JSONs this run's cnv_coverage makes
+    if ((analysis_plan.sampleqc.needed.size() > 0 ||
+         analysis_plan.sampleqc.need_family.size() > 0 ||
+         analysis_plan.sampleqc.need_cohort) && 'sampleqc' in pipeline_steps) {
+
+        def qc_tasks = []
+        if (analysis_plan.sampleqc.needed.size() > 0) {
+            qc_tasks.add("extracts for ${analysis_plan.sampleqc.needed.size()} individuals")
+        }
+        if (analysis_plan.sampleqc.need_family.size() > 0) {
+            qc_tasks.add("checks of ${analysis_plan.sampleqc.need_family.size()} families")
+        }
+        if (analysis_plan.sampleqc.need_cohort) {
+            qc_tasks.add("cohort tables")
+        }
+        log.info "Running sample QC: ${qc_tasks.join(', ')}..."
+
+        SAMPLEQC(
+            all_available_crams,
+            cnv_new_coverage,
+            channels.existing_normalized_bcfs.mix(normalized_bcfs_output),
+            pedigree_data.family_members,
+            analysis_plan.sampleqc
+        )
+    }
     
     // Run Extractor if TSV files are provided and step is allowed
     if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
@@ -1304,6 +1356,16 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // One sentinel entry, 'cohort'. stale_controls: samples with coverage that a complete
         // panel was built without.
         cnv_panel: [needed: planBucket(), existing: planBucket(), stale_controls: []],
+        // needed/existing/no_cram are samples, by their extract; need_family, family_existing and
+        // edited families, edited being those whose tables exist and were built from another
+        // snapshot. extract_members and coverage_members: family -> its members with an extract
+        // (or one made in this run) and with a coverage JSON; coverage_from_run: members whose
+        // JSON the cnv_coverage step makes in this run; mendelian: families whose norm.bcf is read.
+        // snapshots: family -> its inputs snapshot (lib/InputsSnapshot.groovy).
+        sampleqc: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(),
+                   family_existing: planBucket(), edited: planBucket(), need_cohort: false, cohort_edited: false,
+                   extract_members: [:], coverage_members: [:], coverage_from_run: planBucket(),
+                   mendelian: planBucket(), snapshots: [:], cohort_snapshot: null],
         pedigree_drift: [:]
     ]
 
@@ -1856,6 +1918,98 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
+    // Check existing sample QC, as for melt: only when the step is requested, with sampleqc_label
+    // in every file name. The family and cohort tables are also checked against the inputs
+    // snapshot they were built from - the pedigree rows, which members have an extract and a
+    // coverage JSON, whether the family BCF is read - so that a pedigree edit, which leaves every
+    // file in place, still redoes the family and the cohort. Planned after the CNV coverage,
+    // whose JSONs the sex check reads.
+    if ('sampleqc' in pipeline_steps) {
+        def qc = plan.sampleqc
+        def label = params.sampleqc_label
+        def cov_tag = cnvTag()
+
+        individuals.each { barcode ->
+            def extract = "${Sharding.getSampleDir(params.data, barcode)}/qc/somalier/${barcode}.${label}.somalier"
+            if (new File(extract).length() > 0) {
+                qc.existing.add(barcode)
+            } else if (barcode in plan.alignment.existing || barcode in plan.alignment.needed) {
+                qc.needed.add(barcode)
+            } else {
+                qc.no_cram.add(barcode)
+            }
+        }
+
+        def rows_by_family = [:]
+        InputsSnapshot.pedigreeRows(new File(ghfc_run_state.pedigree_file.toString()).readLines()).each { row ->
+            rows_by_family.get(row[0], []) << row
+        }
+        def cohort_rows = []
+        families.each { fid ->
+            def rows = rows_by_family[fid] ?: []
+            def with_extract = rows.collect { row -> row[1] }.findAll { barcode ->
+                barcode in qc.existing || barcode in qc.needed
+            } as LinkedHashSet
+            if (!with_extract) {
+                return
+            }
+            // A JSON on disk, or one this run's cnv_coverage makes
+            def with_coverage = with_extract.findAll { barcode ->
+                if (new File("${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${cov_tag}.json").length() > 0) {
+                    return true
+                }
+                if ('cnv_coverage' in pipeline_steps && barcode in plan.cnv_coverage.needed) {
+                    qc.coverage_from_run.add(barcode)
+                    return true
+                }
+                return false
+            } as LinkedHashSet
+            // The norm.bcf, on disk or called in this run, when the family has a parent and child
+            def members = rows.collect { row -> row[1] } as Set
+            def has_parent_child = rows.any { row -> row[2] in members || row[3] in members }
+            def has_bcf = fid in plan.deepvariant_family.existing ||
+                ('deepvariant_family' in pipeline_steps && fid in plan.deepvariant_family.needed)
+            if (has_parent_child && has_bcf) {
+                qc.mendelian.add(fid)
+            }
+
+            def snapshot_rows = rows.collect { row ->
+                row + [row[1] in with_extract ? 'yes' : 'no', row[1] in with_coverage ? cov_tag : '-']
+            }
+            cohort_rows.addAll(snapshot_rows)
+            def snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, family: fid,
+                                                  mendelian: fid in qc.mendelian ? "${fid}.norm.bcf".toString() : 'none'],
+                                                 snapshot_rows)
+            qc.snapshots[fid] = snapshot
+            qc.extract_members[fid] = with_extract as List
+            qc.coverage_members[fid] = with_coverage as List
+
+            def prefix = "${Sharding.getFamilyDir(params.data, fid)}/qc/${fid}.${label}"
+            def tables_exist = ['samples', 'pairs', 'flags'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
+            def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
+            if (tables_exist && same_inputs && !with_extract.any { barcode -> barcode in qc.needed }) {
+                qc.family_existing.add(fid)
+            } else {
+                qc.need_family.add(fid)
+                if (tables_exist && new File("${prefix}.inputs.tsv").exists() && !same_inputs) {
+                    qc.edited.add(fid)
+                }
+            }
+        }
+
+        if (qc.extract_members) {
+            qc.cohort_snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, cohort: params.cohort_name.toString()],
+                                                       cohort_rows)
+            def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/qc/${params.cohort_name}.${label}"
+            def cohort_exist = ['samples.tsv', 'pairs.tsv', 'flags.tsv', 'html'].every { ext ->
+                new File("${cohort_prefix}.${ext}").length() > 0
+            }
+            def cohort_same = InputsSnapshot.matches("${cohort_prefix}.inputs.tsv", qc.cohort_snapshot)
+            qc.cohort_edited = cohort_exist && new File("${cohort_prefix}.inputs.tsv").exists() && !cohort_same
+            qc.need_cohort = !cohort_exist || !cohort_same || qc.need_family.size() > 0
+        }
+    }
+
     // Check existing Wombat files
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
@@ -1939,6 +2093,8 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     == Coverage for CNV/SV ==
     CNV_COVERAGE: ${'cnv_coverage' in pipeline_steps ? "${analysis_plan.cnv_coverage.existing.size()} individuals done and ${analysis_plan.cnv_coverage.needed.size()} to do (${analysis_plan.cnv_coverage.no_cram.size()} with no CRAM), cohort fit: ${analysis_plan.cnv_coverage.need_fit ? 'Yes' : (analysis_plan.cnv_coverage.fit_skip ? 'Skipped (panel of another tag)' : 'No')}" : 'Skipped (step not requested)'}
     CNV_PANEL: ${'cnv_panel' in pipeline_steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
+    == Sample QC ==
+    SAMPLEQC: ${'sampleqc' in pipeline_steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with an edited pedigree), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -1998,6 +2154,16 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.cnv_coverage.no_cram) {
         // Not an error, as for melt: a gVCF-only sample has nothing to measure coverage from
         log.warn "${analysis_plan.cnv_coverage.no_cram.size()} individuals have no ${params.ref_name} CRAM and no CNV coverage, and are left out of the cohort's fit and panel: ${analysis_plan.cnv_coverage.no_cram.take(50).join(', ')}${analysis_plan.cnv_coverage.no_cram.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.sampleqc.needed) {
+        log.info "Individuals needing a somalier extract: ${analysis_plan.sampleqc.needed.join(', ')}"
+    }
+    if (analysis_plan.sampleqc.edited) {
+        log.info "Families whose sample QC is redone for an edited pedigree or new evidence: ${analysis_plan.sampleqc.edited.take(50).join(', ')}${analysis_plan.sampleqc.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.sampleqc.no_cram) {
+        // Not an error, as for melt: a gVCF-only sample has nothing to extract from
+        log.warn "${analysis_plan.sampleqc.no_cram.size()} individuals have no ${params.ref_name} CRAM and no somalier extract, and are left out of their families' and the cohort's sample QC: ${analysis_plan.sampleqc.no_cram.take(50).join(', ')}${analysis_plan.sampleqc.no_cram.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.cnv_panel.stale_controls) {
         def stale = analysis_plan.cnv_panel.stale_controls
@@ -2319,7 +2485,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")

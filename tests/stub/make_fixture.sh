@@ -45,7 +45,7 @@ for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz \
          ancestry_catalog.tsv bundle/roh/sites.tsv.gz extract_me.tsv hg19ToHg38.over.chain.gz \
          annotation/gencode/gencode.stub.symbol.genes.bed.gz gnomad_sv.vcf.gz ndd_genes.tsv \
          melt/MELT.jar melt/me_refs/Hg38/ALU_MELT.zip melt/me_refs/Hg38/LINE1_MELT.zip \
-         melt/me_refs/Hg38/SVA_MELT.zip melt/add_bed_files/Hg38/Hg38.genes.bed; do
+         melt/me_refs/Hg38/SVA_MELT.zip melt/add_bed_files/Hg38/Hg38.genes.bed somalier_sites.vcf.gz; do
     touch "${refs}/${f}"
 done
 # A CNV panel for the cohort fit: main.nf reads its panel.json before the run
@@ -95,6 +95,7 @@ expansionhunter_thresholds: "${refs}/eh_thresholds.tsv"
 melt_dir: "${refs}/melt"
 melt_gnomad_sv: "${refs}/gnomad_sv.vcf.gz"
 melt_ndd_genes: "${refs}/ndd_genes.tsv"
+somalier_sites: "${refs}/somalier_sites.vcf.gz"
 max_cpus: 2
 max_memory: "2.GB"
 max_time: "1.h"

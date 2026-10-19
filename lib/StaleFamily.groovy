@@ -19,7 +19,7 @@ class StaleFamily {
      * catch files this pipeline never wrote, and the whole safety argument for deleting
      * anything is that we only remove what we know how to rebuild.
      *
-     * Six groups are deliberately absent:
+     * Seven groups are deliberately absent:
      *
      *  - `ancestry/` - it self-heals. A member with no gVCF has no panel BCF either, so it is
      *    already in the plan's ancestry `need_extract`, which forces `need_family_merge` and
@@ -32,6 +32,9 @@ class StaleFamily {
      *    rebuilt whenever a member is called, and a member missing from them is one with no
      *    CRAM, which gets called, and its family rebuilt, as soon as it has one.
      *  - `mei/melt/` - the same holds for the MELT files.
+     *  - `qc/` - the sample QC tables. They do not come from the joint call either, and they
+     *    are redone whenever the family's inputs snapshot changes (InputsSnapshot), which a
+     *    member added or removed always does.
      *  - `*.dnm.*` - left by DNM_EXTRACTION, since removed, so nothing would regenerate
      *    them. A file left stale is recoverable; a file deleted that nothing rebuilds is not.
      *  - `extractor/` - the plan does no completeness check for it, so deleting would not

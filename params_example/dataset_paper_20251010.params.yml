@@ -17,6 +17,7 @@ steps: [
     # "extractor",
     # "ancestry",
     # "cnv_coverage",
+    # "sampleqc",
   ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
 
 # Input/Output paths
@@ -183,6 +184,15 @@ cnv_cov_round: 0.01 # Precision of the stored values; not in the tag (default: 0
 # A control panel to fit the cohort against, a version directory built by the cnv_panel step of the
 # controls cohort. Writes cohorts/<cohort>/coverage/<cohort>.cov_b250q1.panel_v<version>.fit.tsv.
 cnv_panel_dir: "" # e.g. /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/CNV_CONTROLS/cnv_panel/v1
+
+# Sample QC (step "sampleqc")
+# Relatedness against the pedigree within each family and between families, sex and karyotype,
+# and Mendelian errors, from somalier's allele counts at its sites in each CRAM; the sex also reads
+# the cnv_coverage JSONs, and the Mendelian errors the family norm.bcf, when there are. Report-only:
+# read families/.../qc/<FID>.<label>.flags.tsv and cohorts/<cohort>/qc/<cohort>.<label>.flags.tsv.
+# A family is redone when its pedigree rows change, and the cohort when any family is.
+somalier_sites: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/somalier/sites.hg38.vcf.gz" # TODO: somalier's sites.hg38.vcf.gz (see its README); required by sampleqc
+sampleqc_label: "somalier_hg38" # Label baked into output file names; one per sites file
 
 # Resource limits
 max_memory: "460.GB"

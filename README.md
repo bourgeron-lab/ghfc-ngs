@@ -19,6 +19,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 - **Genetic ancestry and polygenic scores** per family and per cohort, projected onto a global reference panel
 - **Runs of homozygosity and inbreeding** (F_ROH) per individual, scored against ancestry-matched reference genomes, with genes in ROH
 - **Short tandem repeat genotyping** with ExpansionHunter per sample, merged per family and per cohort, each allele classed against published pathogenic thresholds, and REViewer pileups of the flagged genotypes
+- **Sample and family QC** with somalier: relatedness (IBS0, IBS2, KING kinship) checked against the pedigree within each family and between families, sex and sex-chromosome karyotype (XXY, X0, ...), and Mendelian errors, rerun whenever a family's pedigree changes
 - **Unit merging** for samples with multiple sequencing runs
 - **SLURM integration** with configurable resource allocation
 - **Container support** via Apptainer/Singularity
@@ -298,7 +299,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports thirteen main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports sixteen main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -317,6 +318,7 @@ The pipeline supports thirteen main steps that must be explicitly listed in the 
 - **`melt`**: Mobile element insertion (ALU, LINE1, SVA) calling with MELT v2.2.2 Single on each sample's CRAM. Merges each family's calls into one VCF and tabulates each child's insertions against its parents' calls, then chains the cohort's insertions into loci with their carrier frequency and ranks every PASS insertion against gnomAD-SV, the cohort, the genes and the NDD gene set.
 - **`cnv_coverage`**: Normalised coverage of each sample's CRAM on a fixed bin grid, as a bigWig for [genetics-viz](https://github.com/bourgeron-lab/genetics-viz) to show CNVs and SVs, with a JSON of its autosomal depth and sex-chromosome ratios. With `cnv_panel_dir`, also fits every sample of the cohort against a control panel.
 - **`cnv_panel`**: Builds a versioned control panel - per-bin median and MAD of the controls' normalised coverage, for the autosomes, XX and XY - from every sample of a dedicated controls cohort.
+- **`sampleqc`**: Sample and family QC with [somalier](https://github.com/brentp/somalier). Extracts each sample's allele counts at somalier's sites from its CRAM, checks every pair of a family against the relationship its pedigree gives them, infers every member's sex and karyotype, counts the Mendelian errors of each trio, then relates every sample of the cohort to find relatives, duplicates and swaps across families. Report-only: it flags, and blocks nothing.
 
 **Step Dependencies:**
 
@@ -334,6 +336,7 @@ The pipeline supports thirteen main steps that must be explicitly listed in the 
 - `melt` requires CRAM files, and treats a sample with none as `expansionhunter` does
 - `cnv_coverage` requires CRAM files, and treats a sample with none as `expansionhunter` does
 - `cnv_panel` requires every sample's coverage files (needs `cnv_coverage` in `steps` if any is missing)
+- `sampleqc` requires CRAM files, and treats a sample with none as `expansionhunter` does. It reads the `cnv_coverage` JSONs and the family `norm.bcf` when they exist or are made in the run, and does without them otherwise
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -625,6 +628,25 @@ modules/cnv/scripts/cnv_coverage_test
 
 **Outputs:** Per sample: the bigWig and its JSON. Per cohort: the fit table, and in the controls cohort the panel version directory.
 
+#### Sample QC Workflow
+
+Relatedness, pedigree and sex checks, per family and then per cohort, with [somalier](https://github.com/brentp/somalier) 0.3.5:
+1. **Extraction** - Per sample, `somalier extract` counts the reads of each allele at somalier's sites (`somalier_sites`; for GRCh38 17,384 autosomal SNPs of allele frequency near 0.5, 365 on chrX, 17 on chrY) in the CRAM. The counts come from the reads, not from the variant calls, and the sample name stored is the barcode whatever the CRAM's read group says
+2. **Family** - `somalier relate` of the members gives each pair its IBS0 (opposite homozygotes), IBS2 and shared heterozygotes. `sampleqc_classify` turns them into the KING-robust kinship, classes the pair (duplicate, parent-offspring, full siblings, second degree, third degree, unrelated) and compares it with the relationship the pedigree gives, by the kinship coefficient of the pedigree graph, so half-sibs, grandparents, uncles and cousins are covered. With the family's `norm.bcf`, it also counts each trio's Mendelian errors and each parent-child pair's opposite homozygotes. Each member gets a sex and a karyotype from its X and Y copy numbers - those of its `cnv_coverage` JSON when there is one, somalier's depth otherwise - checked against its X heterozygosity
+3. **Cohort** - `somalier relate` of every sample, then the family tables in one, with the pairs of different families related at the third degree or closer: cryptic relatives, duplicates across families, and a member unrelated to its own family but related to another (a likely swap). somalier's interactive HTML of every pair is kept
+
+**What reruns.** Each family's tables are written beside `inputs.tsv`, a snapshot of what they were built from: its pedigree rows, normalised and without the phenotype, which members have an extract and a coverage JSON, and whether its BCF was read (`lib/InputsSnapshot.groovy`). A family whose snapshot for the run differs is redone - so correcting a father or a sex reruns that family, though every file is in place - and the cohort is redone whenever a family is, or one is added or removed. This is the only step that looks at the pedigree a result was built from, rather than only at which files exist.
+
+**Report-only.** Nothing downstream reads the flags: read `flags.tsv`, correct the pedigree or the samples, and run again. The flags, their severity and the thresholds are in [documentation/params.md](documentation/params.md#sample-qc).
+
+The classifier ships with a self-contained test, which needs only `python3`:
+
+```bash
+modules/sampleqc/scripts/sampleqc_classify_test
+```
+
+**Outputs:** Per sample: the `.somalier` extract. Per family: the samples, pairs and flags tables and the inputs snapshot. Per cohort: the same tables, somalier's HTML and the snapshot.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -693,6 +715,9 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **CNV coverage (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/coverage/${barcode}.cov_b${cnv_cov_bin}q${cnv_cov_mapq}.{bw,json}` (both non-empty)
 - **CNV coverage fit (cohort)**: `${data}/cohorts/${cohort_name}/coverage/${cohort_name}.cov_b${cnv_cov_bin}q${cnv_cov_mapq}.panel_v${version}.fit.tsv`, `version` from the `panel.json` of `cnv_panel_dir`
 - **CNV panel (cohort)**: every file of `${data}/cohorts/${cohort_name}/cnv_panel/v${cnv_panel_version}/` (six bigWigs, `panel.json`, `controls.tsv`)
+- **Sample QC extract (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/qc/somalier/${barcode}.${sampleqc_label}.somalier` (non-empty)
+- **Sample QC tables (family)**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${sampleqc_label}.{samples,pairs,flags}.tsv`, and `${FID}.${sampleqc_label}.inputs.tsv` identical to the snapshot the run builds from the pedigree
+- **Sample QC tables (cohort)**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${sampleqc_label}.{samples.tsv,pairs.tsv,flags.tsv,html}`, and its `inputs.tsv` identical to the cohort's snapshot
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -700,8 +725,8 @@ Cohort-level files are the exception: each is merged again, from every family, w
 that feeds it is built or rebuilt in the run - the common-variant BCF when a family is annotated,
 the Wombat tables when a family's Wombat results are written, the WisecondorX, ancestry, ROH
 and ExpansionHunter cohort files when their family files are, and the MELT cohort files and the
-CNV coverage fit when a sample is called. The CNV panel is the one exception: a version is built
-once and never rebuilt. Adding a family to the pedigree is
+CNV coverage fit when a sample is called, and the sample QC cohort tables when a family's are. The
+CNV panel is the one exception: a version is built once and never rebuilt. Adding a family to the pedigree is
 enough to have it in every cohort file. A cohort merge skipped in that run - its step not
 listed, or the run stopped first - is not caught up later unless the cohort file is deleted.
 
@@ -775,11 +800,19 @@ data/
 │               └── coverage/
 │                   ├── BC001.cov_b250q1.bw                    # Normalised coverage, every 250 bp bin
 │                   └── BC001.cov_b250q1.json                  # Autosomal depth, chrX/chrY ratios
+│               └── qc/
+│                   └── somalier/
+│                       └── BC001.somalier_hg38.somalier       # Allele counts at somalier's sites
 ├── families/                      # Family-specific output directories (sharded)
 │   └── {S1}/                      # Shard level 1 (single character)
 │       └── {S2}/                  # Shard level 2 (single character)
 │           └── FID001/            # Family directory
 │               ├── FID001.pedigree.tsv    # Family-specific pedigree
+│               ├── qc/
+│               │   ├── FID001.somalier_hg38.samples.tsv     # Sex, karyotype, depth, Mendelian errors, flags
+│               │   ├── FID001.somalier_hg38.pairs.tsv       # IBS0, IBS2, kinship: expected vs observed
+│               │   ├── FID001.somalier_hg38.flags.tsv       # One row per flag, with its evidence
+│               │   └── FID001.somalier_hg38.inputs.tsv      # The pedigree snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -859,6 +892,10 @@ data/
 │               └── COHORT_NAME.melt222.candidates.tsv.gz      # Every PASS insertion, ranked
 │       └── coverage/
 │           └── COHORT_NAME.cov_b250q1.panel_v1.fit.tsv        # Each sample's fit to a CNV panel
+│       └── qc/
+│           ├── COHORT_NAME.somalier_hg38.{samples,pairs,flags}.tsv   # Families + cross-family pairs
+│           ├── COHORT_NAME.somalier_hg38.html                 # somalier's interactive relatedness plot
+│           └── COHORT_NAME.somalier_hg38.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
@@ -1053,6 +1090,18 @@ Paths use `${T}` as shorthand for the tag `cov_b${cnv_cov_bin}q${cnv_cov_mapq}`.
 - **controls.tsv**: one row per pedigree sample of the controls cohort: `family_id sample pedigree_sex coverage_sex in_autosomes in_sex_panel autosomal_median_depth chrX_ratio chrY_ratio fit_mad exclusion_reason`, `family_id` comma-separated for a sample in two families
 - **Cohort fit**: `${data}/cohorts/${cohort_name}/coverage/${cohort_name}.${T}.panel_v${version}.fit.tsv` - one row per `(family_id, sample)` with coverage: `family_id sample pedigree_sex coverage_sex fit_mad chrX_ratio chrY_ratio`
 
+### Sample QC Outputs
+
+Paths use `${L}` as shorthand for `${sampleqc_label}`. Missing values are `.`.
+
+- **Sample extract**: `${data}/samples/{S1}/{S2}/${barcode}/qc/somalier/${barcode}.${L}.somalier` - somalier's binary counts, for any later `somalier relate`
+- **Family samples**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${L}.samples.tsv` - one row per member with an extract: `family_id sample father mother pedigree_sex inferred_sex karyotype sex_evidence x_copies y_copies somalier_x_copies somalier_y_copies x_het_rate x_sites depth_mean n_sites_called het_hom_alt_ratio contamination_charr p_middling_ab trio_informative_sites trio_mendelian_error_rate flags`. `sex_evidence` is `coverage` (the cnv_coverage JSON) or `somalier`; `flags` lists the flags naming the sample
+- **Family pairs**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${L}.pairs.tsv` - one row per pair: `family_id_a sample_a family_id_b sample_b n_sites ibs0 ibs2 ibs0_ibs2_ratio king_kinship somalier_relatedness hom_concordance x_ibs0 x_ibs2 expected_kinship expected_relationship observed_relationship po_informative_sites po_opposite_hom_rate status`, `status` one of `ok`, `mismatch`, `low_confidence`
+- **Family flags**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${L}.flags.tsv` - `level family_id sample_a sample_b flag severity evidence`, `severity` one of `high`, `medium`, `info`
+- **Inputs snapshot**: `${FID}.${L}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex has_extract coverage_tag` per member
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.{samples,pairs,flags}.tsv` - the family tables concatenated, the pairs of different families related at the third degree or closer added to `pairs.tsv`, and the flags at `level` `cohort` (`CRYPTIC_RELATED`, `DUPLICATE_OR_MZ`, `SAMPLE_SWAP_CANDIDATE`) added to `flags.tsv` and to each sample's `flags`
+- **Cohort HTML**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.html` - somalier's interactive plot of every pair; past 200,000 pairs, the unrelated ones are subsampled
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -1133,7 +1182,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc
 ```
 
 ### Custom Configuration
@@ -1172,6 +1221,7 @@ The pipeline uses the following containers by default:
 - **GLnexus**: `cgrlab/glnexus:v1.4.1`
 - **SAMtools**: `biocontainers/samtools:1.19.2--h50ea8bc_1`
 - **MELT**: `fcliquet/melt-deps:1.0.0` (OpenJDK 11, samtools, bowtie2, bcftools; MELT itself is staged from `melt_dir`, see `containers/melt/Dockerfile`)
+- **Sample QC**: `fcliquet/sampleqc:1.0.0` (somalier 0.3.5, bcftools 1.24, python3; see `containers/sampleqc/Dockerfile`)
 
 ### Container Profiles
 
@@ -1275,7 +1325,7 @@ tests/ci_local.sh
 | Repository hygiene | scripts keep their exec bit, no large files or run artefacts | `tests/checks/repo_hygiene.sh` |
 | Script tests | every `*_test` next to a script; those under `scripts/` also on Python 3.6, the cluster's | `tests/run_script_tests.sh` |
 | `lib/` tests | unit tests of `lib/*.groovy`, on Nextflow 24.10.5 and 25.10.4 | `tests/lib/run.sh` |
-| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 12 steps run with `-stub-run`, and a second run schedules nothing but the extractor | `tests/stub/run.sh` |
+| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 16 steps run with `-stub-run`, a second run schedules nothing but the extractor, an added family redoes every cohort file, and an edited pedigree redoes that family's sample QC | `tests/stub/run.sh` |
 | Docker build | each `containers/*/Dockerfile` still builds, when one changes; nothing is pushed | |
 
 The stub runs compare the tasks they ran with
