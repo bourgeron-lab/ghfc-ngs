@@ -659,7 +659,13 @@ def cmd_mendelian(args):
     pair_counts = [[0, 0] for _ in pairs]
     possible = {(f, m): {a + b for a in TRANSMITTED[f] for b in TRANSMITTED[m]} for f in range(3) for m in range(3)}
 
-    if trios or pairs:
+    if not trios and not pairs:
+        # bcftools' stream is read all the same: a reader that stops early kills it with
+        # SIGPIPE, and pipefail fails the task with 141. A BCF called before the family's
+        # parents or children joined it has no pair to count.
+        for _ in sys.stdin:
+            pass
+    else:
         for line in sys.stdin:
             fields = line.rstrip("\n").rstrip("\t").split("\t")
             if len(fields) != 3 * len(order):
