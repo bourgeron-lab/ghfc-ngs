@@ -102,6 +102,10 @@ expect_refusal sampleqc_bad_label "sampleqc_label 'sqc/stub' may only hold" "${v
     'sampleqc_label: "sqc/stub"'
 expect_refusal sampleqc_no_sites "the 'sampleqc' step cannot find somalier_sites" "${v[0]}" 'steps: ["sampleqc"]' \
     'sampleqc_label: "sqc_stub"' "somalier_sites: \"${fixture}/refs/absent.vcf.gz\""
+{ cat "${fixture}/data/cohorts/STUB/STUB.pedigree.tsv"; printf 'FAM02\tBC003\t0\t0\t1\t2\n'; } \
+    > "${fixture}/conflict.pedigree.tsv"
+expect_refusal pedigree_conflict "Pedigree file has two different rows for BC003" "${v[@]}" \
+    "pedigree: \"${fixture}/conflict.pedigree.tsv\""
 expect_refusal resources_typo "no process is called PYWOMBATT" "${v[@]}" 'resources: {PYWOMBATT: {cpus: 2}}'
 
 # --- 2. and 3. stub runs ------------------------------------------------------------------

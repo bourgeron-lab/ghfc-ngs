@@ -1202,7 +1202,12 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
     // barcode -> 'male', 'female' or '' when the pedigree does not say (0, -9, ...). Some
     // pedigrees write sex as a decimal, 2.0.
     def sex = [:]
-    
+    // barcode -> its row, as InputsSnapshot normalises it, to tell a repeated row from a
+    // conflicting one. A repeat is dropped; two different rows for one member stop the run,
+    // as there is no telling which family, parents or sex is right.
+    def rows = [:]
+    def repeated = [] as LinkedHashSet
+
     file(pedigree_file).readLines().eachWithIndex { line, index ->
         // Skip comments and empty lines
         if (line.startsWith('#') || line.trim().isEmpty()) return
@@ -1222,13 +1227,29 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
         
         def fid = cols[0]
         def barcode = cols[1]
-        
+
+        def row = InputsSnapshot.pedigreeRow(cols as List)
+        def earlier = rows[barcode]
+        if (earlier != null) {
+            if (earlier != row) {
+                recordFailedRun("pedigree with two different rows for ${barcode}")
+                exit 1, "ERROR: Pedigree file has two different rows for ${barcode}: '${earlier.join(' ')}' and '${row.join(' ')}'. Keep only the right one."
+            }
+            repeated.add(barcode)
+            return
+        }
+        rows[barcode] = row
+
         families.add(fid)
         individuals.add(barcode)
         family_members[barcode] = fid
         sex[barcode] = ['1': 'male', '2': 'female'][cols[4].trim().replaceAll(/\.0+$/, '')] ?: ''
     }
-    
+
+    if (repeated && !quiet) {
+        log.warn "Pedigree lists ${repeated.size()} individual(s) more than once, with the same row; the repeats are ignored: ${repeated.join(', ')}"
+    }
+
     return [
         families: families,
         individuals: individuals,

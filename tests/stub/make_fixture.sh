@@ -10,6 +10,8 @@
 #   FAM01  BC001 (father, FASTQ, two lanes)  BC002 (mother, FASTQ)  BC003 (child, GRCh38 CRAM)
 #   FAM02  BC004 (singleton, GRCh37 CRAM)
 # so alignment runs from FASTQ with a multi-unit merge, and realigns from both old references.
+# BC003's row is given twice, the second time with its sex written 1.0: a repeated row is
+# ignored, and must not make a family look as if it had more members than it has.
 #
 #   tests/stub/make_fixture.sh <dir>
 
@@ -29,6 +31,7 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     FAM01 BC002 0 0 2 1 \
     FAM01 BC003 BC001 BC002 1 2 \
     FAM02 BC004 0 0 2 2 \
+    FAM01 BC003 BC001 BC002 1.0 2 \
     >> "${data}/cohorts/STUB/STUB.pedigree.tsv"
 
 # <run>_<x>_<project>_<x>_<barcode>_<lane>_<flowcell>.<dual>.R{1,2}.fastq.gz, as main.nf parses it

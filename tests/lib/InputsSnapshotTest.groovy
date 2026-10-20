@@ -31,6 +31,21 @@ Check.that('a short row is refused') {
         assert e.message.contains('5 columns instead of 6')
     }
 }
+Check.that('a repeated row is dropped, even written differently or with another phenotype') {
+    def repeats = lines + ['FAM1\tKID\tDAD\tMUM\t1\t1', 'FAM1\tMUM\t0\t0\t2\t-9', 'FAM1\tKID\tDAD\tMUM\t1.00\t2']
+    assert InputsSnapshot.pedigreeRows(repeats) == InputsSnapshot.pedigreeRows(lines)
+}
+Check.that('a member with two different rows is refused') {
+    ['FAM2\tKID\tDAD\tMUM\t1\t2', 'FAM1\tKID\t0\tMUM\t1\t2', 'FAM1\tKID\tDAD\tMUM\t2\t2'].each { other ->
+        try {
+            InputsSnapshot.pedigreeRows(lines + [other])
+            assert false, "accepted ${other}"
+        }
+        catch (IllegalArgumentException e) {
+            assert e.message.contains('two different rows for KID')
+        }
+    }
+}
 Check.that('the text is the header then the rows, one line each') {
     def text = InputsSnapshot.render([label: 'L1', mendelian: 'none'], [['F', 'A', '0', '0', '1', 'yes', '-']])
     assert text == '#inputs\tv1\n#label\tL1\n#mendelian\tnone\nF\tA\t0\t0\t1\tyes\t-\n'

@@ -136,6 +136,10 @@ FAM002 C000F3C C000F3A C000F3B 2 2
 - **sex**: 1=male, 2=female
 - **phenotype**: 1=unaffected, 2=affected
 
+One row per individual. A repeat of an individual's row - same family, parents and sex - is
+ignored, with a warning; an individual given two rows that differ in any of them stops the run
+before anything starts.
+
 ### 3. Configure Parameters
 
 Copy and modify the example parameters file:

@@ -52,11 +52,13 @@ process FAMILIAL_PEDIGREE {
   # Check if the first line is a header (starts with "FID" followed by tab or space)
   first_field=\$(head -n 1 ${pedigree_file} | awk '{print \$1}')
 
-  # Collect this family's rows first so they can be counted before anything is written
+  # Collect this family's rows first so they can be counted before anything is written.
+  # One row per member: the planner has already refused a member with two different rows, so a
+  # second row of one is a repeat.
   if [ "\${first_field}" = "FID" ]; then
-    awk -F'\\t' 'NR > 1 && \$1 == "${fid}"' ${pedigree_file} > family_rows.tmp
+    awk -F'\\t' 'NR > 1 && \$1 == "${fid}" && !seen[\$2]++' ${pedigree_file} > family_rows.tmp
   else
-    awk -F'\\t' '\$1 == "${fid}"' ${pedigree_file} > family_rows.tmp
+    awk -F'\\t' '\$1 == "${fid}" && !seen[\$2]++' ${pedigree_file} > family_rows.tmp
   fi
 
   n_rows=\$(wc -l < family_rows.tmp | tr -d '[:space:]')
