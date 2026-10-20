@@ -9,7 +9,7 @@
 #         pair is NOT_PARENT and the siblings HALF_SIB_NOT_FULL; a son recorded female
 #         (SEX_MISMATCH, from his coverage JSON), an XXY son, an X0 mother (from somalier's
 #         depth, with no JSON) and a father with no sex in the pedigree; mendelian counts on
-#         the trio from a bcftools query stream
+#         the trio from a bcftools query stream, and a stream with no pair in it read to the end
 #   FAM2  grandparents, half-sibs recorded as such but observed full (FULL_SIB_NOT_HALF),
 #         spouses related at the third degree (CONSANGUINITY), a pair with too few sites to
 #         classify, and a CRAM-less member left out
@@ -254,6 +254,12 @@ with open("fam1/query.tsv", "w") as fh:
 PY
 
 python3 "${script}" mendelian --snapshot fam1/inputs.tsv --samples MUM,KID1,DAD --out fam1/mendel.tsv < fam1/query.tsv
+# A BCF with no parent and child of the snapshot in it has no pair to count, and its stream is
+# read to the end all the same: a writer cut off dies of SIGPIPE, which pipefail fails on
+awk 'BEGIN { for (i = 0; i < 200000; i++) print "0/0\t30\t20\t" }' \
+    | python3 "${script}" mendelian --snapshot fam1/inputs.tsv --samples MUM --out fam1/mendel_none.tsv
+[[ $(wc -l < fam1/mendel_none.tsv) -eq 1 ]]
+echo "ok    mendelian with no pair reads its stream to the end"
 mkdir tables
 for f in 1 2 3 4 5 6; do
     extra=()
