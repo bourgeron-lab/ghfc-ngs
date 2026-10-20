@@ -14,8 +14,8 @@ process EXPANSIONHUNTER_REVIEWER {
   One task per family rather than per sample: most members have nothing flagged, and a
   pileup takes about a second, so a task per sample would be mostly scheduling.
 
-  A genotype is flagged when its status in the family table is pathogenic, carrier or
-  intermediate: the rows of the cohort's flags.tsv. The table names variants (VariantId),
+  A genotype is flagged when its severity in the family table is high or medium: the rows
+  of the cohort's flags.tsv. Intermediate alleles, carriers and risk alleles are not drawn. The table names variants (VariantId),
   and REViewer takes loci (LocusId). They differ only at loci with several variants, which
   variant_loci maps: FXN_A and FXN are both drawn as FXN, in one pileup.
 
@@ -97,14 +97,14 @@ process EXPANSIONHUNTER_REVIEWER {
       }
       FNR == 1 {
         for (i = 1; i <= NF; i++) col[\$i] = i
-        if (!("sample" in col) || !("locus" in col) || !("status" in col)) {
-          print "ERROR: ${family_table} has no sample, locus or status column" > "/dev/stderr"
+        if (!("sample" in col) || !("locus" in col) || !("severity" in col)) {
+          print "ERROR: ${family_table} has no sample, locus or severity column" > "/dev/stderr"
           bad = 1
           exit 1
         }
         next
       }
-      \$col["sample"] == sample && \$col["status"] ~ /^(pathogenic|carrier|intermediate)\$/ {
+      \$col["sample"] == sample && \$col["severity"] ~ /^(high|medium)\$/ {
         locus = (\$col["locus"] in locus_of) ? locus_of[\$col["locus"]] : \$col["locus"]
         if (!(locus in seen)) { seen[locus] = 1; out = out (out == "" ? "" : ",") locus }
       }

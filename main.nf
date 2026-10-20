@@ -965,7 +965,8 @@ workflow {
             analysis_plan.expansionhunter.need_family,
             analysis_plan.expansionhunter.family_existing,
             analysis_plan.expansionhunter.need_cohort_merge,
-            analysis_plan.expansionhunter.need_reviewer
+            analysis_plan.expansionhunter.need_reviewer,
+            analysis_plan.expansionhunter.snapshots
         )
     }
 
@@ -1351,7 +1352,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // family_existing families. no_cram: no call on disk and no CRAM to make one. A family
         // none of whose members can have a call is in neither family bucket, and out of the
         // cohort files. reviewer_no_bam: a call on disk to review, without its realigned reads.
-        expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false, need_reviewer: planBucket(), reviewer_no_bam: planBucket()],
+        // snapshots: fid -> the inputs snapshot of each family with a table to build or check.
+        expansionhunter: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false, need_reviewer: planBucket(), reviewer_no_bam: planBucket(), snapshots: [:]],
         // As for expansionhunter: needed/existing/no_cram are samples, need_family and
         // family_existing families
         melt: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(), family_existing: planBucket(), need_cohort_merge: false],
@@ -1761,8 +1763,18 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
         }
 
-        // A family is rebuilt when its files are missing or one of its members is (re)called. It
-        // is built from the members that have a call, so one with no CRAM is left out of it.
+        // A family is rebuilt when its files are missing, one of its members is (re)called, or
+        // its inputs snapshot differs from the one beside its table: its pedigree rows, and the
+        // checksums of the thresholds table and of eh_family_table, so that an edited threshold
+        // or a new classification reaches every family. It is built from the members that have
+        // a call, so one with no CRAM is left out of it.
+        def eh_thresholds = params.expansionhunter_thresholds ?
+            (CohortState.sha256(params.expansionhunter_thresholds.toString()) ?: 'missing') : 'none'
+        def eh_table_script = CohortState.sha256("${projectDir}/modules/expansionhunter/scripts/eh_family_table".toString())
+        def eh_rows = [:]
+        InputsSnapshot.pedigreeRows(new File(ghfc_run_state.pedigree_file.toString()).readLines()).each { row ->
+            eh_rows.get(row[0], []) << row
+        }
         families.each { fid ->
             def members = members_by_family[fid] ?: []
             def callable = members.findAll { barcode ->
@@ -1775,7 +1787,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def outputs_exist = ['vcf.gz', 'vcf.gz.tbi', 'genotypes.tsv'].every { ext ->
                 new File("${prefix}.${ext}").exists()
             }
-            if (outputs_exist && !callable.any { barcode -> barcode in plan.expansionhunter.needed }) {
+            def snapshot = InputsSnapshot.render([step: 'expansionhunter', label: label.toString(), family: fid.toString(),
+                                                  thresholds: eh_thresholds, table_script: eh_table_script],
+                                                 eh_rows[fid] ?: [])
+            plan.expansionhunter.snapshots[fid] = snapshot
+            if (outputs_exist && InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot) &&
+                    !callable.any { barcode -> barcode in plan.expansionhunter.needed }) {
                 plan.expansionhunter.family_existing.add(fid)
             } else {
                 plan.expansionhunter.need_family.add(fid)

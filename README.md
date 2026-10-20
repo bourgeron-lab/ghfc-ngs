@@ -530,9 +530,9 @@ modules/roh/scripts/roh_cohort_merge_test
 
 Short tandem repeat (STR) genotyping with [ExpansionHunter](https://github.com/Illumina/ExpansionHunter) v5.0.0, per sample, then merged per family and per cohort:
 1. **Calling** - Per sample, every locus of `expansionhunter_catalog` is genotyped from the CRAM, with the sex from the pedigree. The realigned reads are kept, sorted and indexed, for IGV or REViewer
-2. **Family merge** - The members' VCFs are merged into one, and a genotype table is written: one row per locus and member, with each allele's repeat count, confidence interval, read support and class against `expansionhunter_thresholds`
-3. **Cohort merge** - The family VCFs are merged. The family tables are concatenated, with each member's percentile among the cohort's founders. A per-locus summary and the flagged genotypes are written alongside
-4. **Pileups** - Per family, [REViewer](https://github.com/Illumina/REViewer) 0.2.7 draws the realigned reads of each member's flagged genotypes (status `pathogenic`, `carrier` or `intermediate`) as an SVG, when `expansionhunter_reviewer` is on and thresholds are given
+2. **Family merge** - The members' VCFs are merged into one, and a genotype table is written: one row per locus and member, with each allele's repeat count, confidence interval, read support, class against `expansionhunter_thresholds`, confidence given the member's read length, and the row's severity
+3. **Cohort merge** - The family VCFs are merged. The family tables are concatenated, with each member's percentile among the cohort's founders. A per-locus summary and the genotypes to review (severity `high` or `medium`) are written alongside
+4. **Pileups** - Per family, [REViewer](https://github.com/Illumina/REViewer) 0.2.7 draws the realigned reads of each member's genotypes of severity `high` or `medium` as an SVG, when `expansionhunter_reviewer` is on and thresholds are given
 
 ExpansionHunter does not count the repeat in the alignment as it stands. It builds a graph of each locus (left flank, repeat, right flank), realigns the region's reads onto it, and estimates the length of both alleles. That is how it goes past the read length: a read lying wholly inside the repeat gives no exact length, but the number of such reads bounds the expansion from below.
 
@@ -548,13 +548,15 @@ ExpansionHunter does not count the repeat in the alignment as it stands. It buil
   - `INREPEAT` - reads lie wholly inside the repeat: a frank expansion beyond the read length, the mode expected of a pathogenic expansion.
 - A long allele supported by `FLANKING` reads alone, at a locus where the rest of the cohort is `SPANNING`, is a probable artefact. `allele*_ci` gives the confidence interval; a wide one on a long allele is the norm.
 - `locus_coverage` is the local depth. ExpansionHunter's `filter` is `LowDepth` below 10x, or when fewer than 5 reads span a breakend.
-- `allele1_class` and `allele2_class` compare each count with `expansionhunter_thresholds`, inclusive thresholds checked in this order: `pathogenic` (at least `pathogenic_min`), `intermediate` (at least `intermediate_min`, when the locus has one), `normal` (at most `normal_max`, or anything lower when `normal_max` is empty), otherwise `above_normal`. A locus with no thresholds row is left `.`.
+- `allele1_class` and `allele2_class` compare each count with `expansionhunter_thresholds`, inclusive thresholds checked in this order: `pathogenic` (at least `pathogenic_min`), `premutation` (at least `premutation_min`, when the locus has one), `intermediate` (at least `intermediate_min`, when the locus has one), `normal` (at most `normal_max`, or anything lower when `normal_max` is empty), otherwise `above_normal`. A locus with no thresholds row is left `.`.
 - `status` combines a member's alleles by inheritance. At AR loci, and XLR loci with two alleles, one pathogenic allele makes a `carrier` and two make `pathogenic`. Any other inheritance takes the highest allele class.
+- `allele1_confidence` and `allele2_confidence` say whether an allele past `normal_max` can be trusted, from its reads and the member's `read_length` (from its ExpansionHunter JSON). It is `low` when the allele is short enough to be spanned (its length in bp at most the read length minus 20) but fewer than 2 reads span it; when it is longer but fewer than 3 reads lie inside the repeat; at a locus whose motif has an N (ARX's and PHOX2B's GCN), where GC-rich flanks pass for in-repeat reads, unless 2 reads span it; and when the reference allele itself cannot be spanned and the pathogenic range starts within two read lengths, so that normal alleles make as many in-repeat reads as pathogenic ones (TBP, ATXN1 and THAP11 with 100 bp reads). Otherwise `ok`.
+- `severity` ranks the row: `high` for a pathogenic status, `medium` for a premutation, `info` for an intermediate allele, a carrier, or any status at a locus whose thresholds row says `report` `risk` (a common risk allele, as TCF4's for Fuchs dystrophy). A low-confidence allele drops the row one rank. Only `high` and `medium` rows are in `flags.tsv` and drawn by REViewer.
 - `father` and `mother` are filled in only for parents genotyped in the family. `parents_max_allele` is the longest allele either of them carries. A child's allele well above it is an expansion on transmission, or an artefact.
 
-**Comparing with the cohort.** An allele classed pathogenic in dozens of unrelated individuals says something about the locus, the catalog or the thresholds, not about the individuals. `loci.tsv` gives, per locus, the founders' longest-allele distribution and how many members reach each class. In GHFC-GRCh38, about 200 samples carry an ARX_2 allele at or above its pathogenic threshold, and XYLT1's catalog region counts more units than the published normal range, so nearly every sample is `above_normal`. Founders are members with no genotyped parent in their family, so a family does not count an allele several times over. `cohort_percentile` places each member's longest allele among them.
+**Comparing with the cohort.** An allele classed pathogenic in dozens of unrelated individuals says something about the locus, the catalog or the thresholds, not about the individuals. `loci.tsv` gives, per locus, the founders' longest-allele distribution and how many members reach each status and severity. In GHFC-GRCh38, about 200 samples carry an ARX_2 allele at or above its pathogenic threshold, nearly all of low confidence: 100 bp genomes, and calls no read spans. XYLT1's catalog region counts more units than the published normal range, so nearly every sample is `above_normal`. Founders are members with no genotyped parent in their family, so a family does not count an allele several times over. `cohort_percentile` places each member's longest allele among them.
 
-**The catalog label.** Nothing on disk records which catalog a call was made with, so `expansionhunter_catalog_name` is part of every output file name. Give a new catalog a new label and it is recomputed in full; keep the label and the existing calls are reused as they are. The thresholds are not in any file name: after changing them, delete the families' and the cohort's `str/expansionhunter/*.tsv`, and they are written again from the existing calls.
+**The catalog label.** Nothing on disk records which catalog a call was made with, so `expansionhunter_catalog_name` is part of every output file name. Give a new catalog a new label and it is recomputed in full; keep the label and the existing calls are reused as they are. The thresholds are not in any file name. Instead each family table has an `inputs.tsv` beside it: the family's pedigree rows and the checksums of the thresholds table and of `eh_family_table`. A family whose snapshot differs is rebuilt from the existing calls, so an edited threshold, a pipeline update that changes the classification or a corrected pedigree reaches every family on the next run.
 
 The family and cohort table scripts ship with a self-contained test that needs only `python3`:
 
@@ -707,7 +709,7 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **ROH tables (family)**: `${data}/families/{S1}/{S2}/${FID}/roh/${FID}.${ancestry_panel_name}.{froh,roh}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
 - **ROH tables (cohort)**: `${data}/cohorts/${cohort_name}/roh/${cohort_name}.${ancestry_panel_name}.{froh,roh,roh_windows}.tsv`, plus `roh_genes.tsv` when `annotation_gencode` is set
 - **ExpansionHunter calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${expansionhunter_catalog_name}.{vcf,json}` (both non-empty)
-- **ExpansionHunter files (family)**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv}`
+- **ExpansionHunter files (family)**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv}`, and `inputs.tsv` identical to the snapshot the run builds
 - **ExpansionHunter files (cohort)**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${expansionhunter_catalog_name}.{vcf.gz,vcf.gz.tbi,genotypes.tsv,loci.tsv,flags.tsv}`
 - **MELT calls (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/mei/melt/${barcode}.${melt_label}.{ALU,LINE1,SVA}.vcf` (all three non-empty)
 - **MELT files (family)**: `${data}/families/{S1}/{S2}/${FID}/mei/melt/${FID}.${melt_label}.{vcf.gz,vcf.gz.tbi,transmission.tsv}`
@@ -1062,12 +1064,12 @@ Paths use `${L}` as shorthand for `${expansionhunter_catalog_name}`.
 - **Sample calls**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${L}.{vcf,json}`, with the sample named by its bare barcode
 - **Realigned reads**: `${data}/samples/{S1}/{S2}/${barcode}/str/expansionhunter/${barcode}.${L}_realigned.bam` (and `.bai`), sorted
 - **Family VCF**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${L}.vcf.gz` (and `.tbi`), one record per locus
-- **Family genotype table**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${L}.genotypes.tsv`
+- **Family genotype table**: `${data}/families/{S1}/{S2}/${FID}/str/expansionhunter/${FID}.${L}.genotypes.tsv`, and `${FID}.${L}.inputs.tsv`, the snapshot it was built from
 - **Cohort VCF**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${L}.vcf.gz` (and `.tbi`)
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/str/expansionhunter/${cohort_name}.${L}.{genotypes,loci,flags}.tsv`
   - `genotypes` - the family tables concatenated, plus `cohort_percentile`
-  - `loci` - per locus: thresholds, the founders' median, 95th, 99th and 99.9th percentile and maximum, and the number of members per status and not passing ExpansionHunter's filter
-  - `flags` - the genotypes whose status is pathogenic, carrier or intermediate, most severe first, with the founders' median, 99.9th percentile and maximum
+  - `loci` - per locus: thresholds, the founders' median, 95th, 99th and 99.9th percentile and maximum, and the number of members per status, per severity, and not passing ExpansionHunter's filter
+  - `flags` - the genotypes of severity high or medium, high first, with the founders' median, 99.9th percentile and maximum
 
 ### MELT Outputs
 
