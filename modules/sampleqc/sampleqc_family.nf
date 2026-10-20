@@ -18,8 +18,10 @@ process SAMPLEQC_FAMILY {
   one it builds for a run differs from the one on disk, so a pedigree edit reruns it. It is
   also the pedigree every tool here reads.
 
-  somalier relate gives every pair of members its IBS0, IBS2 and shared heterozygotes, and
-  every member its depth and X/Y counts. With the family's norm.bcf, sampleqc_classify
+  somalier relate, with sampleqc_hom_cutoff as its homozygous cutoff, gives every pair of
+  members its IBS0, IBS2 and shared heterozygotes, and every member its depth and X/Y counts.
+  sampleqc_classify reads the extracts as well, for each member's CHARR and each parent and
+  child's opposite homozygotes by chromosome (UPD). With the family's norm.bcf, sampleqc_classify
   mendelian counts the Mendelian errors of every trio and the opposite homozygotes of every
   parent-child pair, at the biallelic autosomal SNVs, genotypes of GQ >= 20 and DP >= 10.
   sampleqc_classify family turns them into the three tables; see its docstring for the
@@ -86,7 +88,9 @@ process SAMPLEQC_FAMILY {
     echo "ERROR: ${fid} has \$(wc -l < extracts.list | tr -d ' ') extracts staged, and \$(wc -l < family.ped | tr -d ' ') members with one in its snapshot" >&2
     exit 1
   fi
-  somalier relate --sites ${sites} --ped family.ped -o relate extracts.list
+  # A site is homozygous below the cutoff's allele fraction, or above 1 minus it: somalier's
+  # 0.01 loses homozygous sites to single stray reads, and inflates every kinship
+  SOMALIER_AB_HOM_CUTOFF=${params.sampleqc_hom_cutoff} somalier relate --sites ${sites} --ped family.ped -o relate extracts.list
 
   mendelian=()
   ${bcf ? """
@@ -102,6 +106,7 @@ process SAMPLEQC_FAMILY {
       --somalier-samples relate.samples.tsv \\
       --somalier-pairs relate.pairs.tsv \\
       --coverage-dir coverage \\
+      --extracts extracts.list --sites ${sites} --hom-cutoff ${params.sampleqc_hom_cutoff} \\
       \${mendelian[@]+"\${mendelian[@]}"} \\
       --out-prefix ${prefix}
   """

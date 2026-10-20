@@ -577,6 +577,11 @@ if ('sampleqc' in pipeline_steps) {
         recordFailedRun("invalid sampleqc_label")
         exit 1, "ERROR: sampleqc_label '${params.sampleqc_label}' may only hold letters, digits, '.', '_' and '-': it is part of every sample QC file name"
     }
+    def hom_cutoff = params.sampleqc_hom_cutoff.toString()
+    if (!(hom_cutoff.isBigDecimal() && hom_cutoff.toBigDecimal() > 0 && hom_cutoff.toBigDecimal() < 0.3)) {
+        recordFailedRun("invalid sampleqc_hom_cutoff")
+        exit 1, "ERROR: sampleqc_hom_cutoff '${params.sampleqc_hom_cutoff}' must be a number above 0 and below 0.3, where somalier's heterozygous sites start"
+    }
     def sampleqc_files = [somalier_sites: params.somalier_sites, ref: params.ref, 'ref .fai': "${params.ref}.fai"]
     def absent = sampleqc_files.findAll { _key, path -> !new File(path.toString()).exists() }
     if (absent) {
@@ -1928,6 +1933,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def qc = plan.sampleqc
         def label = params.sampleqc_label
         def cov_tag = cnvTag()
+        // In every snapshot, so that a new cutoff redoes every family and the cohort
+        def hom_cutoff = params.sampleqc_hom_cutoff.toString().toBigDecimal().stripTrailingZeros().toPlainString()
 
         individuals.each { barcode ->
             def extract = "${Sharding.getSampleDir(params.data, barcode)}/qc/somalier/${barcode}.${label}.somalier"
@@ -1977,7 +1984,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 row + [row[1] in with_extract ? 'yes' : 'no', row[1] in with_coverage ? cov_tag : '-']
             }
             cohort_rows.addAll(snapshot_rows)
-            def snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, family: fid,
+            def snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, hom_cutoff: hom_cutoff, family: fid,
                                                   mendelian: fid in qc.mendelian ? "${fid}.norm.bcf".toString() : 'none'],
                                                  snapshot_rows)
             qc.snapshots[fid] = snapshot
@@ -1998,7 +2005,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
 
         if (qc.extract_members) {
-            qc.cohort_snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, cohort: params.cohort_name.toString()],
+            qc.cohort_snapshot = InputsSnapshot.render([step: 'sampleqc', label: label, hom_cutoff: hom_cutoff,
+                                                        cohort: params.cohort_name.toString()],
                                                        cohort_rows)
             def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/qc/${params.cohort_name}.${label}"
             def cohort_exist = ['samples.tsv', 'pairs.tsv', 'flags.tsv', 'html'].every { ext ->
@@ -2094,7 +2102,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     CNV_COVERAGE: ${'cnv_coverage' in pipeline_steps ? "${analysis_plan.cnv_coverage.existing.size()} individuals done and ${analysis_plan.cnv_coverage.needed.size()} to do (${analysis_plan.cnv_coverage.no_cram.size()} with no CRAM), cohort fit: ${analysis_plan.cnv_coverage.need_fit ? 'Yes' : (analysis_plan.cnv_coverage.fit_skip ? 'Skipped (panel of another tag)' : 'No')}" : 'Skipped (step not requested)'}
     CNV_PANEL: ${'cnv_panel' in pipeline_steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
     == Sample QC ==
-    SAMPLEQC: ${'sampleqc' in pipeline_steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with an edited pedigree), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    SAMPLEQC: ${'sampleqc' in pipeline_steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -2159,7 +2167,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
         log.info "Individuals needing a somalier extract: ${analysis_plan.sampleqc.needed.join(', ')}"
     }
     if (analysis_plan.sampleqc.edited) {
-        log.info "Families whose sample QC is redone for an edited pedigree or new evidence: ${analysis_plan.sampleqc.edited.take(50).join(', ')}${analysis_plan.sampleqc.edited.size() > 50 ? ' and others' : ''}"
+        log.info "Families whose sample QC is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.sampleqc.edited.take(50).join(', ')}${analysis_plan.sampleqc.edited.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.sampleqc.no_cram) {
         // Not an error, as for melt: a gVCF-only sample has nothing to extract from
