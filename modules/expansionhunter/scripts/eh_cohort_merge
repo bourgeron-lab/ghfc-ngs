@@ -12,12 +12,13 @@ Reads every <FID>.<label>.genotypes.tsv in a directory and writes three tables:
 <cohort>.<label>.loci.tsv
     One row per locus: its thresholds, the founders' longest-allele distribution
     (median, 95th, 99th and 99.9th percentiles, maximum), and how many members of the
-    whole cohort fall in each status. A threshold that half the cohort crosses says
-    something about the locus or the catalog, not about the individuals.
+    whole cohort fall in each status and each severity. A threshold that half the cohort
+    crosses says something about the locus or the catalog, not about the individuals.
 
 <cohort>.<label>.flags.tsv
-    The genotype rows whose status is pathogenic, carrier or intermediate, most severe
-    first, with the founders' median, 99.9th percentile and maximum alongside.
+    The genotype rows to review, of severity high or medium (see eh_family_table), high
+    first, with the founders' median, 99.9th percentile and maximum alongside. Intermediate
+    alleles, carriers and risk alleles are info: they stay in genotypes.tsv.
 
 Founders are members with no genotyped parent in their family, so a family does not
 count an allele several times over. Percentiles are nearest-rank.
@@ -33,8 +34,10 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-FLAGGED = ("pathogenic", "carrier", "intermediate")
-STATUSES = ("pathogenic", "carrier", "intermediate", "above_normal")
+FLAGGED = ("high", "medium")
+STATUSES = ("pathogenic", "premutation", "carrier", "intermediate", "above_normal")
+SEVERITIES = ("high", "medium", "info")
+STATUS_ORDER = ("pathogenic", "premutation", "carrier", "intermediate")
 
 
 def die(msg):
@@ -66,9 +69,10 @@ def read_tables(indir, label):
             if header is None:
                 header = h
                 missing = [c for c in ("family_id", "sample", "father", "mother", "locus",
-                                       "allele1", "allele2", "status", "filter") if c not in h]
+                                       "allele1", "allele2", "status", "severity", "filter") if c not in h]
                 if missing:
-                    die(f"{p.name} lacks the columns {', '.join(missing)}")
+                    die(f"{p.name} lacks the columns {', '.join(missing)}: a table from an older "
+                        f"version of the pipeline, which the next run rebuilds")
             elif h != header:
                 die(f"{p.name} has different columns from the other family tables: "
                     f"tables from different versions of the pipeline have been mixed")
@@ -133,20 +137,21 @@ def main():
     samples = defaultdict(set)
     for r in rows:
         status_counts[r["locus"]][r["status"]] += 1
+        status_counts[r["locus"]][r["severity"]] += 1
         samples[r["locus"]].add(r["sample"])
         if r["filter"] != "PASS":
             low_depth[r["locus"]] += 1
     loci_cols = ["locus", "chrom", "pos", "end", "motif", "disease", "inheritance",
-                 "normal_max", "intermediate_min", "pathogenic_min",
+                 "normal_max", "intermediate_min", "premutation_min", "pathogenic_min", "report",
                  "n_samples", "n_founders", "founders_median", "founders_p95",
                  "founders_p99", "founders_p99.9", "founders_max"] + \
-                [f"n_{s}" for s in STATUSES] + ["n_not_pass"]
+                [f"n_{s}" for s in STATUSES + SEVERITIES] + ["n_not_pass"]
     with open(f"{a.cohort}.{a.label}.loci.tsv", "w") as fo:
         fo.write("\t".join(loci_cols) + "\n")
         for locus in loci:
             first = first_row[locus]
             values = founder_values.get(locus, [])
-            s = {c: first.get(c, ".") for c in loci_cols[:10]}
+            s = {c: first.get(c, ".") for c in loci_cols[:12]}
             s.update({
                 "n_samples": str(len(samples[locus])),
                 "n_founders": str(len(values)),
@@ -157,23 +162,24 @@ def main():
                 "founders_max": str(values[-1]) if values else ".",
                 "n_not_pass": str(low_depth[locus]),
             })
-            for st in STATUSES:
+            for st in STATUSES + SEVERITIES:
                 s[f"n_{st}"] = str(status_counts[locus][st])
             summary[locus] = s
             fo.write("\t".join(s[c] for c in loci_cols) + "\n")
 
     flag_cols = header + ["cohort_percentile", "founders_median", "founders_p99.9", "founders_max"]
-    flagged = [r for r in rows if r["status"] in FLAGGED]
-    flagged.sort(key=lambda r: (FLAGGED.index(r["status"]), loci.index(r["locus"]),
-                                r["family_id"], r["sample"]))
+    flagged = [r for r in rows if r["severity"] in FLAGGED]
+    flagged.sort(key=lambda r: (FLAGGED.index(r["severity"]), STATUS_ORDER.index(r["status"]),
+                                loci.index(r["locus"]), r["family_id"], r["sample"]))
     with open(f"{a.cohort}.{a.label}.flags.tsv", "w") as fo:
         fo.write("\t".join(flag_cols) + "\n")
         for r in flagged:
             for c in ("founders_median", "founders_p99.9", "founders_max"):
                 r[c] = summary[r["locus"]][c]
             fo.write("\t".join(r[c] for c in flag_cols) + "\n")
-    by_status = {st: sum(r["status"] == st for r in flagged) for st in FLAGGED}
-    print(f"Cohort {a.cohort} flags: " + ", ".join(f"{n} {st}" for st, n in by_status.items()))
+    by_severity = {sev: sum(r["severity"] == sev for r in rows) for sev in SEVERITIES}
+    print(f"Cohort {a.cohort} flags: " + ", ".join(f"{n} {sev}" for sev, n in by_severity.items())
+          + " (info stays in genotypes.tsv)")
 
 
 if __name__ == "__main__":

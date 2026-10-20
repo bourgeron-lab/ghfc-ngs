@@ -2,10 +2,10 @@
 
 """Tabulate a family's ExpansionHunter genotypes, one row per locus and member.
 
-Reads the members' ExpansionHunter VCFs (one sample each) and the cohort pedigree,
-and writes a long table with each allele's repeat count, confidence interval, read
-support and, when a thresholds table is given, its class against the published
-ranges. Rows are grouped by locus, members in pedigree order, so a family's alleles
+Reads the members' ExpansionHunter VCFs (one sample each), their JSONs for the read
+length, and the cohort pedigree, and writes a long table with each allele's repeat count,
+confidence interval, read support and, when a thresholds table is given, its class against
+the published ranges, how far its reads can be trusted, and how much the row matters. Rows are grouped by locus, members in pedigree order, so a family's alleles
 at one locus sit together.
 
 Allele columns come in pairs, allele1 being the shorter. A male's chrX loci carry one
@@ -13,6 +13,7 @@ allele, and allele2 is then '.'.
 
 Classes, from the thresholds table, checked in this order:
   pathogenic    count >= pathogenic_min
+  premutation   count >= premutation_min, when the locus has one (FMR1 55-200, FXTAS)
   intermediate  count >= intermediate_min, when the locus has one
   normal        count <= normal_max, or any count below the above when normal_max is '.'
   above_normal  between normal_max and the next published threshold
@@ -21,6 +22,26 @@ Classes, from the thresholds table, checked in this order:
 alleles, a single pathogenic allele makes a `carrier` and two make `pathogenic`; any
 other inheritance (AD, XLD, AD/AR, unknown) takes the member's highest allele class.
 
+Confidence of an allele past normal_max, from its reads and the sample's read length:
+ExpansionHunter sizes an allele exactly only from reads that span it, and estimates a longer
+one from the reads it finds inside the repeat. With L the read length:
+  low   the allele is short enough to be spanned (motif length x count <= L - 20 bp) but
+        fewer than 2 reads span it;
+  low   it is longer, but fewer than 3 reads lie inside the repeat;
+  low   the locus' motif is degenerate (an N, as ARX's and PHOX2B's GCN): GC-rich sequence
+        around the tract passes for in-repeat reads, so only spanning reads count, 2 at least;
+  low   the reference allele itself cannot be spanned at L, and the pathogenic range starts
+        within 2 L: normal alleles then make as many in-repeat reads as pathogenic ones (TBP,
+        ATXN1, THAP11 with 100 bp reads);
+  ok    otherwise.
+'.' for alleles within normal_max, unclassified ones, or a sample whose read length is not
+known.
+
+`severity` ranks the row for review: high for a pathogenic status, medium for a premutation;
+info for intermediate, carrier, and every status at a locus whose `report` is `risk` (a
+common risk allele, TCF4's for Fuchs dystrophy); '.' otherwise. A row whose alleles past
+normal include a low-confidence one drops one rank, high to medium and medium to info.
+
 `father` and `mother` are given only for parents genotyped in this family, so a member
 with neither is a founder of the family's data. `parents_max_allele` is the longest
 allele either genotyped parent carries at the locus: a child's allele well above it is
@@ -28,10 +49,16 @@ an expansion on transmission, or an artefact.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-CLASS_RANK = {"normal": 0, "above_normal": 1, "intermediate": 2, "pathogenic": 3}
+CLASS_RANK = {"normal": 0, "above_normal": 1, "intermediate": 2, "premutation": 3, "pathogenic": 4}
+SEVERITIES = ("high", "medium", "info")
+SPAN_MARGIN = 20        # bp of flank a spanning read needs, both sides together
+MIN_SPANNING = 2        # spanning reads for an allele a read can span: one can be a misaligned read
+MIN_INREPEAT = 3        # in-repeat reads for an allele longer than a read
+REPORTS = ("flag", "risk")
 
 COLUMNS = [
     "family_id", "sample", "father", "mother", "sex", "phenotype",
@@ -42,6 +69,7 @@ COLUMNS = [
     "allele1_inrepeat", "allele2_inrepeat", "locus_coverage",
     "disease", "inheritance", "normal_max", "intermediate_min", "pathogenic_min",
     "allele1_class", "allele2_class", "status", "parents_max_allele",
+    "premutation_min", "report", "read_length", "allele1_confidence", "allele2_confidence", "severity",
 ]
 
 # FORMAT field -> output column prefix, for the fields that carry one value per allele
@@ -94,17 +122,33 @@ def read_thresholds(path):
             if not line.strip():
                 continue
             row = dict(zip(header, line.rstrip("\n").split("\t")))
+            # premutation_min and report are optional columns
+            report = row.get("report") or "flag"
+            if report not in REPORTS:
+                die(f"thresholds table {path}: report '{report}' for {row['locus']}, not one of {', '.join(REPORTS)}")
             try:
                 out[row["locus"]] = {
                     "disease": row["disease"] or ".",
                     "inheritance": row["inheritance"] or ".",
                     "normal_max": number(row["normal_max"]),
                     "intermediate_min": number(row["intermediate_min"]),
+                    "premutation_min": number(row.get("premutation_min", ".")),
                     "pathogenic_min": number(row["pathogenic_min"]),
+                    "report": report,
                 }
             except ValueError:
                 die(f"thresholds table {path}: non-numeric threshold for {row['locus']}")
     return out
+
+
+def read_length(path):
+    """(sample, read length) from an ExpansionHunter JSON: the most common of its loci's
+    ReadLength, None when it records none (a stub run's '{}')."""
+    with open(path) as fh:
+        data = json.load(fh)
+    sample = (data.get("SampleParameters") or {}).get("SampleId")
+    lengths = [r.get("ReadLength") for r in (data.get("LocusResults") or {}).values() if r.get("ReadLength")]
+    return sample, (max(set(lengths), key=lengths.count) if lengths else None)
 
 
 def read_vcf(path):
@@ -140,6 +184,8 @@ def classify(count, t):
         return "."
     if t["pathogenic_min"] is not None and count >= t["pathogenic_min"]:
         return "pathogenic"
+    if t["premutation_min"] is not None and count >= t["premutation_min"]:
+        return "premutation"
     if t["intermediate_min"] is not None and count >= t["intermediate_min"]:
         return "intermediate"
     if t["normal_max"] is None or count <= t["normal_max"]:
@@ -161,8 +207,39 @@ def status(classes, t):
     return max(classes, key=CLASS_RANK.get)
 
 
+def confidence(count, allele_class, reads, motif, ref_units, t, length):
+    """ok or low for an allele past normal, '.' otherwise; see the module docstring.
+    reads: (spanning, in-repeat) read counts consistent with the allele."""
+    if count is None or allele_class in (".", "normal") or not length or motif in ("", "."):
+        return "."
+    spanning, inrepeat = reads
+    span = length - SPAN_MARGIN
+    if "N" in motif.upper() or count * len(motif) <= span:
+        return "ok" if spanning >= MIN_SPANNING else "low"
+    ref_bp = ref_units * len(motif) if ref_units is not None else 0
+    path_bp = t["pathogenic_min"] * len(motif) if t["pathogenic_min"] is not None else None
+    if ref_bp > span and path_bp is not None and path_bp < 2 * length:
+        return "low"
+    return "ok" if inrepeat >= MIN_INREPEAT else "low"
+
+
+def severity(row_status, confidences, t):
+    rank = {"pathogenic": 0, "premutation": 1, "intermediate": 2, "carrier": 2}.get(row_status)
+    if t is None or rank is None:
+        return "."
+    if t["report"] == "risk":
+        rank = 2
+    if "low" in confidences:
+        rank += 1
+    return SEVERITIES[min(rank, 2)]
+
+
 def fmt_value(v):
     return "." if v is None else str(v)
+
+
+def read_count(value):
+    return 0 if value in (None, "", ".") else int(value)
 
 
 def main():
@@ -171,6 +248,8 @@ def main():
     ap.add_argument("--family", required=True)
     ap.add_argument("--pedigree", required=True)
     ap.add_argument("--thresholds", default="")
+    ap.add_argument("--json", action="append", default=[],
+                    help="a member's ExpansionHunter JSON, for its read length; repeat for each")
     ap.add_argument("--out", required=True)
     ap.add_argument("vcfs", nargs="+")
     a = ap.parse_args()
@@ -194,6 +273,13 @@ def main():
             if locus not in loci:
                 loci.append(locus)
             calls[sample][locus] = rec
+
+    lengths = {}
+    for path in a.json:
+        sample, length = read_length(path)
+        if sample not in calls:
+            die(f"{Path(path).name} is of sample {sample}, who has no VCF here")
+        lengths[sample] = length
 
     ordered = [s for s in members if s in calls]
     absent = [s for s in members if s not in calls]
@@ -240,8 +326,19 @@ def main():
                 row["status"] = status(classes, t)
                 for key in ("disease", "inheritance"):
                     row[key] = t[key] if t else "."
-                for key in ("normal_max", "intermediate_min", "pathogenic_min"):
+                for key in ("normal_max", "intermediate_min", "premutation_min", "pathogenic_min"):
                     row[key] = fmt_value(t[key]) if t else "."
+                row["report"] = t["report"] if t else "."
+                length = lengths.get(sample)
+                row["read_length"] = fmt_value(length)
+                ref_units = number(row["ref_units"])
+                confidences = []
+                for i, (c, cls) in enumerate(zip(cn, classes), start=1):
+                    reads = (read_count(row[f"allele{i}_spanning"]), read_count(row[f"allele{i}_inrepeat"]))
+                    confidences.append(confidence(c, cls, reads, row["motif"], ref_units, t, length) if t else ".")
+                row["allele1_confidence"] = confidences[0] if confidences else "."
+                row["allele2_confidence"] = confidences[1] if len(confidences) > 1 else "."
+                row["severity"] = severity(row["status"], confidences, t)
                 parental = [c for p in (father, mother) if p != "." for c in counts(p, locus)
                             if c is not None]
                 row["parents_max_allele"] = str(max(parental)) if parental else "."
