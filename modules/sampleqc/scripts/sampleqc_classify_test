@@ -11,14 +11,25 @@
 #         depth, with no JSON) and a father with no sex in the pedigree; mendelian counts on
 #         the trio from a bcftools query stream
 #   FAM2  grandparents, half-sibs recorded as such but observed full (FULL_SIB_NOT_HALF),
-#         spouses related at the third degree (UNEXPECTED_RELATED_IN_FAMILY), a pair with too
-#         few sites to classify, and a CRAM-less member left out
+#         spouses related at the third degree (CONSANGUINITY), a pair with too few sites to
+#         classify, and a CRAM-less member left out
 #   FAM3  a trio whose child is related to neither parent (NOT_PARENT twice, and
 #         SAMPLE_UNRELATED_TO_FAMILY)
 #   FAM4  a singleton, the FAM3 child's parent (SAMPLE_SWAP_CANDIDATE), FAM1's father's
-#         duplicate, and FAM2's grandmother's cousin
-# and the cohort tables made from them. Also that the family level refuses a pairs table
-# with a stranger, and the cohort level family tables that miss a sample. Needs only python3.
+#         duplicate, FAM2's grandmother's cousin, and the contaminated FAM1 child's relative
+#         (left out, RELATEDNESS_UNRELIABLE)
+#   FAM5  a trio whose son has his mother's chromosome 2 from his father only, which the
+#         extracts show (UPD_CANDIDATE rather than NOT_PARENT), and MZ twin sisters
+#   FAM6  members with missing parents: half-sibs by the pedigree who are full ones (no flag),
+#         siblings whose parents are not in it (RELATED_BEYOND_PEDIGREE), and full siblings
+#         whose four parents are all recorded and distinct (UNEXPECTED_RELATED_IN_FAMILY)
+# and the cohort tables made from them. FAM1 and FAM5 have synthetic extracts, from which CHARR
+# is computed: FAM1's NPK has 4% stray reads at its homozygous sites (POSSIBLE_CONTAMINATION).
+# A second cohort of 16 singletons has enough unrelated pairs for the IBS0 yardstick: a
+# second-degree pair with the IBS0 of relatives (CRYPTIC_RELATED, high), one with the IBS0
+# of unrelated pairs (info), and a contaminated sample's pairs left out but its duplicate
+# kept. Also that the family level refuses a pairs table with a stranger, and the cohort level
+# family tables that miss a sample. Needs only python3.
 #
 #   modules/sampleqc/scripts/sampleqc_classify_test
 
@@ -61,16 +72,28 @@ assert q.kinship_class(0.4, 0.0) == "duplicate"
 assert q.kinship_class(0.25, 0.002) == "parent-offspring" and q.kinship_class(0.25, 0.03) == "full-sibs"
 assert q.kinship_class(0.1, 0.1) == "second-degree" and q.kinship_class(0.05, 0.1) == "third-degree"
 assert q.kinship_class(0.04, 0.1) == "unrelated" and q.kinship_class(0.2, None) == "first-degree"
+mp = q.Pedigree({s: {"father": f, "mother": m} for s, (f, m) in {
+    "MO": ("0", "0"), "S1": ("0", "MO"), "S2": ("0", "MO"), "S3": ("FA", "MO"), "S4": ("FB", "MO"),
+    "Z1": ("0", "0"), "Z2": ("0", "0"), "K": ("Z1", "Z2")}.items()})
+assert mp.relationship("S1", "S2") == "half-sibs" and mp.may_be_full_sibs("S1", "S2")
+assert mp.may_be_full_sibs("S1", "S3") and not mp.may_be_full_sibs("S3", "S4")
+assert mp.siblings("S1", "S4") and not mp.siblings("Z1", "Z2")
+assert mp.spouses("Z1", "Z2") and not mp.spouses("S1", "S2")
+assert mp.both_parents("S3") and not mp.both_parents("S1") and not mp.both_parents("Z1")
+# somalier's calls: depth 7, het within 0.3-0.7, homozygous within the cutoff
+assert q.genotype(50, 0, 0, 0.1) == 0 and q.genotype(0, 50, 0, 0.1) == 2 and q.genotype(25, 25, 0, 0.1) == 1
+assert q.genotype(48, 2, 0, 0.1) == 0 and q.genotype(48, 2, 0, 0.01) is None and q.genotype(40, 10, 0, 0.1) is None
+assert q.genotype(3, 3, 0, 0.1) is None and q.genotype(25, 25, 10, 0.1) is None
 for x, y, k in [(2, 0, "XX"), (1, 1, "XY"), (1, 0, "X0"), (2, 1, "XXY"), (1, 2, "XYY"), (3, 0, "XXX"),
                 (1.5, 0, "ambiguous"), (0.1, 1, "ambiguous"), (None, 1, "unknown"), (2.2, 0.1, "XX")]:
     assert q.karyotype(x, y) == k, (x, y, q.karyotype(x, y), k)
-print("ok    expected kinships, classes and karyotypes")
+print("ok    expected kinships, classes, karyotypes and genotype calls")
 PY
 
 # --- synthetic somalier tables -----------------------------------------------------------------
 L=t1
 TAG=cov_b250q1
-mkdir cov fam1 fam2 fam3 fam4
+mkdir cov fam1 fam2 fam3 fam4 fam5 fam6 ext
 
 # snapshot <file> then one "fid sample father mother sex somalier coverage" per row
 snapshot() {
@@ -84,7 +107,11 @@ snapshot fam2/inputs.tsv "FAM2 GF 0 0 1 yes -" "FAM2 GM 0 0 2 yes -" "FAM2 H1 GF
     "FAM2 H2 GF OTHER 1 yes -" "FAM2 LOW GF GM 2 yes -" "FAM2 NOCRAM GF GM 2 no -"
 snapshot fam3/inputs.tsv "FAM3 A 0 0 1 yes -" "FAM3 B 0 0 2 yes -" "FAM3 C A B 1 yes -"
 snapshot fam4/inputs.tsv "FAM4 X 0 0 1 yes -"
-{ head -2 fam1/inputs.tsv; for f in fam1 fam2 fam3 fam4; do grep -v '^#' "${f}/inputs.tsv"; done; } > cohort_inputs.tsv
+snapshot fam5/inputs.tsv "FAM5 U_F 0 0 1 yes -" "FAM5 U_M 0 0 2 yes -" "FAM5 U_C U_F U_M 1 yes -" \
+    "FAM5 T1 U_F U_M 2 yes -" "FAM5 T2 U_F U_M 2 yes -"
+snapshot fam6/inputs.tsv "FAM6 MO 0 0 2 yes -" "FAM6 S1 0 MO 1 yes -" "FAM6 S2 0 MO 1 yes -" \
+    "FAM6 Z1 0 0 1 yes -" "FAM6 Z2 0 0 1 yes -" "FAM6 Q1 QF QM 1 yes -" "FAM6 Q2 QF2 QM2 1 yes -"
+{ head -2 fam1/inputs.tsv; for f in fam1 fam2 fam3 fam4 fam5 fam6; do grep -v '^#' "${f}/inputs.tsv"; done; } > cohort_inputs.tsv
 
 python3 - <<'PY'
 import json
@@ -107,7 +134,9 @@ def sample(fid, s, x=2, y=0, xhet=0.6, called=19000, charr=0.01):
 # siblings. hets_a and hets_b, each sample's over all its sites, are set apart so that using them
 # would show
 REL = {"dup": (0, 3000, 9000), "po": (0, 1500, 6000), "fs": (150, 1800, 5000), "second": (300, 1350, 4500),
-       "third": (450, 1275, 4000), "unrel": (600, 1200, 3500)}
+       "third": (450, 1275, 4000), "unrel": (600, 1200, 3500),
+       # second-degree kinship with the opposite homozygotes of an unrelated pair: shared ancestry
+       "second_ancestry": (600, 1950, 3500)}
 
 def pair(a, b, rel, n=10000):
     ibs0, shared, ibs2 = REL[rel]
@@ -143,12 +172,70 @@ write("fam3/pairs.tsv", PAIR_HEADER, [pair("A", "B", "unrel"), pair("A", "C", "u
 write("fam4/samples.tsv", SAMPLE_HEADER, [sample("FAM4", "X", x=1, y=1, xhet=0)])
 write("fam4/pairs.tsv", PAIR_HEADER, [])
 
+write("fam5/samples.tsv", SAMPLE_HEADER, [
+    sample("FAM5", "U_F", x=1, y=1, xhet=0), sample("FAM5", "U_M"), sample("FAM5", "U_C", x=1, y=1, xhet=0),
+    sample("FAM5", "T1"), sample("FAM5", "T2")])
+# U_C is observed a sibling of his mother, as a son with a paternal UPD can be
+write("fam5/pairs.tsv", PAIR_HEADER, [
+    pair("U_F", "U_M", "unrel"), pair("U_F", "U_C", "po"), pair("U_M", "U_C", "fs"), pair("U_F", "T1", "po"),
+    pair("U_F", "T2", "po"), pair("U_M", "T1", "po"), pair("U_M", "T2", "po"), pair("U_C", "T1", "fs"),
+    pair("U_C", "T2", "fs"), pair("T1", "T2", "dup")])
+
+fam6 = ["MO", "S1", "S2", "Z1", "Z2", "Q1", "Q2"]
+write("fam6/samples.tsv", SAMPLE_HEADER, [sample("FAM6", "MO")] +
+      [sample("FAM6", s, x=1, y=1, xhet=0) for s in fam6[1:]])
+rel6 = {("MO", "S1"): "po", ("MO", "S2"): "po", ("S1", "S2"): "fs", ("Z1", "Z2"): "fs", ("Q1", "Q2"): "fs"}
+write("fam6/pairs.tsv", PAIR_HEADER, [pair(a, b, rel6.get((a, b), "unrel"))
+                                      for i, a in enumerate(fam6) for b in fam6[i + 1:]])
+
 within = []
-for f in ("fam1", "fam2", "fam3"):
+for f in ("fam1", "fam2", "fam3", "fam5", "fam6"):
     within += open(f + "/pairs.tsv").read().splitlines()[1:]
 write("cohort_pairs.tsv", PAIR_HEADER, within + [
     pair("X", "C", "po"), pair("DAD", "X", "dup"), pair("GM", "X", "third"), pair("A", "X", "unrel"),
-    pair("KID1", "GF", "unrel"), pair("B", "H1", "po", n=500)])
+    pair("KID1", "GF", "unrel"), pair("B", "H1", "po", n=500), pair("NPK", "X", "second")])
+
+# Extracts and their sites: 800 sites on chr1 and 400 on chr2, every 100 kb, A/C, population
+# frequency 0.5.
+# Read counts at depth 50: 50/0 homozygous, 25/25 het; a site's genotype is i % 3 unless said.
+import gzip, struct
+SITES = [("chr1", (i + 1) * 100000) for i in range(800)] + [("chr2", (i + 1) * 100000) for i in range(400)]
+with gzip.open("ext/sites.vcf.gz", "wt") as fh:
+    fh.write("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+    fh.write("chrX\t5\t.\tA\tC\t.\tPASS\tAF=0.5\n")
+    for c, pos in SITES:
+        fh.write(f"{c}\t{pos}\t.\tA\tC\t.\tPASS\tAF=0.5\n")
+
+def extract(name, gts, stray=0, halved=()):
+    """gts: a genotype per site; stray reads of the other allele at homozygous sites; halved,
+    the sites of a deletion, at half the depth."""
+    counts = {0: (50 - stray, stray, 0), 1: (25, 25, 0), 2: (stray, 50 - stray, 0)}
+    with open(f"ext/{name}.somalier", "wb") as fh:
+        fh.write(struct.pack("<BB", 2, len(name)) + name.encode() + struct.pack("<HHH", len(gts), 0, 0))
+        for i, g in enumerate(gts):
+            fh.write(struct.pack("<III", *(c // 2 for c in counts[g]) if i in halved else counts[g]))
+
+base = [i % 3 for i in range(len(SITES))]
+for s in ("DAD", "MUM", "KID1", "KID2"):
+    extract(s, base)
+extract("NPK", base, stray=2)
+# FAM5: on chr2, the father is het and the mother homozygous at every fourth site; U_C has
+# both of his father's copies there, as his father's homozygote, and no het on chr2 at all.
+# Its twin sisters have one copy from each parent.
+chr2 = range(800, 1200)
+dad, mum, son, twin = list(base), list(base), list(base), list(base)
+for i in chr2:
+    if i % 4 == 0:
+        dad[i], mum[i], son[i], twin[i] = 1, 0, 2, 1
+    elif son[i] == 1:
+        son[i] = 0
+for name, gts in [("U_F", dad), ("U_M", mum), ("U_C", son), ("T1", twin), ("T2", twin)]:
+    extract(name, gts)
+# DEL has the son's genotypes, but at half the depth on chr2: its mother's copy is deleted
+extract("DEL", son, halved=set(chr2))
+for f, names in [("fam1", ["DAD", "MUM", "KID1", "KID2", "NPK"]), ("fam5", ["U_F", "U_M", "U_C", "T1", "T2"])]:
+    with open(f"{f}/extracts.list", "w") as fh:
+        fh.write("".join(f"ext/{n}.somalier\n" for n in names))
 
 # The trio's genotypes, GT GQ DP per sample in BCF order MUM KID1 DAD: 4 sites informative for
 # the trio, two of them Mendelian errors (0/0 x 0/0 -> 0/1, and 0/0 x 1/1 -> 1/1, which is also
@@ -168,9 +255,10 @@ PY
 
 python3 "${script}" mendelian --snapshot fam1/inputs.tsv --samples MUM,KID1,DAD --out fam1/mendel.tsv < fam1/query.tsv
 mkdir tables
-for f in 1 2 3 4; do
+for f in 1 2 3 4 5 6; do
     extra=()
     [[ ${f} == 1 ]] && extra=(--coverage-dir cov --mendelian fam1/mendel.tsv)
+    [[ ${f} == 1 || ${f} == 5 ]] && extra+=(--extracts "fam${f}/extracts.list" --sites ext/sites.vcf.gz)
     python3 "${script}" family --snapshot "fam${f}/inputs.tsv" --somalier-samples "fam${f}/samples.tsv" \
         --somalier-pairs "fam${f}/pairs.tsv" ${extra[@]+"${extra[@]}"} --out-prefix "tables/FAM${f}.${L}" > "fam${f}/log.txt"
 done
@@ -202,17 +290,22 @@ want = {
     ("family", "KARYOTYPE_XXY", "KID1", ".", "high"),
     ("family", "KARYOTYPE_X0", "MUM", ".", "high"),
     ("family", "SEX_UNKNOWN_IN_PED", "DAD", ".", "info"),
-    ("family", "POSSIBLE_CONTAMINATION", "NPK", ".", "medium"),
+    ("family", "POSSIBLE_CONTAMINATION", "NPK", ".", "high"),
     ("family", "FULL_SIB_NOT_HALF", "H1", "H2", "high"),
-    ("family", "UNEXPECTED_RELATED_IN_FAMILY", "GF", "GM", "medium"),
+    ("family", "CONSANGUINITY", "GF", "GM", "info"),
     ("family", "LOW_INFORMATIVE_SITES", "LOW", ".", "medium"),
     ("family", "NOT_PARENT", "A", "C", "high"),
     ("family", "NOT_PARENT", "B", "C", "high"),
     ("family", "SAMPLE_UNRELATED_TO_FAMILY", "C", ".", "high"),
     ("cohort", "CRYPTIC_RELATED", "C", "X", "high"),
     ("cohort", "DUPLICATE_OR_MZ", "DAD", "X", "high"),
-    ("cohort", "CRYPTIC_RELATED", "GM", "X", "medium"),
+    ("cohort", "CRYPTIC_RELATED", "GM", "X", "info"),
     ("cohort", "SAMPLE_SWAP_CANDIDATE", "C", ".", "high"),
+    ("cohort", "RELATEDNESS_UNRELIABLE", "NPK", ".", "info"),
+    ("family", "UPD_CANDIDATE", "U_M", "U_C", "high"),
+    ("family", "MZ_TWIN_CANDIDATE", "T1", "T2", "info"),
+    ("family", "RELATED_BEYOND_PEDIGREE", "Z1", "Z2", "info"),
+    ("family", "UNEXPECTED_RELATED_IN_FAMILY", "Q1", "Q2", "high"),
 }
 assert got == want, "unexpected flags:\n  extra {}\n  missing {}".format(sorted(got - want), sorted(want - got))
 swap = [f for f in flags if f["flag"] == "SAMPLE_SWAP_CANDIDATE"][0]
@@ -220,9 +313,15 @@ assert "parent-offspring of X (FAM4)" in swap["evidence"], swap
 not_parent = [f for f in flags if f["flag"] == "NOT_PARENT" and f["sample_b"] == "NPK"][0]
 assert not_parent["evidence"].startswith("DAD is not the father of NPK"), not_parent
 assert "in the family BCF" not in not_parent["evidence"], "NPK is in no mendelian pair"
+upd = [f for f in flags if f["flag"] == "UPD_CANDIDATE"][0]
+assert "100 of the 100 opposite homozygotes of U_M and U_C lie on chr2, between 0.1 and 39.7 Mb" in upd["evidence"], upd
+assert "at 1.00 of its mean depth: uniparental isodisomy" in upd["evidence"], upd
+unreliable = [f for f in flags if f["flag"] == "RELATEDNESS_UNRELIABLE"][0]
+assert "CHARR 0.080" in unreliable["evidence"] and "its 1 pairs" in unreliable["evidence"], unreliable
 
 samples = {r["sample"]: r for r in table(f"COH.{L}.samples.tsv")}
-assert set(samples) == {"DAD", "MUM", "KID1", "KID2", "NPK", "GF", "GM", "H1", "H2", "LOW", "A", "B", "C", "X"}
+assert set(samples) == {"DAD", "MUM", "KID1", "KID2", "NPK", "GF", "GM", "H1", "H2", "LOW", "A", "B", "C", "X",
+                        "U_F", "U_M", "U_C", "T1", "T2", "MO", "S1", "S2", "Z1", "Z2", "Q1", "Q2"}
 assert "NOCRAM" not in samples
 k = {s: (r["karyotype"], r["inferred_sex"], r["sex_evidence"]) for s, r in samples.items()}
 assert k["KID1"] == ("XXY", "male", "coverage") and k["KID2"] == ("XY", "male", "coverage"), k
@@ -230,12 +329,19 @@ assert k["MUM"] == ("X0", "female", "somalier") and k["DAD"] == ("XY", "male", "
 assert k["NPK"] == ("XX", "female", "coverage"), k
 assert samples["KID1"]["trio_informative_sites"] == "4" and samples["KID1"]["trio_mendelian_error_rate"] == "0.5000"
 assert samples["C"]["flags"] == "CRYPTIC_RELATED,NOT_PARENT,SAMPLE_SWAP_CANDIDATE,SAMPLE_UNRELATED_TO_FAMILY", samples["C"]
-assert samples["H1"]["flags"] == "FULL_SIB_NOT_HALF" and samples["GF"]["flags"] == "UNEXPECTED_RELATED_IN_FAMILY"
+assert samples["H1"]["flags"] == "FULL_SIB_NOT_HALF" and samples["GF"]["flags"] == "CONSANGUINITY"
+# CHARR from the extracts: 2 stray reads at depth 50, over a population frequency of 0.5; the
+# 800 homozygous sites count, the 400 het ones do not. somalier's own value is kept beside it
+c = {s: (samples[s]["contamination_charr"], samples[s]["charr_sites"], samples[s]["somalier_charr"])
+     for s in ("NPK", "DAD", "H1")}
+assert c == {"NPK": ("0.0800", "800", "0.0800"), "DAD": ("0.0000", "800", "0.0100"), "H1": (".", "0", "0.0100")}, c
 
 pairs = {(r["sample_a"], r["sample_b"]): r for r in table(f"COH.{L}.pairs.tsv")}
-# 10 + 10 + 3 within families, and three related pairs across them; the unrelated and the
-# low-confidence ones across families are left out
-assert len(pairs) == 26, len(pairs)
+# 10 + 10 + 3 + 10 + 21 within families, and three related pairs across them; the unrelated
+# and low-confidence ones across families are left out, and so is the contaminated NPK's
+assert len(pairs) == 57, len(pairs)
+assert ("NPK", "X") not in pairs
+assert pairs[("S1", "S2")]["expected_relationship"] == "half-sibs" and pairs[("S1", "S2")]["status"] == "ok"
 assert ("A", "X") not in pairs and ("B", "H1") not in pairs and ("H1", "B") not in pairs
 assert ("DAD", "KID2") in pairs, "a pair is written member order first"
 p = pairs[("DAD", "KID2")]
@@ -260,6 +366,58 @@ PY
 grep -q "FAM1: 5 samples, 10 pairs" fam1/log.txt
 echo "ok    family summary"
 
+python3 - "${script}" <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("sampleqc_classify", sys.argv[1])
+spec = importlib.util.spec_from_loader("sampleqc_classify", loader)
+q = importlib.util.module_from_spec(spec)
+loader.exec_module(q)
+e = q.Extracts(["ext/U_M.somalier", "ext/DEL.somalier", "ext/U_F.somalier"], "ext/sites.vcf.gz", 0.1)
+flag = e.upd("U_M", "DEL")
+assert flag[0] == "UPD_CANDIDATE" and flag[2].endswith("at 0.60 of its mean depth: a deletion of U_M's copy"), flag
+assert e.upd("U_F", "DEL") is None
+print("ok    a deletion of a parent's copy is told from UPD by the depth")
+PY
+
+# --- the IBS0 yardstick across families, on 16 singletons ---------------------------------------
+python3 - "${script}" <<'PY'
+import os, subprocess, sys
+script = sys.argv[1]
+os.makedirs("c2/tables")
+names = [f"B{i:02d}" for i in range(16)]
+with open("c2/inputs.tsv", "w") as fh:
+    fh.write("#sampleqc_inputs\tv1\n" + "".join(f"G{n}\t{n}\t0\t0\t1\tyes\t-\n" for n in names))
+for n in names:
+    with open(f"c2/tables/G{n}.t1.samples.tsv", "w") as fh:
+        fh.write(f"family_id\tsample\tcontamination_charr\tflags\nG{n}\t{n}\t{0.07 if n == 'B05' else 0.004}\t.\n")
+    for kind, header in (("pairs", "family_id_a\tsample_a"), ("flags", "level\tfamily_id\tsample_a\tsample_b\tflag")):
+        with open(f"c2/tables/G{n}.t1.{kind}.tsv", "w") as fh:
+            fh.write(header + "\n")
+REL = {"dup": (0, 3000, 9000), "second": (300, 1350, 4500), "second_ancestry": (600, 1950, 3500), "unrel": (600, 1200, 3500)}
+special = {("B01", "B02"): "second", ("B03", "B04"): "second_ancestry", ("B05", "B06"): "second", ("B05", "B07"): "dup"}
+with open("c2/pairs.tsv", "w") as fh:
+    fh.write("#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\thets_a\thets_b\thets_ab\tshared_hets\t"
+             "hom_alts_a\thom_alts_b\tshared_hom_alts\tn\tx_ibs0\tx_ibs2\texpected_relatedness\n")
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            ibs0, shared, ibs2 = REL[special.get((a, b), "unrel")]
+            fh.write("\t".join(map(str, [a, b, 0, ibs0, ibs2, 0.9, 3000, 3000, 6000, shared, 1500, 1500, 500,
+                                          10000, 0, 0, -1])) + "\n")
+subprocess.run([sys.executable, script, "cohort", "--cohort", "C2", "--snapshot", "c2/inputs.tsv", "--somalier-pairs",
+                "c2/pairs.tsv", "--family-dir", "c2/tables", "--label", "t1", "--out-prefix", "c2/C2.t1"],
+               check=True, stdout=subprocess.DEVNULL)
+with open("c2/C2.t1.flags.tsv") as fh:
+    header = fh.readline().rstrip("\n").split("\t")
+    flags = [dict(zip(header, line.rstrip("\n").split("\t"))) for line in fh]
+got = {(f["flag"], f["sample_a"], f["sample_b"], f["severity"]) for f in flags}
+want = {("CRYPTIC_RELATED", "B01", "B02", "high"), ("CRYPTIC_RELATED", "B03", "B04", "info"),
+        ("DUPLICATE_OR_MZ", "B05", "B07", "high"), ("RELATEDNESS_UNRELIABLE", "B05", ".", "info")}
+assert got == want, (sorted(got - want), sorted(want - got))
+ancestry = [f for f in flags if f["sample_a"] == "B03"][0]
+assert "ibs0/ibs2 is 1.00 of that of unrelated pairs (0.1714)" in ancestry["evidence"], ancestry
+print("ok    cross-family IBS0 yardstick, and a contaminated sample's pairs left out")
+PY
+
 # --- refusals ------------------------------------------------------------------------------------
 refuse() {
     local name=$1 message=$2; shift 2
@@ -278,6 +436,15 @@ head -3 fam3/pairs.tsv > short.tsv
 refuse "a missing family pair" "has 2 pairs, FAM3 has 3" \
     python3 "${script}" family --snapshot fam3/inputs.tsv --somalier-samples fam3/samples.tsv \
         --somalier-pairs short.tsv --out-prefix x
+refuse "a hom cutoff past the hets" "--hom-cutoff must be between 0 and 0.3" \
+    python3 "${script}" family --snapshot fam3/inputs.tsv --somalier-samples fam3/samples.tsv \
+        --somalier-pairs fam3/pairs.tsv --hom-cutoff 0.4 --out-prefix x
+refuse "extracts without sites" "--extracts needs --sites" \
+    python3 "${script}" family --snapshot fam1/inputs.tsv --somalier-samples fam1/samples.tsv \
+        --somalier-pairs fam1/pairs.tsv --extracts fam1/extracts.list --out-prefix x
+refuse "extracts of other samples" "not of the members with one" \
+    python3 "${script}" family --snapshot fam5/inputs.tsv --somalier-samples fam5/samples.tsv \
+        --somalier-pairs fam5/pairs.tsv --extracts fam1/extracts.list --sites ext/sites.vcf.gz --out-prefix x
 refuse "a coverage JSON missing" "has coverage ${TAG} in the snapshot" \
     python3 "${script}" family --snapshot fam1/inputs.tsv --somalier-samples fam1/samples.tsv \
         --somalier-pairs fam1/pairs.tsv --coverage-dir fam2 --out-prefix x
