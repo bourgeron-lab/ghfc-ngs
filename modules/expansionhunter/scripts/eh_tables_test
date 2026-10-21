@@ -9,7 +9,10 @@
 # normal bound, a locus with no thresholds row), the parents' longest allele, that the
 # cohort percentile is taken among founders only, the order of the flags table, and that a
 # stranger's VCF, a duplicated sample and mismatched headers are refused, and that a LowDepth
-# no-call ('./.' throughout) is written with empty alleles. Needs only python3.
+# no-call ('./.' throughout) is written with empty alleles. Then, with read lengths from the
+# JSONs, each confidence rule and severity: a premutation, a risk locus, a degenerate motif,
+# one spanning read against five, TBP with 100 and 151 bp reads, and that the flags hold the
+# high and medium rows only. Needs only python3.
 #
 #   modules/expansionhunter/scripts/eh_tables_test
 
@@ -91,6 +94,12 @@ check() {
     if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; fail=1; fi
 }
 is() { [ "$(field "$1" "$2" "$3" "$4")" = "$5" ]; }
+# lfield <loci table> <locus> <column>
+lfield() {
+    awk -F'\t' -v l="$2" -v c="$3" '
+        NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+        $col["locus"] == l { print $col[c] }' "$1"
+}
 
 check "trio: 5 loci x 3 members" '[ "$(tail -n +2 "${F1}" | wc -l | tr -d " ")" = 15 ]'
 check "rows grouped by locus, members in pedigree order" \
@@ -135,13 +144,18 @@ check "percentile among founders: DAD's 22 is the lowest of three" '[ "$(field "
 check "the child's 40 is above every founder" '[ "$(field "${G}" KID HTT cohort_percentile)" = 100.0 ]'
 check "loci table: one row per locus" '[ "$(tail -n +2 C.${L}.loci.tsv | wc -l | tr -d " ")" = 5 ]'
 check "loci table: founders' maximum ignores the child's 40" \
-    'awk -F"\t" "\$1 == \"HTT\" && \$12 == 3 && \$17 == 28" C.${L}.loci.tsv | grep -q .'
+    '[ "$(lfield C.${L}.loci.tsv HTT n_founders)" = 3 ] && [ "$(lfield C.${L}.loci.tsv HTT founders_max)" = 28 ]'
 check "loci table: HTT has one pathogenic and two intermediate members" \
-    'awk -F"\t" "\$1 == \"HTT\" && \$18 == 1 && \$20 == 2" C.${L}.loci.tsv | grep -q .'
-check "flags: pathogenic rows first, then carriers, then intermediates" \
-    '[ "$(tail -n +2 C.${L}.flags.tsv | awk -F"\t" "{print \$35}" | uniq | tr "\n" " ")" = "pathogenic carrier intermediate " ]'
-check "flags: above_normal and normal are not flagged" \
-    '! tail -n +2 C.${L}.flags.tsv | awk -F"\t" "{print \$35}" | grep -qE "^(normal|above_normal)$"'
+    '[ "$(lfield C.${L}.loci.tsv HTT n_pathogenic)" = 1 ] && [ "$(lfield C.${L}.loci.tsv HTT n_intermediate)" = 2 ]'
+check "loci table: and one high, two info by severity" \
+    '[ "$(lfield C.${L}.loci.tsv HTT n_high)" = 1 ] && [ "$(lfield C.${L}.loci.tsv HTT n_info)" = 2 ]'
+# Without JSONs no read length is known, so nothing is of low confidence: the pathogenic rows
+# (KID HTT, MUM DAB1, SOLO FXN) are high; carriers and intermediates are info, left out
+check "flags: only the high and medium rows, here the three pathogenic ones" \
+    '[ "$(tail -n +2 C.${L}.flags.tsv | wc -l | tr -d " ")" = 3 ] && [ "$(field C.${L}.flags.tsv SOLO FXN severity)" = high ]'
+check "flags: carriers and intermediates stay in genotypes.tsv, as info" \
+    'is "${G}" DAD FXN severity info && is "${G}" MUM HTT severity info && [ -z "$(field C.${L}.flags.tsv DAD FXN status)" ]'
+check "without JSONs no read length, and no confidence" 'is "${F1}" KID HTT read_length . && is "${F1}" KID HTT allele2_confidence .'
 
 mkdir dup && cp tables/* dup/ && sed 's/^FAM2/FAM3/' "tables/FAM2.${L}.genotypes.tsv" > "dup/FAM3.${L}.genotypes.tsv"
 check "a sample in two families is refused" \
@@ -162,6 +176,75 @@ check "a no-call is written, not refused" \
 check "a no-call leaves its alleles and status empty" \
     'is nocall.tsv DAD ATXN2 allele1 . && is nocall.tsv DAD ATXN2 allele1_class . && is nocall.tsv DAD ATXN2 status .'
 check "a no-called parent gives no parents_max_allele" 'is nocall.tsv KID ATXN2 parents_max_allele .'
+
+# --- confidence and severity, with read lengths ---------------------------------------------------
+# A family per case, so each member's rows are its own: FMR1 (premutation 55, full 201), TCF4
+# marked risk, PHOX2B's degenerate GCN motif, HTT with one or five spanning reads, and TBP,
+# whose reference allele (36, 108 bp) a 100 bp read cannot span.
+mkdir tiers tiers/tables
+printf 'locus\tmotif\tdisease\tinheritance\tnormal_range\tnormal_max\tintermediate_min\tpremutation_min\tpathogenic_min\treport\n' > thr2.tsv
+printf 'FMR1\tCGG\tFXS\tXLD\t6-40\t40\t41\t55\t201\tflag\n' >> thr2.tsv
+printf 'TCF4\tCTG\tFECD3\tAD\t<=31\t31\t.\t.\t50\trisk\n' >> thr2.tsv
+printf 'PHOX2B\tGCN\tCCHS\tAD\t20\t20\t.\t.\t24\t\n' >> thr2.tsv
+printf 'HTT\tCAG\tHD\tAD\t9-26\t26\t27\t.\t36\tflag\n' >> thr2.tsv
+printf 'TBP\tCAG\tSCA17\tAD\t25-42\t42\t.\t.\t43\tflag\n' >> thr2.tsv
+: > tiers/ped.tsv
+# tier <sample> <sex> <read length> then one "varid ru ref repcn adsp adir" per record
+tier() {
+    local sample=$1 sex=$2 length=$3; shift 3
+    printf 'T_%s\t%s\t0\t0\t%s\t2\n' "${sample}" "${sample}" "${sex}" >> tiers/ped.tsv
+    printf '{"SampleParameters": {"SampleId": "%s"}, "LocusResults": {"X": {"ReadLength": %s}}}\n' \
+        "${sample}" "${length}" > "tiers/${sample}.json"
+    {
+        printf '##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n' "${sample}"
+        while [ $# -gt 0 ]; do
+            read -r varid ru ref repcn adsp adir <<< "$1"; shift
+            printf 'chr1\t100\t.\tC\t.\t.\tPASS\tEND=200;REF=%s;RL=30;RU=%s;VARID=%s;REPID=%s\tGT:SO:REPCN:REPCI:ADSP:ADFL:ADIR:LC\t1/2:SPANNING/SPANNING:%s:.:%s:0/0:%s:40.0\n' \
+                "${ref}" "${ru}" "${varid}" "${varid}" "${repcn}" "${adsp}" "${adir}"
+        done
+    } > "tiers/${sample}.vcf"
+    python3 "${family_table}" --family "T_${sample}" --pedigree tiers/ped.tsv --thresholds thr2.tsv \
+        --json "tiers/${sample}.json" --out "tiers/tables/T_${sample}.${L}.genotypes.tsv" "tiers/${sample}.vcf" > /dev/null
+}
+#                          varid  ru  ref repcn  adsp  adir
+tier PREM  2 151 "FMR1   CGG 30  30/80  10/0  0/8" "TCF4 CTG 17 17/70 10/0 0/10"
+tier PREML 2 151 "FMR1   CGG 30  30/70  10/0  0/2"
+tier FULL  1 151 "FMR1   CGG 30  300    0     50"
+tier POLYA 1 151 "PHOX2B GCN 20  20/40  10/0  0/9" "HTT CAG 19 17/40 9/1 0/0"
+tier HTT5  2 151 "HTT    CAG 19  17/40  9/5   0/0" "TBP CAG 36 36/45 9/0 0/10"
+tier SHORT 2 100 "TBP    CAG 36  36/45  0/0   0/10"
+T="tiers/tables"
+check "read length from the JSON" 'is "$T/T_PREM.${L}.genotypes.tsv" PREM FMR1 read_length 151'
+check "premutation: a class of its own, medium" \
+    'is "$T/T_PREM.${L}.genotypes.tsv" PREM FMR1 allele2_class premutation && is "$T/T_PREM.${L}.genotypes.tsv" PREM FMR1 severity medium'
+check "a long allele with 3 or more in-repeat reads is ok, the normal one '.'" \
+    'is "$T/T_PREM.${L}.genotypes.tsv" PREM FMR1 allele2_confidence ok && is "$T/T_PREM.${L}.genotypes.tsv" PREM FMR1 allele1_confidence .'
+check "a long allele with 2 in-repeat reads is low, and its premutation info" \
+    'is "$T/T_PREML.${L}.genotypes.tsv" PREML FMR1 allele2_confidence low && is "$T/T_PREML.${L}.genotypes.tsv" PREML FMR1 severity info'
+check "a full mutation in a male is high" 'is "$T/T_FULL.${L}.genotypes.tsv" FULL FMR1 status pathogenic && is "$T/T_FULL.${L}.genotypes.tsv" FULL FMR1 severity high'
+check "a risk locus is info, however pathogenic" \
+    'is "$T/T_PREM.${L}.genotypes.tsv" PREM TCF4 status pathogenic && is "$T/T_PREM.${L}.genotypes.tsv" PREM TCF4 severity info'
+check "a degenerate motif needs spanning reads, in-repeat ones are not enough" \
+    'is "$T/T_POLYA.${L}.genotypes.tsv" POLYA PHOX2B allele2_confidence low && is "$T/T_POLYA.${L}.genotypes.tsv" POLYA PHOX2B severity medium'
+check "a spannable allele with a single spanning read is low; with 5, ok and high" \
+    'is "$T/T_POLYA.${L}.genotypes.tsv" POLYA HTT allele2_confidence low && is "$T/T_HTT5.${L}.genotypes.tsv" HTT5 HTT severity high'
+check "TBP with 151 bp reads is sized by its in-repeat reads" 'is "$T/T_HTT5.${L}.genotypes.tsv" HTT5 TBP allele2_confidence ok'
+check "TBP with 100 bp reads cannot be told from a normal allele" \
+    'is "$T/T_SHORT.${L}.genotypes.tsv" SHORT TBP allele2_confidence low && is "$T/T_SHORT.${L}.genotypes.tsv" SHORT TBP severity medium'
+(cd tiers && python3 "${cohort_merge}" --input-dir tables --cohort T --label "${L}" > /dev/null)
+# high: FULL FMR1, HTT5 HTT and TBP; medium: PREM FMR1, POLYA PHOX2B and HTT, SHORT TBP
+check "flags: the 3 high rows first, then the 4 medium; info left out" \
+    '[ "$(awk -F"\t" "NR == 1 { for (i = 1; i <= NF; i++) if (\$i == \"severity\") c = i; next } { print \$c }" tiers/T.${L}.flags.tsv | tr "\n" " ")" = "high high high medium medium medium medium " ]'
+check "loci table: the thresholds' new columns and the severities" \
+    '[ "$(lfield tiers/T.${L}.loci.tsv FMR1 premutation_min)" = 55 ] && [ "$(lfield tiers/T.${L}.loci.tsv TCF4 report)" = risk ] &&
+     [ "$(lfield tiers/T.${L}.loci.tsv FMR1 n_medium)" = 1 ] && [ "$(lfield tiers/T.${L}.loci.tsv FMR1 n_info)" = 1 ]'
+check "a report other than flag or risk is refused" \
+    '! python3 "${family_table}" --family T_PREM --pedigree tiers/ped.tsv --thresholds <(sed "s/\trisk\$/\tmaybe/" thr2.tsv) --out x.tsv tiers/PREM.vcf >/dev/null 2>&1'
+check "a JSON of a sample without a VCF is refused" \
+    '! python3 "${family_table}" --family T_PREM --pedigree tiers/ped.tsv --thresholds thr2.tsv --json tiers/FULL.json --out x.tsv tiers/PREM.vcf >/dev/null 2>&1'
+check "an older family table is refused by the cohort merge, as one to rebuild" \
+    'mkdir old && cp tables/* old/ && cut -f1-36 "tables/FAM2.${L}.genotypes.tsv" > "old/FAM2.${L}.genotypes.tsv" && cut -f1-36 "tables/FAM1.${L}.genotypes.tsv" > "old/FAM1.${L}.genotypes.tsv" &&
+     ! python3 "${cohort_merge}" --input-dir old --cohort O --label "${L}" 2> old.err >/dev/null && grep -q "which the next run rebuilds" old.err'
 
 [ "${fail}" -eq 0 ] && echo "eh_family_table / eh_cohort_merge: all checks passed" || echo "eh_family_table / eh_cohort_merge: FAILURES"
 exit "${fail}"

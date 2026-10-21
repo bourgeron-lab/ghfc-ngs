@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-71 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+72 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -124,6 +124,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `roh_min_gene_roh_mb` | `roh` | [ROH and inbreeding](#roh-and-inbreeding) |
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
+| `sampleqc_hom_cutoff` | `sampleqc` | [Sample QC](#sample-qc) |
 | `sampleqc_label` 📄 | `sampleqc` — **required** | [Sample QC](#sample-qc) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `scratch` | `alignment` | [Core paths and identity](#core-paths-and-identity) |
@@ -539,12 +540,13 @@ These three are the only keys in the whole file with a **hard requirement check*
 | `expansionhunter_catalog` | file | `""` | ExpansionHunter variant catalog (JSON). **Required** by `expansionhunter`. |
 | `expansionhunter_catalog_name` 📄 | string | `""` | Label for that catalog in every output file name. **Required** by `expansionhunter`. Letters, digits, `.`, `_` and `-` only. |
 | `expansionhunter_thresholds` | file | `""` | Per-locus thresholds table, used to class each allele. Empty leaves the alleles unclassified. |
-| `expansionhunter_reviewer` | boolean | `true` | Draw a REViewer read pileup of every flagged genotype. Needs `expansionhunter_thresholds`, without which nothing is flagged. |
+| `expansionhunter_reviewer` | boolean | `true` | Draw a REViewer read pileup of every genotype of severity high or medium. Needs `expansionhunter_thresholds`, without which nothing is flagged. |
 
 - **The label is the cache.** Nothing on disk records which catalog a call was made with. A new catalog with an existing label reuses the old calls as if nothing had changed, and a new label recomputes every sample. The catalog of the cohort run, `references/GRCh38/expansionhunter/variant_catalog_custom_JMSA_offtargets.json`, goes with `jmsa50`.
-- **Thresholds.** A TSV keyed on the catalog's VariantId, with the columns `locus`, `disease`, `inheritance`, `normal_max`, `intermediate_min` and `pathogenic_min` (`.` for none). `references/GRCh38/expansionhunter/str_thresholds.stripy.tsv` holds the STRipy values for the cohort catalog, and its README says how they were converted. It is in no file name: after changing it, delete the families' and the cohort's `str/expansionhunter/*.tsv`, and they are rebuilt from the existing calls.
+- **Thresholds.** A TSV keyed on the catalog's VariantId, with the columns `locus`, `disease`, `inheritance`, `normal_max`, `intermediate_min` and `pathogenic_min` (`.` for none), and two optional ones: `premutation_min`, a class between intermediate and pathogenic (FMR1's 55-200, which causes FXTAS but not fragile X), and `report`, `flag` (the default) or `risk` for a common risk allele that is never more than `info` (TCF4's for Fuchs dystrophy, NIPA1's for ALS). `references/GRCh38/expansionhunter/str_thresholds.stripy.tsv` holds the STRipy values for the cohort catalog, and its README says how they were converted. It is in no file name, but its checksum is in each family's `inputs.tsv`: after changing it, the next run rebuilds every family and the cohort from the existing calls.
+- **Severity.** Each genotype row is `high` (pathogenic status), `medium` (premutation) or `info` (intermediate, carrier, or a `risk` locus), one rank lower when an allele past normal is of low confidence: not spanned by 2 reads though short enough to be, longer with fewer than 3 in-repeat reads, at a degenerate motif (GCN) without 2 spanning reads, or at a locus whose reference allele the sample's reads cannot span and whose pathogenic range starts within two read lengths. Older genomes with 100 bp reads (the IP* samples of GHFC-GRCh38) are where most low-confidence calls come from. `flags.tsv` holds the `high` and `medium` rows; the others stay in `genotypes.tsv`. See the README's ExpansionHunter section for every column.
 - **Reference and sex.** Each sample is genotyped against `ref`, which must be the reference its CRAM was aligned to and have a `.fai`. The sex comes from the pedigree; unknown sex is genotyped as female, which only matters at chrX loci.
-- **REViewer pileups.** A genotype is flagged when its `status` is `pathogenic`, `carrier` or `intermediate`: the rows of the cohort's `flags.tsv`. Each flagged locus gets `<ID>.<label>.<LocusId>.svg` in the sample's `str/expansionhunter/reviewer/`, beside `<ID>.<label>.metrics.tsv` (REViewer's allele depths) and `<ID>.<label>.phasing.tsv`. The metrics table is written even when nothing is flagged, and is what marks a sample done: a sample is drawn again when it is called or its family table rebuilt, so after a thresholds change the rebuilt tables redraw their members. SVGs of loci no longer flagged are left in place. Calls made before the step are drawn from the realigned reads beside them, which must be sorted and indexed; one without them is reported and skipped.
+- **REViewer pileups.** A genotype is flagged when its `severity` is `high` or `medium`: the rows of the cohort's `flags.tsv`. Each flagged locus gets `<ID>.<label>.<LocusId>.svg` in the sample's `str/expansionhunter/reviewer/`, beside `<ID>.<label>.metrics.tsv` (REViewer's allele depths) and `<ID>.<label>.phasing.tsv`. The metrics table is written even when nothing is flagged, and is what marks a sample done: a sample is drawn again when it is called or its family table rebuilt, so after a thresholds change the rebuilt tables redraw their members. SVGs of loci no longer flagged are left in place. Calls made before the step are drawn from the realigned reads beside them, which must be sorted and indexed; one without them is reported and skipped.
 - **Calls made before the step.** `scripts/expansionhunter/eh_label_existing` gives unlabelled calls (`<ID>.vcf`, `<ID>.json`, `<ID>_realigned.bam`) the label, after checking that each VCF holds exactly the catalog's variants. Without `--apply` it only reports.
 
 ### MELT
@@ -590,6 +592,7 @@ genetics-viz reads these files directly, so their names, keys and values are a c
 |---|---|---|---|
 | `somalier_sites` | file | `""` | somalier's sites VCF for `ref`: for GRCh38, `sites.hg38.vcf.gz` from somalier's README (17,384 autosomal SNPs, 365 on chrX, 17 on chrY). **Required** by `sampleqc`. |
 | `sampleqc_label` 📄 | string | `""` | Label for the extracts and tables in every output file name. **Required** by `sampleqc`. Letters, digits, `.`, `_` and `-` only. One label per sites file, e.g. `somalier_hg38`. |
+| `sampleqc_hom_cutoff` | number | `0.1` | `somalier relate` calls a site homozygous when its alternate allele fraction is below this, or above 1 minus it (somalier's `SOMALIER_AB_HOM_CUTOFF`, 0.01 by default). Above 0 and below 0.3, where hets start. Changing it redoes every family and the cohort. |
 
 The step is report-only: nothing downstream reads its flags. Read the `flags.tsv` tables, fix the
 pedigree, and the next run redoes the families that changed.
@@ -597,10 +600,14 @@ pedigree, and the next run redoes the families that changed.
 - **Per sample:** `samples/{S1}/{S2}/<ID>/qc/somalier/<ID>.<label>.somalier`, somalier's counts at its sites, from the CRAM, independent of the variant calls. The sample name inside is the barcode, whatever the CRAM's read group says.
 - **Per family:** `families/{S1}/{S2}/<FID>/qc/<FID>.<label>.{samples,pairs,flags,inputs}.tsv`.
   - `pairs.tsv` has one row per pair of members, with IBS0, IBS2, their ratio, the KING-robust kinship `(shared_hets - 2 ibs0) / hets_ab`, both samples' heterozygous sites at the sites both are called, somalier's relatedness, the expected kinship and relationship from the pedigree, the observed relationship, and, for a parent and child, the opposite-homozygote rate in the family BCF.
-  - `samples.tsv` has one row per member, with the pedigree sex, the inferred sex and karyotype, the X and Y copy numbers (from the cnv_coverage JSON when there is one, from somalier's depth otherwise), the X heterozygosity, the depth, the het/hom-alt ratio, somalier's CHARR contamination estimate, the trio's Mendelian error rate, and the flags it carries.
+  - `samples.tsv` has one row per member, with the pedigree sex, the inferred sex and karyotype, the X and Y copy numbers (from the cnv_coverage JSON when there is one, from somalier's depth otherwise), the X heterozygosity, the depth, the het/hom-alt ratio, the CHARR contamination estimate with the sites it used and somalier's own, the trio's Mendelian error rate, and the flags it carries.
   - `flags.tsv` has one row per flag: `level, family_id, sample_a, sample_b, flag, severity, evidence`.
-- **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,pairs,flags,inputs}.tsv` and `.html`. These are the family tables concatenated, plus the pairs of different families related at the third degree or closer and the cohort-level flags. The HTML is somalier's interactive plot of every pair.
+- **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,pairs,flags,inputs}.tsv` and `.html`. These are the family tables concatenated, plus the pairs of different families related at the third degree or closer (but those of a sample with CHARR of 0.05 or more) and the cohort-level flags. The HTML is somalier's interactive plot of every pair.
+- **Genotypes.** somalier relate calls a site at depth 7 or more: het when the alternate allele fraction is within 0.3-0.7, homozygous when it is below `sampleqc_hom_cutoff` or above 1 minus it, unknown otherwise. With somalier's own 0.01, a single stray read at 40x loses a homozygous site; the fewer a sample keeps, the fewer opposite homozygotes it shows and the higher its kinship with everyone, so noise and contamination read as relatedness. On a 2,672-sample cohort it made 142,000 cross-family pairs third-degree relatives; at 0.1, the unrelated pairs centre on 0, and the third degree is reached only by contaminated samples and by about 120 pairs of admixed ones.
 - **Relationship classes** (KING): duplicate/MZ above 0.354; first degree 0.177-0.354, parent-offspring when IBS0/IBS2 is below 0.01 and full siblings otherwise; second degree 0.0884-0.177; third degree 0.0442-0.0884; unrelated below. A pair with fewer than 2,000 sites called in both is `low_confidence` and is never flagged.
+- **Missing parents.** A parent written `0` is one not in the pedigree, not someone else: the expected kinship is the least the pair can have. A pair observed more distant than expected contradicts the pedigree; one observed closer is related beyond what it records (`RELATED_BEYOND_PEDIGREE`, `CONSANGUINITY`), unless they are first-degree relatives who both have both parents recorded. Siblings who share one recorded parent, the other missing for either, may be full or half siblings.
+- **Across families.** KING's estimator assumes one homogeneous population: two admixed samples of similar ancestry reach 0.08 unrelated, so a cross-family third degree is information. A pair at the second degree or closer is `high` only when its IBS0/IBS2 is at most 0.6 times the median of the cohort's clearly unrelated pairs (kinship below 0.0221): second-degree relatives share no allele IBD at about half of their sites, so they have about half the opposite homozygotes of unrelated pairs. With fewer than 100 such pairs there is no yardstick, and the check is skipped.
+- **Contamination.** CHARR as Lu et al. (AJHG 2023) define it, computed from the extract: at autosomal sites of depth 20-100 that look homozygous (minor reads below 20%, other alleles at most 4%), whose absent allele has a frequency of 10-90% in the sites VCF, the minor reads over the depth divided by that frequency, averaged over at least 500 sites. It estimates the fraction of reads from another person: below 1% in clean WGS; the usual exclusion threshold is 5%. somalier's own `contamination_charr`, kept as `somalier_charr`, calls homozygous sites more loosely: it reads several times higher and mostly measures low depth. Contamination turns homozygous sites into hets and so drags CHARR down at high levels: read it with `het_hom_alt_ratio` and `p_middling_ab`.
 - **Flags.**
 
   | Flag | Severity | Raised when |
@@ -608,12 +615,17 @@ pedigree, and the next run redoes the families that changed.
   | `NOT_PARENT` | high | a recorded parent and child are not parent-offspring; the evidence names which parent |
   | `HALF_SIB_NOT_FULL`, `FULL_SIB_NOT_HALF` | high | siblings are of the other kind |
   | `EXPECTED_RELATED_UNRELATED` | high, medium past the second degree | recorded relatives are unrelated |
-  | `UNEXPECTED_RELATED_IN_FAMILY` | high, medium at the third degree | members the pedigree does not relate are related, e.g. consanguineous parents |
+  | `UNEXPECTED_RELATED_IN_FAMILY` | high | first-degree relatives by their genotypes, though both have both parents recorded and the pedigree does not make them so |
+  | `RELATED_BEYOND_PEDIGREE` | info | members closer than the pedigree says, which its missing parents allow: e.g. siblings whose parents are not in it |
+  | `CONSANGUINITY` | info | the two parents of a member are related |
   | `RELATIONSHIP_MISMATCH` | high or medium | any other disagreement of degree |
-  | `DUPLICATE_OR_MZ` | high | two samples are the same person or MZ twins, in a family or across families |
+  | `UPD_CANDIDATE` | high | a recorded parent and child whose opposite homozygotes, in the extracts, lie on one chromosome (at least 20, 80% of them): the child has no allele from that parent over their span, a whole chromosome or a segment. No het at the child's normal depth is uniparental isodisomy, three quarters of its depth or less a deletion of the parent's copy; the evidence gives the span. Replaces `NOT_PARENT` |
+  | `MZ_TWIN_CANDIDATE` | info | siblings of the same sex are one genome: MZ twins, or one sample twice |
+  | `DUPLICATE_OR_MZ` | high | any other two samples that are the same person or MZ twins, in a family or across families |
   | `SAMPLE_UNRELATED_TO_FAMILY` | high | a member is related to none of its relatives within the second degree |
   | `SAMPLE_SWAP_CANDIDATE` | high | such a member is related to someone of another family |
-  | `CRYPTIC_RELATED` | high, medium at the third degree | members of different families are related |
+  | `CRYPTIC_RELATED` | high at the second degree or closer with the IBS0 of relatives; info at the third degree, or when the IBS0 is that of unrelated pairs | members of different families are related |
+  | `RELATEDNESS_UNRELIABLE` | info | a sample with CHARR of 0.05 or more: its pairs with other families, but duplicates, are left out |
   | `MENDELIAN_INCONSISTENT` | medium | the CRAMs say parent and child, but the family BCF has too many opposite homozygotes: the CRAM and the gVCF may not be the same person |
   | `SEX_MISMATCH` | high | the inferred sex is not the pedigree's |
   | `KARYOTYPE_XXY`, `KARYOTYPE_X0`, `KARYOTYPE_XYY`, `KARYOTYPE_XXX`, ... | high | the copy numbers make a karyotype other than XX or XY |
@@ -621,7 +633,7 @@ pedigree, and the next run redoes the families that changed.
   | `X_HET_INCONSISTENT` | medium | the X heterozygosity disagrees with the number of X: two X and almost no heterozygous sites (X isodisomy, LOH), or one X and many |
   | `SEX_UNKNOWN_IN_PED` | info | the pedigree has no sex; the evidence gives the inferred one |
   | `LOW_INFORMATIVE_SITES` | medium | fewer than 5,000 somalier sites are called |
-  | `POSSIBLE_CONTAMINATION` | medium | CHARR is above 0.05 |
+  | `POSSIBLE_CONTAMINATION` | medium from 0.02, high from 0.05 | CHARR, the estimated fraction of reads from another person |
 
 - **Sex.** The copy numbers are `2 × chrX_ratio` and `2 × chrY_ratio` of the cnv_coverage JSON of the current `cnv_cov_bin` and `cnv_cov_mapq` when the sample has one, and somalier's X and Y depth over its autosomal depth otherwise. The karyotype is cnv_coverage's rule: each copy number rounded, `ambiguous` when either is more than 0.25 from a whole number. A karyotype with a Y is male.
 - **Mendelian errors** are counted from the family's `norm.bcf` when it has a parent and child: biallelic autosomal SNVs, genotypes of GQ ≥ 20 and DP ≥ 10.

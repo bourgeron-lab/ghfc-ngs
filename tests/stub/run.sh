@@ -10,7 +10,7 @@
 #                   the pedigree;
 #   5. editpedigree - the same again, after FAM01's child loses its recorded father: every file
 #                   is in place, and only the steps that compare the pedigree they were built
-#                   from (sampleqc) redo the family and the cohort.
+#                   from (sampleqc, and expansionhunter's tables) redo the family and the cohort.
 #
 # A pass fails on any FAILED task, and when the tasks it ran - name and tag, sorted - differ from
 # expected/<pass>.tasks.txt. The rerun is the planner's own test: anything it schedules is
@@ -188,13 +188,15 @@ mv "${out}/edited.pedigree.tsv" "${data}/cohorts/STUB/STUB.pedigree.tsv"
 stub_pass editpedigree
 
 # Exactly the edited family and the cohort, as above regenerated lists do not prove it
-for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM01)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)'; do
+for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM01)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
+            'EXPANSIONHUNTER:EXPANSIONHUNTER_FAMILY (FAM01)' 'EXPANSIONHUNTER:EXPANSIONHUNTER_COHORT (STUB)'; do
     if ! grep -qxF -- "${task}" "${out}/editpedigree.tasks.txt"; then
         echo "  FAIL  editpedigree: ${task} was not run"; fail=1
     fi
 done
-if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT' "${out}/editpedigree.tasks.txt"; then
-    echo "  FAIL  editpedigree: the unedited families or the extracts were redone"; fail=1
+if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_FAMILY \(FAM0[23]\)|EXPANSIONHUNTER_CALL' \
+        "${out}/editpedigree.tasks.txt"; then
+    echo "  FAIL  editpedigree: the unedited families, the extracts or the calls were redone"; fail=1
 fi
 
 if (( fail )); then

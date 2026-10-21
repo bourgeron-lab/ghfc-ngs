@@ -27,6 +27,7 @@ workflow EXPANSIONHUNTER {
     existing_families  // collection: families whose VCF and table are on disk and current
     need_cohort_merge  // boolean: whether the cohort files must be (re)built
     need_reviewer      // collection: samples whose flagged genotypes must be (re)drawn
+    family_snapshots   // map: [fid: text] - each rebuilt family's inputs snapshot
 
     main:
 
@@ -72,11 +73,13 @@ workflow EXPANSIONHUNTER {
     // Step 2: Merge and tabulate each family
     // =====================================================================
     if (need_family) {
-        // Members called in an earlier run, looked up at their sharded path, never globbed
+        // Members called in an earlier run, looked up at their sharded path, never globbed. The
+        // JSON goes with the VCF, for the member's read length.
         existing_member_vcfs = channel.fromList(
             expected_members.collectMany { fid, barcodes ->
                 barcodes.findAll { barcode -> barcode in existing_calls }.collect { barcode ->
-                    tuple(barcode, file("${Sharding.getSampleDir(params.data, barcode)}/str/expansionhunter/${barcode}.${catalog_name}.vcf"))
+                    def prefix = "${Sharding.getSampleDir(params.data, barcode)}/str/expansionhunter/${barcode}.${catalog_name}"
+                    tuple(barcode, file("${prefix}.vcf"), file("${prefix}.json"))
                 }
             })
 
@@ -84,14 +87,15 @@ workflow EXPANSIONHUNTER {
         // is called rather than when every sample of the cohort is. remainder keeps a family
         // that never fills up, so that the check below can name it instead of it vanishing.
         family_inputs = EXPANSIONHUNTER_CALL.out.vcf
+            .join(EXPANSIONHUNTER_CALL.out.json)
             .mix(existing_member_vcfs)
-            .filter { barcode, _vcf -> family_members[barcode] in need_family }
-            .map { barcode, vcf ->
+            .filter { barcode, _vcf, _json -> family_members[barcode] in need_family }
+            .map { barcode, vcf, json ->
                 def fid = family_members[barcode]
-                tuple(groupKey(fid, expected_members[fid].size()), barcode, vcf)
+                tuple(groupKey(fid, expected_members[fid].size()), barcode, vcf, json)
             }
             .groupTuple(by: 0, remainder: true)
-            .filter { fid, barcodes, _vcfs ->
+            .filter { fid, barcodes, _vcfs, _jsons ->
                 // Never publish a family table built from part of the family
                 def missing = expected_members[fid.toString()] - barcodes
                 if (missing) {
@@ -100,8 +104,10 @@ workflow EXPANSIONHUNTER {
                 }
                 return true
             }
-            .map { fid, _barcodes, vcfs ->
-                tuple(fid.toString(), vcfs, file(pedigree_file), ref_fai, thresholds, catalog_name, family_table)
+            .map { fid, _barcodes, vcfs, jsons ->
+                def key = fid.toString()
+                tuple(key, vcfs, jsons, file(pedigree_file), ref_fai, thresholds, catalog_name, family_table,
+                      family_snapshots[key])
             }
 
         EXPANSIONHUNTER_FAMILY(family_inputs)
