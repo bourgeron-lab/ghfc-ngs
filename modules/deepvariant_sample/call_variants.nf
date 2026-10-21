@@ -5,7 +5,8 @@ process CALL_VARIANTS {
     
     input:
     tuple val(barcode), path(example_files)
-    tuple val(barcode), path(example_info)
+    // The same task's barcode, in the same order: MAKE_EXAMPLES emits both together
+    tuple val(_info_barcode), path(example_info)
     
     output:
     tuple val(barcode), path("call_variants_output-00000-of-00001.tfrecord.gz"), emit: called_variants

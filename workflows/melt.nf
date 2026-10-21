@@ -37,12 +37,6 @@ workflow MELT {
     def cohort_score = file("${projectDir}/modules/melt/scripts/melt_cohort_score", checkIfExists: true)
     def transmission_script = file("${projectDir}/modules/melt/scripts/melt_family_transmission", checkIfExists: true)
 
-    // A sample's three VCFs, read from its sharded path, never globbed
-    def published_vcfs = { barcode ->
-        def prefix = "${Sharding.getSampleDir(params.data, barcode)}/mei/melt/${barcode}.${label}"
-        ['ALU', 'LINE1', 'SVA'].collect { cls -> file("${prefix}.${cls}.vcf") }
-    }
-
     // A family's VCF holds every member that has, or gets in this run, a call; a member with
     // neither a call nor a CRAM is left out of it, as the plan already warned
     def expected_members = [:]
@@ -77,7 +71,7 @@ workflow MELT {
         existing_member_vcfs = channel.fromList(
             expected_members.collectMany { _fid, barcodes ->
                 barcodes.findAll { barcode -> barcode in existing_calls }.collect { barcode ->
-                    tuple(barcode, published_vcfs(barcode))
+                    tuple(barcode, meltPublishedVcfs(barcode, label))
                 }
             })
 
@@ -119,7 +113,7 @@ workflow MELT {
     if (need_cohort_merge) {
         // Samples not called in this run contribute the calls they already have
         existing_sample_vcfs = channel.fromList(
-            existing_calls.collect { barcode -> tuple(barcode, published_vcfs(barcode)) })
+            existing_calls.collect { barcode -> tuple(barcode, meltPublishedVcfs(barcode, label)) })
 
         // Concat, then a single collect, so the scoring waits for this run's own calls. Never
         // publish cohort files built from part of the cohort: a sample whose call failed
@@ -157,4 +151,11 @@ workflow MELT {
     family_vcfs = new_family_vcfs
     family_transmission = new_family_transmission
     cohort_tables = cohort_tables_output
+}
+
+// A sample's three VCFs, read from its sharded path, never globbed. A function rather than a
+// closure in the workflow, which the strict syntax parser does not let be called by name.
+def meltPublishedVcfs(barcode, label) {
+    def prefix = "${Sharding.getSampleDir(params.data, barcode)}/mei/melt/${barcode}.${label}"
+    return ['ALU', 'LINE1', 'SVA'].collect { cls -> file("${prefix}.${cls}.vcf") }
 }

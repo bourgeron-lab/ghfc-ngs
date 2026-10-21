@@ -1641,7 +1641,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 // CRAM here costs nothing but the ability to regenerate coverage bedgraphs.
                 def bedgraph_note = has_bedgraph ? "" : " (its coverage bedgraph is also absent and cannot be regenerated without the CRAM)"
                 if (!expects_crams) {
-                    gvcf_only_count++
+                    gvcf_only_count += 1
                 } else if (!quiet) {
                     log.info "Individual ${barcode} has no ${params.ref_name} CRAM, but its gVCF is present, so nothing downstream needs it${bedgraph_note}"
                 }
