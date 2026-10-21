@@ -650,8 +650,9 @@ pedigree, and the next run redoes the families that changed.
 | `max_time` | duration string | `'240.h'` | Per-process wall-clock ceiling. |
 
 A task asking for more than a ceiling — by default, through `resources`, or after a retry has
-added memory — is clamped down to it, not failed. A `resources` value above a ceiling is also
-warned about when the run starts.
+added memory — is clamped down to it, not failed: the ceilings are every process's
+`resourceLimits`. A `resources` value above a ceiling is also warned about when the run starts,
+and a ceiling that does not parse stops it there.
 
 ### `resources`: per-cohort cpus, memory and time
 
@@ -728,15 +729,18 @@ scripts/resources_report /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/C
 tasks with a 25% margin, and the families and samples above that listed by id. The block is
 printed, never written anywhere.
 
-**Sizing from the data.** A default in `nextflow.config` can follow the size of the task's
-inputs: `memory = sized('memory', { 8.GB + 2.GB * barcodes.size() }, 8.GB)` grows with the
-size of the family, and `nextflow.util.MemoryUnit.of(4 * annotated_parquet.size())` with the
-size of a file. The settings in `resources` still override it.
+**Sizing from the data.** A default in `nextflow.config`, a process's `ext`, can follow the
+size of the task's inputs: `ext = [memory: { 8.GB + 2.GB * barcodes.size() }, memory_step: 8.GB]`
+grows with the size of the family, and `memory: { nextflow.util.MemoryUnit.of(4 * annotated_parquet.size()) }`
+with the size of a file. The settings in `resources` still override it.
 
 **Beyond cpus, memory and time.** For anything else — a container, an `errorStrategy` — give
 a config file with `--config FILE`. It is loaded on top of the pipeline's own configuration.
 A `cpus`, `memory` or `time` set in such a file replaces the pipeline's, and `resources` then
-no longer applies to that process.
+no longer applies to that process — or to any process, if it is set for the whole `process`
+scope rather than in a `withName` block. To change a default and keep `resources`, set the
+process's `ext` instead: `withName: 'PYWOMBAT' { ext = [memory: 16.GB] }` changes its memory and
+keeps the pipeline's other defaults for it.
 
 ## Gotchas
 

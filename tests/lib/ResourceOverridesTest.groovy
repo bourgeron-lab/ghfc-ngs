@@ -45,5 +45,13 @@ Check.that('a non-map block or entry is an error') {
     assert check([PYWOMBAT: '8.GB']).errors[0].contains('must be a map')
     assert check([PYWOMBAT: [families: ['F1': [families: [:]]]]]).errors[0].contains('belongs directly under a process')
 }
+Check.that('a ceiling that does not parse is an error, even with no resources') {
+    def errors = ResourceOverrides.check(null, known, [memory: 'lots', cpus: 'many', time: 'soon']).errors
+    assert errors.size() == 3
+    assert errors.any { it.startsWith('max_memory: expected a memory') }
+    assert errors.any { it.startsWith('max_cpus: expected a whole number') }
+    assert errors.any { it.startsWith('max_time: expected a duration') }
+    assert ResourceOverrides.check(null, known, [memory: '460.GB', cpus: '95', time: '240.h']).errors == []
+}
 
 Check.done()
