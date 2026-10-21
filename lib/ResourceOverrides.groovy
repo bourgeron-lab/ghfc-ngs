@@ -4,10 +4,11 @@ import nextflow.util.MemoryUnit
 /**
  * Checks the `resources:` block of a params file when the run starts.
  *
- * The block is applied by sized() in nextflow.config, one task at a time, and nothing there can
- * report a mistake before the first task it concerns is due - possibly hours into a run, and
- * a key that matches nothing is never reported at all. So every rule sized() relies on is
- * checked here first. The two must agree: the schema is in documentation/params.md.
+ * The block is applied by ext.sized in nextflow.config, one task at a time, and nothing there
+ * can report a mistake before the first task it concerns is due - possibly hours into a run, and
+ * a key that matches nothing is never reported at all. So every rule ext.sized relies on is
+ * checked here first. The two must agree: the schema is in documentation/params.md. So are the
+ * ceilings, which become every process's resourceLimits, read by Nextflow task by task too.
  *
  * nextflow.config cannot call this class (the config is compiled before lib/ is on the
  * classpath), which is why the lookup itself lives there and only the checking lives here.
@@ -20,7 +21,7 @@ class ResourceOverrides {
     /**
      * The names a `resources:` key can address, mapped to the process each one runs: every
      * process of modules/, plus every `include { X as Y }` alias, kept in `aliases` too. A task
-     * of an aliased process reports the alias as its name, and that is all sized() can see.
+     * of an aliased process reports the alias as its name, and that is all ext.sized can see.
      */
     static Map processNames(File projectDir) {
         def declared = [] as Set
@@ -49,11 +50,13 @@ class ResourceOverrides {
     /**
      * Problems with `resources`, as [errors: [...], warnings: [...]]. An error stops the run; a
      * warning is a value that will be clamped to a ceiling (`max_memory`, `max_cpus`,
-     * `max_time`), which sized() does anyway but which is almost certainly not what was meant.
+     * `max_time`), which resourceLimits does anyway but which is almost certainly not what was
+     * meant. A ceiling that does not parse is an error too: Nextflow would fail the first task.
      */
-    static Map check(Object resources, Map known, Map ceilings) {
+    static Map check(Object resources, Map known, Map given) {
         def errors = []
         def warnings = []
+        def ceilings = checkCeilings(given, errors)
         if (resources == null || resources == '' || (resources instanceof Map && resources.isEmpty())) {
             return [errors: errors, warnings: warnings]
         }
@@ -110,6 +113,26 @@ class ResourceOverrides {
             checkFields(where, entry.findAll { k, v -> k.toString() in FIELDS }, ceilings, errors, warnings)
         }
         return [errors: errors, warnings: warnings]
+    }
+
+    // The ceilings parsed, as checkFields compares with them; one that does not parse is left out
+    private static Map checkCeilings(Map given, List errors) {
+        def ceilings = [:]
+        def cpus = given.cpus
+        if (cpus != null) {
+            def n = cpus instanceof Integer || cpus instanceof Long ? cpus : cpus instanceof CharSequence && cpus.toString().isInteger() ? cpus.toString().toInteger() : null
+            if (n == null || n < 1) errors << "max_cpus: expected a whole number of CPUs, got ${describe(cpus)}"
+            else ceilings.cpus = n
+        }
+        [memory: [MemoryUnit, 'max_memory', 'a memory with its unit, such as 460.GB'],
+         time: [Duration, 'max_time', 'a duration with its unit, such as 240.h']].each { key, spec ->
+            def value = given[key]
+            if (value == null || value == '') return
+            def parsed = value instanceof MemoryUnit || value instanceof Duration ? value : parse(value, spec[0])
+            if (parsed == null) errors << "${spec[1]}: expected ${spec[2]}, got ${describe(value)}"
+            else ceilings[key] = parsed
+        }
+        return ceilings
     }
 
     private static void checkFields(String where, Object settings, Map ceilings, List errors, List warnings) {
