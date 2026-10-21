@@ -41,13 +41,8 @@ include { SAMPLEQC } from './workflows/sampleqc'
     logging, stays here.
 */
 
-// A mutable holder rather than plain variables, and this is not a style choice: a bare
-// assignment made inside `workflow {}` lands in a per-run binding that workflow.onComplete
-// cannot see. Mutating a script-level container works from both scopes; reassigning it
-// does not.
-ghfc_run_state = [terminal_written: false, warned_no_cohort: false,
-                  pedigree_file: null, pedigree_data: null, plan: null,
-                  alignment_scan: null, stale_family_clean: null, progress: null]
+// What the run has learnt so far is kept in RunContext.state (lib/RunContext.groovy), where
+// the workflow, these functions and the completion handler all see the same one.
 
 // The cohort directory holds this cohort's params file, its pedigree and its outputs, so it
 // is also where its state file belongs. Null when we cannot know it - params.cohort_name has
@@ -98,36 +93,36 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         annotation:         CohortState.progress(plan.annotation.existing.size(), n_families),
         wombat:             CohortState.progress(plan.wombat.existing.size(), n_families),
         // Like ancestry below, planned only when requested - empty lists mean "unmeasured"
-        wisecondorx:        ('wisecondorx' in pipeline_steps)
+        wisecondorx:        ('wisecondorx' in RunContext.steps)
                                 ? CohortState.progress(plan.wisecondorx.existing.size(), n_individuals)
                                 : null,
         // The whole ancestry block of the plan is skipped when the step is not requested, so
         // its empty lists mean "unmeasured", not "nothing done"
-        ancestry:           ('ancestry' in pipeline_steps)
+        ancestry:           ('ancestry' in RunContext.steps)
                                 ? CohortState.progress(plan.ancestry.existing.size(), n_families)
                                 : null,
         // Same rule: planned only when requested
-        roh:                ('roh' in pipeline_steps)
+        roh:                ('roh' in RunContext.steps)
                                 ? CohortState.progress(plan.roh.existing.size(), n_families)
                                 : null,
         // Samples called, as for wisecondorx; the family and cohort files follow from them
-        expansionhunter:    ('expansionhunter' in pipeline_steps)
+        expansionhunter:    ('expansionhunter' in RunContext.steps)
                                 ? CohortState.progress(plan.expansionhunter.existing.size(), n_individuals)
                                 : null,
         // Same: samples called
-        melt:               ('melt' in pipeline_steps)
+        melt:               ('melt' in RunContext.steps)
                                 ? CohortState.progress(plan.melt.existing.size(), n_individuals)
                                 : null,
         // Samples with their coverage files; the cohort fit follows from them
-        cnv_coverage:       ('cnv_coverage' in pipeline_steps)
+        cnv_coverage:       ('cnv_coverage' in RunContext.steps)
                                 ? CohortState.progress(plan.cnv_coverage.existing.size(), n_individuals)
                                 : null,
         // Samples extracted; the family and cohort tables follow from them and the pedigree
-        sampleqc:           ('sampleqc' in pipeline_steps)
+        sampleqc:           ('sampleqc' in RunContext.steps)
                                 ? CohortState.progress(plan.sampleqc.existing.size(), n_individuals)
                                 : null,
         // One sentinel entry: the panel version directory, complete or not
-        cnv_panel:          ('cnv_panel' in pipeline_steps)
+        cnv_panel:          ('cnv_panel' in RunContext.steps)
                                 ? CohortState.progress(plan.cnv_panel.existing.contains('cohort') ? 1 : 0, 1)
                                 : null,
         // One sentinel entry for the whole cohort, not a per-entity count
@@ -226,11 +221,11 @@ def startRunProgress(plan) {
         if (isRehearsalRun()) return
         def dir = cohortStateDir()
         if (!dir) return
-        def pedigree_data = ghfc_run_state.pedigree_data
+        def pedigree_data = RunContext.state.pedigree_data
         def n_families    = pedigree_data?.families?.size()
         def n_individuals = pedigree_data?.individuals?.size()
         def launch = launchInfo()
-        ghfc_run_state.progress = new RunProgress(
+        RunContext.state.progress = new RunProgress(
             dir: dir,
             header: [
                 run_id:       workflow.sessionId?.toString(),
@@ -258,10 +253,10 @@ def startRunProgress(plan) {
 
 def buildStateRecord(Map opts) {
     // Fall back to whatever the run stashed, so most call sites only have to say what happened
-    def pedigree_file = opts.containsKey('pedigree_file') ? opts.pedigree_file : ghfc_run_state.pedigree_file
-    def pedigree_data = opts.containsKey('pedigree_data') ? opts.pedigree_data : ghfc_run_state.pedigree_data
-    def plan          = opts.containsKey('plan')          ? opts.plan          : ghfc_run_state.plan
-    def scan          = opts.containsKey('alignment_scan') ? opts.alignment_scan : ghfc_run_state.alignment_scan
+    def pedigree_file = opts.containsKey('pedigree_file') ? opts.pedigree_file : RunContext.state.pedigree_file
+    def pedigree_data = opts.containsKey('pedigree_data') ? opts.pedigree_data : RunContext.state.pedigree_data
+    def plan          = opts.containsKey('plan')          ? opts.plan          : RunContext.state.plan
+    def scan          = opts.containsKey('alignment_scan') ? opts.alignment_scan : RunContext.state.alignment_scan
 
     def n_families    = pedigree_data?.families?.size()
     def n_individuals = pedigree_data?.individuals?.size()
@@ -289,14 +284,14 @@ def buildStateRecord(Map opts) {
         // Where the run lives, so a tool can go from a cohort to its log and its Slurm job
         launch: launchInfo(),
         params_effective_sha256: effectiveParamsSha(),
-        steps_requested: pipeline_steps,
+        steps_requested: RunContext.steps,
         completion_measured: opts.measured,
         outputs_may_be_incomplete: opts.incomplete ? true : false,
         completion: buildCompletionBlock(plan, n_families, n_individuals),
         samples_without_cram: buildSamplesWithoutCramBlock(plan, scan, pedigree_data?.family_members),
         // Null when no clean was asked for, or when the run died before it could run - the
         // same "this was not measured" convention the blocks above use
-        stale_family_clean: ghfc_run_state.stale_family_clean
+        stale_family_clean: RunContext.state.stale_family_clean
     ]
     if (opts.reason) record.reason = opts.reason
     return record
@@ -321,16 +316,16 @@ def recordRunState(Map opts) {
 
         if (opts.status != 'running') {
             // More than one exit path can reach here; the first terminal record is the true one
-            if (ghfc_run_state.terminal_written) return
-            ghfc_run_state.terminal_written = true
+            if (RunContext.state.terminal_written) return
+            RunContext.state.terminal_written = true
         }
 
         def dir = cohortStateDir()
         if (!dir) {
             // Once per run: this is called from the running marker, from every exit site and
             // from the completion handler, and repeating it would just be noise
-            if (!ghfc_run_state.warned_no_cohort) {
-                ghfc_run_state.warned_no_cohort = true
+            if (!RunContext.state.warned_no_cohort) {
+                RunContext.state.warned_no_cohort = true
                 log.warn "cohort_name is not set - skipping ${CohortState.FILE_NAME}"
             }
             return
@@ -362,8 +357,7 @@ def recordFailedRun(String reason) {
 // --steps "a,b" on the command line arrives as a String. Every use below tests membership or
 // joins, and `'alignment' in "alignment,wombat"` is quietly false rather than an error, so
 // both forms are reconciled into one list here and nothing downstream reads params.steps.
-// Assigned at script level without def, so the onComplete handler and the functions it calls
-// can see it - the same reason ghfc_run_state is written that way.
+// Kept in RunContext.steps, so the completion handler and the functions it calls see it too.
 def normaliseSteps(value) {
     if (value == null) return []
     def items
@@ -377,8 +371,6 @@ def normaliseSteps(value) {
     return items.collect { it?.toString()?.trim() }.findAll { it }
 }
 
-pipeline_steps = normaliseSteps(params.steps)
-
 // Groovy truth makes the non-empty string "false" true, and `--flag false` on the command line
 // arrives as exactly that string - measured on 26.04, for both `--flag false` and `--flag=false`.
 // Only a YAML params file yields a real Boolean. So a bare truth test on a flag reads the
@@ -389,217 +381,223 @@ def asBoolean(value) {
     return !(value.toString().trim().toLowerCase() in ['', 'false', 'no', '0', 'null'])
 }
 
-// Validate input parameters
-if (!params.data) {
-    exit 1, "ERROR: --data parameter is required"
-}
+// Every check that needs only the parameters, before the pedigree is even read. Called first
+// thing in the entry workflow: the strict syntax parser refuses statements at script level.
+def validateParams() {
+    // First, so that a refusal's state record already lists the steps asked for
+    RunContext.steps = normaliseSteps(params.steps)
 
-// Every cohort-level output path, the default pedigree location and the state file itself are
-// built from cohort_name. Without it the run writes .../cohorts/null/null.* and records nothing
-// about itself. Checked here rather than at first use, and with a bare exit like data above,
-// because recordFailedRun has nowhere to write a state file until both of them are known.
-if (!params.cohort_name) {
-    exit 1, "ERROR: cohort_name parameter is required"
-}
+    if (!params.data) {
+        exit 1, "ERROR: --data parameter is required"
+    }
 
-if (pipeline_steps.isEmpty()) {
-    recordFailedRun("no steps requested")
-    exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc"
-}
+    // Every cohort-level output path, the default pedigree location and the state file itself are
+    // built from cohort_name. Without it the run writes .../cohorts/null/null.* and records nothing
+    // about itself. Checked here rather than at first use, and with a bare exit like data above,
+    // because recordFailedRun has nowhere to write a state file until both of them are known.
+    if (!params.cohort_name) {
+        exit 1, "ERROR: cohort_name parameter is required"
+    }
 
-// Validate steps
-def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc']
-def invalid_steps = pipeline_steps - valid_steps
-if (invalid_steps) {
-    recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
-    exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
-}
+    if (RunContext.steps.isEmpty()) {
+        recordFailedRun("no steps requested")
+        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc"
+    }
 
-// snvs_cohort used to merge the wombat tables too. A parameters file written then still lists
-// only snvs_cohort, and would stop refreshing its cohort wombat tables without a word.
-if ('snvs_cohort' in pipeline_steps && !('wombat_cohort' in pipeline_steps) && params.wombat_config_list) {
-    log.warn "snvs_cohort no longer merges the wombat tables into cohort tables: add wombat_cohort to steps for that"
-}
+    // Validate steps
+    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc']
+    def invalid_steps = RunContext.steps - valid_steps
+    if (invalid_steps) {
+        recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
+        exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
+    }
 
-// The ancestry step reads its panel and weights from paths that have no sensible
-// default, and every one of its processes would fail on an empty string.
-if ('ancestry' in pipeline_steps) {
-    def missing_ancestry_params = ['ancestry_reference', 'ancestry_catalog', 'ancestry_panel_name']
-        .findAll { key -> !params[key] }
-    if (missing_ancestry_params) {
-        recordFailedRun("ancestry step is missing ${missing_ancestry_params.join(', ')}")
-        exit 1, "ERROR: the 'ancestry' step requires ${missing_ancestry_params.join(', ')} to be set"
+    // snvs_cohort used to merge the wombat tables too. A parameters file written then still lists
+    // only snvs_cohort, and would stop refreshing its cohort wombat tables without a word.
+    if ('snvs_cohort' in RunContext.steps && !('wombat_cohort' in RunContext.steps) && params.wombat_config_list) {
+        log.warn "snvs_cohort no longer merges the wombat tables into cohort tables: add wombat_cohort to steps for that"
     }
-}
 
-// roh reads the ancestry step's family panel and labels, named by the panel label, and calls
-// against the same bundle - which must carry the roh/ tier. The PGS catalog is not needed.
-if ('roh' in pipeline_steps) {
-    def missing_roh_params = ['ancestry_reference', 'ancestry_panel_name']
-        .findAll { key -> !params[key] }
-    if (missing_roh_params) {
-        recordFailedRun("roh step is missing ${missing_roh_params.join(', ')}")
-        exit 1, "ERROR: the 'roh' step requires ${missing_roh_params.join(', ')} to be set"
-    }
-    // Otherwise every family's ROH_CALL would fail on it, one task at a time
-    def roh_sites = "${params.ancestry_reference}/roh/sites.tsv.gz"
-    if (!new File(roh_sites).exists()) {
-        recordFailedRun("ancestry_reference has no roh/ tier")
-        exit 1, "ERROR: the 'roh' step needs the reference bundle's roh/ tier, and ${roh_sites} does not exist. Add it with ancestry-pgs bundle/add_roh_tier.py (bundle >= 1.1.0)"
-    }
-}
-
-// ExpansionHunter genotypes against a catalog named by its label, and reads the CRAMs with the
-// alignment reference. Checked here, or every sample's task would fail on it one at a time.
-if ('expansionhunter' in pipeline_steps) {
-    def missing_eh_params = ['expansionhunter_catalog', 'expansionhunter_catalog_name', 'ref']
-        .findAll { key -> !params[key] }
-    if (missing_eh_params) {
-        recordFailedRun("expansionhunter step is missing ${missing_eh_params.join(', ')}")
-        exit 1, "ERROR: the 'expansionhunter' step requires ${missing_eh_params.join(', ')} to be set"
-    }
-    // It becomes part of file names, so no separators and no spaces
-    if (!(params.expansionhunter_catalog_name.toString() ==~ /[A-Za-z0-9_.-]+/)) {
-        recordFailedRun("invalid expansionhunter_catalog_name")
-        exit 1, "ERROR: expansionhunter_catalog_name '${params.expansionhunter_catalog_name}' may only hold letters, digits, '.', '_' and '-': it is part of every ExpansionHunter file name"
-    }
-    def eh_files = [expansionhunter_catalog: params.expansionhunter_catalog, 'ref index': "${params.ref}.fai"]
-    if (params.expansionhunter_thresholds) {
-        eh_files.expansionhunter_thresholds = params.expansionhunter_thresholds
-    }
-    def absent = eh_files.findAll { _key, path -> !new File(path.toString()).exists() }
-    if (absent) {
-        recordFailedRun("expansionhunter inputs not found: ${absent.keySet().join(', ')}")
-        exit 1, "ERROR: the 'expansionhunter' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
-    }
-}
-
-// MELT runs from its distribution directory, with the alignment reference, and labels its calls;
-// the cohort scoring reads gnomAD-SV, the NDD genes and the annotation's gencode gene BED.
-if ('melt' in pipeline_steps) {
-    def missing_melt_params = ['melt_dir', 'melt_label', 'melt_gnomad_sv', 'melt_ndd_genes', 'melt_ndd_columns', 'ref']
-        .findAll { key -> !params[key] }
-    if (!rohGeneBeds()[0]) {
-        missing_melt_params += ['annotation_annotation_path and annotation_gencode']
-    }
-    if (missing_melt_params) {
-        recordFailedRun("melt step is missing ${missing_melt_params.join(', ')}")
-        exit 1, "ERROR: the 'melt' step requires ${missing_melt_params.join(', ')} to be set"
-    }
-    // It becomes part of file names, so no separators and no spaces
-    if (!(params.melt_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
-        recordFailedRun("invalid melt_label")
-        exit 1, "ERROR: melt_label '${params.melt_label}' may only hold letters, digits, '.', '_' and '-': it is part of every MELT file name"
-    }
-    // Quoted into the scoring's command line
-    if (params.melt_ndd_columns.toString().contains("'")) {
-        recordFailedRun("invalid melt_ndd_columns")
-        exit 1, "ERROR: melt_ndd_columns may not hold a single quote"
-    }
-    def melt_files = ['MELT.jar', 'me_refs/Hg38/ALU_MELT.zip', 'me_refs/Hg38/LINE1_MELT.zip', 'me_refs/Hg38/SVA_MELT.zip',
-                      'add_bed_files/Hg38/Hg38.genes.bed']
-        .collectEntries { rel -> ["melt_dir ${rel}".toString(), "${params.melt_dir}/${rel}"] }
-    melt_files += [melt_gnomad_sv: params.melt_gnomad_sv, melt_ndd_genes: params.melt_ndd_genes,
-                   'ref index': "${params.ref}.fai", 'gencode gene BED': rohGeneBeds()[0]]
-    def absent = melt_files.findAll { _key, path -> !new File(path.toString()).exists() }
-    if (absent) {
-        recordFailedRun("melt inputs not found: ${absent.keySet().join(', ')}")
-        exit 1, "ERROR: the 'melt' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
-    }
-}
-
-// Both CNV steps bin the CRAMs on the grid of cnv_cov_bin and the reference's .fai, and name every
-// file after cov_b<bin>q<mapq>. Checked here, or every sample's task would fail on it one at a time.
-if ('cnv_coverage' in pipeline_steps || 'cnv_panel' in pipeline_steps) {
-    def cnv_failures = []
-    if (!(params.cnv_cov_bin.toString() ==~ /[1-9][0-9]*/)) {
-        cnv_failures << "cnv_cov_bin '${params.cnv_cov_bin}' must be a whole number of bp above 0"
-    }
-    if (!(params.cnv_cov_mapq.toString() ==~ /[0-9]+/)) {
-        cnv_failures << "cnv_cov_mapq '${params.cnv_cov_mapq}' must be a whole number"
-    }
-    if (!(params.cnv_cov_round.toString().isBigDecimal() && params.cnv_cov_round.toString().toBigDecimal() > 0)) {
-        cnv_failures << "cnv_cov_round '${params.cnv_cov_round}' must be a number above 0"
-    }
-    if (!params.ref) {
-        cnv_failures << "ref must be set"
-    } else if (!new File(params.ref.toString()).exists() || !new File("${params.ref}.fai").exists()) {
-        cnv_failures << "the reference ${params.ref} or its .fai does not exist"
-    }
-    if ('cnv_panel' in pipeline_steps) {
-        // It becomes the directory name v<version>, so no separators and no spaces
-        if (!params.cnv_panel_version) {
-            cnv_failures << "the 'cnv_panel' step requires cnv_panel_version to be set"
-        } else if (!(params.cnv_panel_version.toString() ==~ /[A-Za-z0-9_.-]+/)) {
-            cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' may only hold letters, digits, '.', '_' and '-': it is the directory name v<version>"
-        } else if (params.cnv_panel_version.toString() ==~ /[vV][0-9].*/) {
-            cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' is written without its v: the directory is v<version>"
-        }
-        if (!params.cnv_panel_max_fit_mad.toString().isBigDecimal()) {
-            cnv_failures << "cnv_panel_max_fit_mad '${params.cnv_panel_max_fit_mad}' must be a number"
+    // The ancestry step reads its panel and weights from paths that have no sensible
+    // default, and every one of its processes would fail on an empty string.
+    if ('ancestry' in RunContext.steps) {
+        def missing_ancestry_params = ['ancestry_reference', 'ancestry_catalog', 'ancestry_panel_name']
+            .findAll { key -> !params[key] }
+        if (missing_ancestry_params) {
+            recordFailedRun("ancestry step is missing ${missing_ancestry_params.join(', ')}")
+            exit 1, "ERROR: the 'ancestry' step requires ${missing_ancestry_params.join(', ')} to be set"
         }
     }
-    if (cnv_failures) {
-        recordFailedRun("invalid CNV coverage parameters: ${cnv_failures.join('; ')}")
-        exit 1, "ERROR: ${cnv_failures.join('\nERROR: ')}"
-    }
-    // A panel version is written once and never overwritten. A complete one is simply done; a
-    // partial one - a build that died while publishing, or a hand edit - is not something to
-    // finish or to rebuild over in silence.
-    if ('cnv_panel' in pipeline_steps && new File(cnvPanelVersionDir()).exists() && !cnvPanelComplete()) {
-        def absent = cnvPanelFiles().findAll { name -> new File("${cnvPanelVersionDir()}/${name}").length() == 0 }
-        recordFailedRun("CNV panel v${params.cnv_panel_version} is incomplete")
-        exit 1, "ERROR: the CNV panel directory ${cnvPanelVersionDir()} exists but is incomplete (${absent.join(', ')} missing or empty), and a panel version is never overwritten: remove it, or set another cnv_panel_version"
-    }
-    // The panel to fit the cohort against. One of another tag is not an error, only a fit that
-    // cannot be made; the plan skips it, with a warning.
-    if ('cnv_coverage' in pipeline_steps && params.cnv_panel_dir) {
-        def panel = readCnvPanel()
-        if (panel.error) {
-            recordFailedRun("cnv_panel_dir: ${panel.error}")
-            exit 1, "ERROR: cnv_panel_dir: ${panel.error}"
+
+    // roh reads the ancestry step's family panel and labels, named by the panel label, and calls
+    // against the same bundle - which must carry the roh/ tier. The PGS catalog is not needed.
+    if ('roh' in RunContext.steps) {
+        def missing_roh_params = ['ancestry_reference', 'ancestry_panel_name']
+            .findAll { key -> !params[key] }
+        if (missing_roh_params) {
+            recordFailedRun("roh step is missing ${missing_roh_params.join(', ')}")
+            exit 1, "ERROR: the 'roh' step requires ${missing_roh_params.join(', ')} to be set"
         }
-        if (panel.tag != cnvTag()) {
-            log.warn "Skipping the CNV coverage fit: the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${cnvTag()} - genetics-viz will not divide one by the other either"
+        // Otherwise every family's ROH_CALL would fail on it, one task at a time
+        def roh_sites = "${params.ancestry_reference}/roh/sites.tsv.gz"
+        if (!new File(roh_sites).exists()) {
+            recordFailedRun("ancestry_reference has no roh/ tier")
+            exit 1, "ERROR: the 'roh' step needs the reference bundle's roh/ tier, and ${roh_sites} does not exist. Add it with ancestry-pgs bundle/add_roh_tier.py (bundle >= 1.1.0)"
         }
     }
-}
 
-// The sample QC extracts every CRAM at somalier's sites, read against the alignment reference, and
-// names every file after sampleqc_label
-if ('sampleqc' in pipeline_steps) {
-    def missing_sampleqc_params = ['somalier_sites', 'sampleqc_label', 'ref'].findAll { key -> !params[key] }
-    if (missing_sampleqc_params) {
-        recordFailedRun("sampleqc step is missing ${missing_sampleqc_params.join(', ')}")
-        exit 1, "ERROR: the 'sampleqc' step requires ${missing_sampleqc_params.join(', ')} to be set"
+    // ExpansionHunter genotypes against a catalog named by its label, and reads the CRAMs with the
+    // alignment reference. Checked here, or every sample's task would fail on it one at a time.
+    if ('expansionhunter' in RunContext.steps) {
+        def missing_eh_params = ['expansionhunter_catalog', 'expansionhunter_catalog_name', 'ref']
+            .findAll { key -> !params[key] }
+        if (missing_eh_params) {
+            recordFailedRun("expansionhunter step is missing ${missing_eh_params.join(', ')}")
+            exit 1, "ERROR: the 'expansionhunter' step requires ${missing_eh_params.join(', ')} to be set"
+        }
+        // It becomes part of file names, so no separators and no spaces
+        if (!(params.expansionhunter_catalog_name.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid expansionhunter_catalog_name")
+            exit 1, "ERROR: expansionhunter_catalog_name '${params.expansionhunter_catalog_name}' may only hold letters, digits, '.', '_' and '-': it is part of every ExpansionHunter file name"
+        }
+        def eh_files = [expansionhunter_catalog: params.expansionhunter_catalog, 'ref index': "${params.ref}.fai"]
+        if (params.expansionhunter_thresholds) {
+            eh_files.expansionhunter_thresholds = params.expansionhunter_thresholds
+        }
+        def absent = eh_files.findAll { _key, path -> !new File(path.toString()).exists() }
+        if (absent) {
+            recordFailedRun("expansionhunter inputs not found: ${absent.keySet().join(', ')}")
+            exit 1, "ERROR: the 'expansionhunter' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+        }
     }
-    if (!(params.sampleqc_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
-        recordFailedRun("invalid sampleqc_label")
-        exit 1, "ERROR: sampleqc_label '${params.sampleqc_label}' may only hold letters, digits, '.', '_' and '-': it is part of every sample QC file name"
-    }
-    def hom_cutoff = params.sampleqc_hom_cutoff.toString()
-    if (!(hom_cutoff.isBigDecimal() && hom_cutoff.toBigDecimal() > 0 && hom_cutoff.toBigDecimal() < 0.3)) {
-        recordFailedRun("invalid sampleqc_hom_cutoff")
-        exit 1, "ERROR: sampleqc_hom_cutoff '${params.sampleqc_hom_cutoff}' must be a number above 0 and below 0.3, where somalier's heterozygous sites start"
-    }
-    def sampleqc_files = [somalier_sites: params.somalier_sites, ref: params.ref, 'ref .fai': "${params.ref}.fai"]
-    def absent = sampleqc_files.findAll { _key, path -> !new File(path.toString()).exists() }
-    if (absent) {
-        recordFailedRun("sampleqc inputs not found: ${absent.keySet().join(', ')}")
-        exit 1, "ERROR: the 'sampleqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
-    }
-}
 
-// The cohort's `resources:` overrides are only read by sized() in nextflow.config, task by task,
-// so a typo there would surface hours into the run, or - for a key that matches nothing - never.
-// containsKey first: reading an unset params key, even with get(), logs a warning every run.
-def resource_check = ResourceOverrides.check(params.containsKey('resources') ? params.resources : null,
-    ResourceOverrides.processNames(projectDir.toFile()),
-    [memory: params.max_memory, cpus: params.max_cpus, time: params.max_time])
-resource_check.warnings.each { log.warn(it) }
-if (resource_check.errors) {
-    recordFailedRun("invalid resources: ${resource_check.errors.join('; ')}")
-    exit 1, "ERROR: invalid resources in the parameters file:\n  ${resource_check.errors.join('\n  ')}"
+    // MELT runs from its distribution directory, with the alignment reference, and labels its calls;
+    // the cohort scoring reads gnomAD-SV, the NDD genes and the annotation's gencode gene BED.
+    if ('melt' in RunContext.steps) {
+        def missing_melt_params = ['melt_dir', 'melt_label', 'melt_gnomad_sv', 'melt_ndd_genes', 'melt_ndd_columns', 'ref']
+            .findAll { key -> !params[key] }
+        if (!rohGeneBeds()[0]) {
+            missing_melt_params += ['annotation_annotation_path and annotation_gencode']
+        }
+        if (missing_melt_params) {
+            recordFailedRun("melt step is missing ${missing_melt_params.join(', ')}")
+            exit 1, "ERROR: the 'melt' step requires ${missing_melt_params.join(', ')} to be set"
+        }
+        // It becomes part of file names, so no separators and no spaces
+        if (!(params.melt_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid melt_label")
+            exit 1, "ERROR: melt_label '${params.melt_label}' may only hold letters, digits, '.', '_' and '-': it is part of every MELT file name"
+        }
+        // Quoted into the scoring's command line
+        if (params.melt_ndd_columns.toString().contains("'")) {
+            recordFailedRun("invalid melt_ndd_columns")
+            exit 1, "ERROR: melt_ndd_columns may not hold a single quote"
+        }
+        def melt_files = ['MELT.jar', 'me_refs/Hg38/ALU_MELT.zip', 'me_refs/Hg38/LINE1_MELT.zip', 'me_refs/Hg38/SVA_MELT.zip',
+                          'add_bed_files/Hg38/Hg38.genes.bed']
+            .collectEntries { rel -> ["melt_dir ${rel}".toString(), "${params.melt_dir}/${rel}"] }
+        melt_files += [melt_gnomad_sv: params.melt_gnomad_sv, melt_ndd_genes: params.melt_ndd_genes,
+                       'ref index': "${params.ref}.fai", 'gencode gene BED': rohGeneBeds()[0]]
+        def absent = melt_files.findAll { _key, path -> !new File(path.toString()).exists() }
+        if (absent) {
+            recordFailedRun("melt inputs not found: ${absent.keySet().join(', ')}")
+            exit 1, "ERROR: the 'melt' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+        }
+    }
+
+    // Both CNV steps bin the CRAMs on the grid of cnv_cov_bin and the reference's .fai, and name every
+    // file after cov_b<bin>q<mapq>. Checked here, or every sample's task would fail on it one at a time.
+    if ('cnv_coverage' in RunContext.steps || 'cnv_panel' in RunContext.steps) {
+        def cnv_failures = []
+        if (!(params.cnv_cov_bin.toString() ==~ /[1-9][0-9]*/)) {
+            cnv_failures << "cnv_cov_bin '${params.cnv_cov_bin}' must be a whole number of bp above 0"
+        }
+        if (!(params.cnv_cov_mapq.toString() ==~ /[0-9]+/)) {
+            cnv_failures << "cnv_cov_mapq '${params.cnv_cov_mapq}' must be a whole number"
+        }
+        if (!(params.cnv_cov_round.toString().isBigDecimal() && params.cnv_cov_round.toString().toBigDecimal() > 0)) {
+            cnv_failures << "cnv_cov_round '${params.cnv_cov_round}' must be a number above 0"
+        }
+        if (!params.ref) {
+            cnv_failures << "ref must be set"
+        } else if (!new File(params.ref.toString()).exists() || !new File("${params.ref}.fai").exists()) {
+            cnv_failures << "the reference ${params.ref} or its .fai does not exist"
+        }
+        if ('cnv_panel' in RunContext.steps) {
+            // It becomes the directory name v<version>, so no separators and no spaces
+            if (!params.cnv_panel_version) {
+                cnv_failures << "the 'cnv_panel' step requires cnv_panel_version to be set"
+            } else if (!(params.cnv_panel_version.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+                cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' may only hold letters, digits, '.', '_' and '-': it is the directory name v<version>"
+            } else if (params.cnv_panel_version.toString() ==~ /[vV][0-9].*/) {
+                cnv_failures << "cnv_panel_version '${params.cnv_panel_version}' is written without its v: the directory is v<version>"
+            }
+            if (!params.cnv_panel_max_fit_mad.toString().isBigDecimal()) {
+                cnv_failures << "cnv_panel_max_fit_mad '${params.cnv_panel_max_fit_mad}' must be a number"
+            }
+        }
+        if (cnv_failures) {
+            recordFailedRun("invalid CNV coverage parameters: ${cnv_failures.join('; ')}")
+            exit 1, "ERROR: ${cnv_failures.join('\nERROR: ')}"
+        }
+        // A panel version is written once and never overwritten. A complete one is simply done; a
+        // partial one - a build that died while publishing, or a hand edit - is not something to
+        // finish or to rebuild over in silence.
+        if ('cnv_panel' in RunContext.steps && new File(cnvPanelVersionDir()).exists() && !cnvPanelComplete()) {
+            def absent = cnvPanelFiles().findAll { name -> new File("${cnvPanelVersionDir()}/${name}").length() == 0 }
+            recordFailedRun("CNV panel v${params.cnv_panel_version} is incomplete")
+            exit 1, "ERROR: the CNV panel directory ${cnvPanelVersionDir()} exists but is incomplete (${absent.join(', ')} missing or empty), and a panel version is never overwritten: remove it, or set another cnv_panel_version"
+        }
+        // The panel to fit the cohort against. One of another tag is not an error, only a fit that
+        // cannot be made; the plan skips it, with a warning.
+        if ('cnv_coverage' in RunContext.steps && params.cnv_panel_dir) {
+            def panel = readCnvPanel()
+            if (panel.error) {
+                recordFailedRun("cnv_panel_dir: ${panel.error}")
+                exit 1, "ERROR: cnv_panel_dir: ${panel.error}"
+            }
+            if (panel.tag != cnvTag()) {
+                log.warn "Skipping the CNV coverage fit: the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${cnvTag()} - genetics-viz will not divide one by the other either"
+            }
+        }
+    }
+
+    // The sample QC extracts every CRAM at somalier's sites, read against the alignment reference, and
+    // names every file after sampleqc_label
+    if ('sampleqc' in RunContext.steps) {
+        def missing_sampleqc_params = ['somalier_sites', 'sampleqc_label', 'ref'].findAll { key -> !params[key] }
+        if (missing_sampleqc_params) {
+            recordFailedRun("sampleqc step is missing ${missing_sampleqc_params.join(', ')}")
+            exit 1, "ERROR: the 'sampleqc' step requires ${missing_sampleqc_params.join(', ')} to be set"
+        }
+        if (!(params.sampleqc_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid sampleqc_label")
+            exit 1, "ERROR: sampleqc_label '${params.sampleqc_label}' may only hold letters, digits, '.', '_' and '-': it is part of every sample QC file name"
+        }
+        def hom_cutoff = params.sampleqc_hom_cutoff.toString()
+        if (!(hom_cutoff.isBigDecimal() && hom_cutoff.toBigDecimal() > 0 && hom_cutoff.toBigDecimal() < 0.3)) {
+            recordFailedRun("invalid sampleqc_hom_cutoff")
+            exit 1, "ERROR: sampleqc_hom_cutoff '${params.sampleqc_hom_cutoff}' must be a number above 0 and below 0.3, where somalier's heterozygous sites start"
+        }
+        def sampleqc_files = [somalier_sites: params.somalier_sites, ref: params.ref, 'ref .fai': "${params.ref}.fai"]
+        def absent = sampleqc_files.findAll { _key, path -> !new File(path.toString()).exists() }
+        if (absent) {
+            recordFailedRun("sampleqc inputs not found: ${absent.keySet().join(', ')}")
+            exit 1, "ERROR: the 'sampleqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+        }
+    }
+
+    // The cohort's `resources:` overrides are only read by sized() in nextflow.config, task by task,
+    // so a typo there would surface hours into the run, or - for a key that matches nothing - never.
+    // containsKey first: reading an unset params key, even with get(), logs a warning every run.
+    def resource_check = ResourceOverrides.check(params.containsKey('resources') ? params.resources : null,
+        ResourceOverrides.processNames(projectDir.toFile()),
+        [memory: params.max_memory, cpus: params.max_cpus, time: params.max_time])
+    resource_check.warnings.each { log.warn(it) }
+    if (resource_check.errors) {
+        recordFailedRun("invalid resources: ${resource_check.errors.join('; ')}")
+        exit 1, "ERROR: invalid resources in the parameters file:\n  ${resource_check.errors.join('\n  ')}"
+    }
 }
 
 /*
@@ -609,13 +607,21 @@ if (resource_check.errors) {
 */
 
 workflow {
-    
+
+    validateParams()
+
+    // Registered once the parameters are known to be sound, as the script-level handler it
+    // replaces was. The run's metadata is held in a variable: inside the handler, `workflow`
+    // is null by then. See recordRunCompletion.
+    def run = workflow
+    run.onComplete { recordRunCompletion(run.success) }
+
     // Read and validate pedigree file. The pedigree lives in the cohort directory, next to the
     // parameters file and the cohort's outputs, so that convention is the default and only a
     // pedigree kept somewhere else needs the parameter set at all.
     def pedigree_file = params.pedigree ?: "${params.data}/cohorts/${params.cohort_name}/${params.cohort_name}.pedigree.tsv"
     // Stashed before the existence check so a failure record can still name the path it wanted
-    ghfc_run_state.pedigree_file = pedigree_file
+    RunContext.state.pedigree_file = pedigree_file
 
     if (!new File(pedigree_file).exists()) {
         recordFailedRun("pedigree file not found: ${pedigree_file}")
@@ -632,7 +638,7 @@ workflow {
     ========================================================================================
     Pedigree file    : ${pedigree_file}
     Data directory   : ${params.data}
-    Steps to run     : ${pipeline_steps.join(', ')}
+    Steps to run     : ${RunContext.steps.join(', ')}
     Reference        : ${params.ref_name}
     Work directory   : ${workflow.workDir}
     VEP Config Name  : ${params.vep_config_name} (${params.vep_config})
@@ -644,7 +650,7 @@ workflow {
     def families = pedigree_data.families
     def individuals = pedigree_data.individuals
     def family_members = pedigree_data.family_members
-    ghfc_run_state.pedigree_data = pedigree_data
+    RunContext.state.pedigree_data = pedigree_data
 
     log.info "Found ${families.size()} families with ${individuals.size()} individuals total"
     
@@ -665,7 +671,7 @@ workflow {
     // this scan is keyed on cannot change when family VCFs are deleted - so the verdicts stay
     // valid for the rebuilt plan, and the directory globs happen once.
     def resolved_inputs = resolveAlignmentInputs(analysis_plan)
-    ghfc_run_state.alignment_scan = resolved_inputs
+    RunContext.state.alignment_scan = resolved_inputs
 
     if (clean_requested) {
         if (!params.vep_config_name) {
@@ -676,22 +682,22 @@ workflow {
             exit 1, "ERROR: clean_stale_families needs vep_config_name to know which annotation and wombat outputs belong to a family - set it in the parameters file"
         }
         if (analysis_plan.pedigree_drift) {
-            ghfc_run_state.stale_family_clean = cleanStaleFamilies(analysis_plan, resolved_inputs, family_members)
+            RunContext.state.stale_family_clean = cleanStaleFamilies(analysis_plan, resolved_inputs, family_members)
             // A rehearsal deleted nothing, so re-planning would have the run proceed as
             // though the outputs were gone when every one of them is still there
-            if (ghfc_run_state.stale_family_clean.families_cleaned &&
-                !ghfc_run_state.stale_family_clean.rehearsal) {
+            if (RunContext.state.stale_family_clean.families_cleaned &&
+                !RunContext.state.stale_family_clean.rehearsal) {
                 analysis_plan = createAnalysisPlan(families, individuals, family_members)
             }
         } else {
             log.info "clean_stale_families is set, but no family has stale outputs - nothing to clean"
         }
     }
-    ghfc_run_state.plan = analysis_plan
+    RunContext.state.plan = analysis_plan
 
     // Display analysis summary. After a clean this describes the tree the run will actually
     // work on, and any family still listed as drifted is one the clean refused.
-    displayAnalysisSummary(analysis_plan, resolved_inputs, ghfc_run_state.stale_family_clean)
+    displayAnalysisSummary(analysis_plan, resolved_inputs, RunContext.state.stale_family_clean)
 
     // Stale family outputs are wrong results rather than missing ones, so the run can be
     // stopped on them. Warning is the default deliberately: a cohort whose pedigree has
@@ -718,7 +724,7 @@ workflow {
     // Run alignment if needed and allowed
     // Also entered when CRAMs exist but their coverage bedgraphs are missing, in which case only
     // MOSDEPTH/TABIX_INDEX run - no realignment is triggered.
-    if ((analysis_plan.alignment.needed.size() > 0 || analysis_plan.alignment.need_bedgraph.size() > 0) && 'alignment' in pipeline_steps) {
+    if ((analysis_plan.alignment.needed.size() > 0 || analysis_plan.alignment.need_bedgraph.size() > 0) && 'alignment' in RunContext.steps) {
         if (analysis_plan.alignment.needed.size() > 0) {
             log.info "Running alignment for ${analysis_plan.alignment.needed.size()} individuals..."
         }
@@ -742,7 +748,7 @@ workflow {
     all_available_crams = channels.existing_crams.mix(aligned_crams ?: Channel.empty())
     
     // Run DeepVariant sample workflow if needed and allowed
-    if (analysis_plan.deepvariant_sample.needed.size() > 0 && 'deepvariant_sample' in pipeline_steps) {
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && 'deepvariant_sample' in RunContext.steps) {
         log.info "Running DeepVariant sample workflow for ${analysis_plan.deepvariant_sample.needed.size()} individuals..."
         
         // Filter CRAM files for individuals that need DeepVariant
@@ -765,7 +771,7 @@ workflow {
     family_vcfs_output = Channel.empty()
     normalized_bcfs_output = Channel.empty()
     family_pedigrees_output = Channel.empty()
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in pipeline_steps) {
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in RunContext.steps) {
         log.info "Running family calling, normalization, and pedigree extraction for ${analysis_plan.deepvariant_family.needed.size()} families..."
         
         // Group gVCF files by family
@@ -790,7 +796,7 @@ workflow {
     
     // Run annotation (gnomAD annotation, filtering, VEP) if needed and allowed
     annotation_common_bcfs_output = Channel.empty()
-    if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in pipeline_steps) {
+    if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in RunContext.steps) {
         log.info "Running annotation for ${analysis_plan.annotation.needed.size()} families..."
         
         // Get all available normalized family BCFs (existing + newly created)
@@ -820,7 +826,7 @@ workflow {
     
     // Run Wombat analysis if needed and allowed
     wombat_output = Channel.empty()
-    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in pipeline_steps) {
+    if (analysis_plan.wombat.needed.size() > 0 && 'wombat' in RunContext.steps) {
         log.info "Running Wombat analysis for ${analysis_plan.wombat.needed.size()} families..."
         
         // Get all available annotated BCFs (existing + newly created)
@@ -855,11 +861,11 @@ workflow {
     }
     
     // Run cohort common variants merge if needed and allowed
-    if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in pipeline_steps) {
+    if (analysis_plan.snvs_cohort.needed.size() > 0 && 'snvs_cohort' in RunContext.steps) {
         log.info "Running cohort: common variants BCF merge..."
         
         // Get all available common filtered BCFs (existing + newly created)
-        if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in pipeline_steps) {
+        if (analysis_plan.annotation.needed.size() > 0 && 'annotation' in RunContext.steps) {
             // Mix existing BCFs with newly created ones
             all_available_common_bcfs = channels.existing_common_filtered_bcfs.mix(annotation_common_bcfs_output)
         } else {
@@ -874,7 +880,7 @@ workflow {
     }
     
     // Run the cohort wombat merges if needed and allowed
-    if (analysis_plan.wombat_cohort.needed.size() > 0 && 'wombat_cohort' in pipeline_steps) {
+    if (analysis_plan.wombat_cohort.needed.size() > 0 && 'wombat_cohort' in RunContext.steps) {
         def wombat_merge_count = analysis_plan.wombat_cohort.need_merges.count { k, v -> v == true }
         log.info "Running cohort: wombat merge (${wombat_merge_count} configs)..."
         
@@ -891,7 +897,7 @@ workflow {
     if ((analysis_plan.wisecondorx.needed.size() > 0 || 
          analysis_plan.wisecondorx.need_family_merge.any { k, v -> v == true } || 
          analysis_plan.wisecondorx.need_family_annotate.any { k, v -> v == true } || 
-         analysis_plan.wisecondorx.need_cohort_merge) && 'wisecondorx' in pipeline_steps) {
+         analysis_plan.wisecondorx.need_cohort_merge) && 'wisecondorx' in RunContext.steps) {
         
         def tasks = []
         if (analysis_plan.wisecondorx.needed.size() > 0) {
@@ -938,7 +944,7 @@ workflow {
     if ((analysis_plan.expansionhunter.needed.size() > 0 ||
          analysis_plan.expansionhunter.need_family.size() > 0 ||
          analysis_plan.expansionhunter.need_cohort_merge ||
-         analysis_plan.expansionhunter.need_reviewer.size() > 0) && 'expansionhunter' in pipeline_steps) {
+         analysis_plan.expansionhunter.need_reviewer.size() > 0) && 'expansionhunter' in RunContext.steps) {
 
         def eh_tasks = []
         if (analysis_plan.expansionhunter.needed.size() > 0) {
@@ -974,7 +980,7 @@ workflow {
     // newly aligned; a sample with no CRAM is left out rather than sent to alignment.
     if ((analysis_plan.melt.needed.size() > 0 ||
          analysis_plan.melt.need_family.size() > 0 ||
-         analysis_plan.melt.need_cohort_merge) && 'melt' in pipeline_steps) {
+         analysis_plan.melt.need_cohort_merge) && 'melt' in RunContext.steps) {
 
         def melt_tasks = []
         if (analysis_plan.melt.needed.size() > 0) {
@@ -1004,7 +1010,7 @@ workflow {
     // aligned; a sample with no CRAM is left out rather than sent to alignment.
     cnv_new_coverage = Channel.empty()
     if ((analysis_plan.cnv_coverage.needed.size() > 0 || analysis_plan.cnv_coverage.need_fit) &&
-        'cnv_coverage' in pipeline_steps) {
+        'cnv_coverage' in RunContext.steps) {
 
         def cnv_tasks = []
         if (analysis_plan.cnv_coverage.needed.size() > 0) {
@@ -1029,7 +1035,7 @@ workflow {
 
     // Build the CNV control panel if needed and allowed, from every sample's coverage, this run's
     // and the existing ones
-    if (analysis_plan.cnv_panel.needed && 'cnv_panel' in pipeline_steps) {
+    if (analysis_plan.cnv_panel.needed && 'cnv_panel' in RunContext.steps) {
         log.info "Building CNV panel v${params.cnv_panel_version} from ${analysis_plan.cnv_coverage.existing.size() + analysis_plan.cnv_coverage.needed.size()} samples..."
         CNV_PANEL(
             cnv_new_coverage,
@@ -1043,7 +1049,7 @@ workflow {
     // aligned, and the sex check reads the coverage JSONs this run's cnv_coverage makes
     if ((analysis_plan.sampleqc.needed.size() > 0 ||
          analysis_plan.sampleqc.need_family.size() > 0 ||
-         analysis_plan.sampleqc.need_cohort) && 'sampleqc' in pipeline_steps) {
+         analysis_plan.sampleqc.need_cohort) && 'sampleqc' in RunContext.steps) {
 
         def qc_tasks = []
         if (analysis_plan.sampleqc.needed.size() > 0) {
@@ -1067,7 +1073,7 @@ workflow {
     }
     
     // Run Extractor if TSV files are provided and step is allowed
-    if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in pipeline_steps) {
+    if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in RunContext.steps) {
         log.info "Running Extractor for ${analysis_plan.extractor.tsv_count} TSV files on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples..."
         
         // Create channel from TSV list
@@ -1117,7 +1123,7 @@ workflow {
     ancestry_family_panels = Channel.empty()
     ancestry_family_labels = Channel.empty()
     if ((analysis_plan.ancestry.needed.size() > 0 ||
-         analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in pipeline_steps) {
+         analysis_plan.ancestry.need_cohort_merge) && 'ancestry' in RunContext.steps) {
 
         def ancestry_tasks = []
         if (analysis_plan.ancestry.need_extract.size() > 0) {
@@ -1156,7 +1162,7 @@ workflow {
     // family the ancestry step rebuilds in this run takes that run's panel and label; every
     // other family reads its own from disk.
     if ((analysis_plan.roh.needed.size() > 0 ||
-         analysis_plan.roh.need_cohort_merge) && 'roh' in pipeline_steps) {
+         analysis_plan.roh.need_cohort_merge) && 'roh' in RunContext.steps) {
 
         def roh_tasks = []
         if (analysis_plan.roh.needed.size() > 0) {
@@ -1350,6 +1356,14 @@ def rohFamilyTableKinds() {
     return ['froh', 'roh'] + (rohGeneBeds()[0] ? ['roh_genes'] : [])
 }
 
+// Whether a sample's gVCF exists, asked once per plan: `known` holds the answers so far
+def hasGvcf(Map known, barcode) {
+    if (known[barcode] == null) {
+        known[barcode] = new File("${Sharding.getSampleDir(params.data, barcode)}/deepvariant/${barcode}.g.vcf.gz").exists()
+    }
+    return known[barcode]
+}
+
 def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
         // no_cram is every individual with no usable CRAM, whatever the reason and whether or
@@ -1402,16 +1416,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // The drift check, the deepvariant_sample check and the CRAM-less check below each ask
     // whether a sample's gVCF exists. On network storage every one of those is a round trip,
     // and at a cohort of 10^5 samples asking three times is two passes of pure waste - so the
-    // first answer is kept for the rest of this plan.
+    // first answer is kept for the rest of this plan, by hasGvcf.
     def gvcf_exists = [:]
-    def hasGvcf = { barcode ->
-        def known = gvcf_exists[barcode]
-        if (known == null) {
-            known = new File("${Sharding.getSampleDir(params.data, barcode)}/deepvariant/${barcode}.g.vcf.gz").exists()
-            gvcf_exists[barcode] = known
-        }
-        return known
-    }
 
     // Unset means the default, not "off": asBoolean reads a missing value as false
     def require_vaf_bedgraph = params.vaf_bedgraph == null ? true : asBoolean(params.vaf_bedgraph)
@@ -1452,7 +1458,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             // {FID}.pedigree.tsv is no help because it is rewritten from the current
             // pedigree and so already lists the members the call is missing.
             def members = members_by_family[fid] ?: []
-            def without_gvcf = members.findAll { barcode -> !hasGvcf(barcode) }.sort()
+            def without_gvcf = members.findAll { barcode -> !hasGvcf(gvcf_exists, barcode) }.sort()
             if (without_gvcf) {
                 plan.pedigree_drift[fid] = [members: members.size(), missing: without_gvcf]
             }
@@ -1512,7 +1518,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // The panel label is part of every file name on purpose: the depth/quality
     // thresholds and the reference bundle are not recorded anywhere this check can
     // see, so bumping ancestry_panel_name is what invalidates the old extractions.
-    if ('ancestry' in pipeline_steps) {
+    if ('ancestry' in RunContext.steps) {
         def panel_name = params.ancestry_panel_name
         def table_kinds = ['pcs', 'ancestry', 'Q', 'pgs_raw', 'pgs_adjusted', 'pgs_zscore']
 
@@ -1562,7 +1568,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // labels, so a family the ancestry step rebuilds in this run is re-called too: its old ROH
     // tables describe a panel or an ancestry label that is about to change. Named by the
     // ancestry panel label for the same reason, which also pins the bundle and its roh/ tier.
-    if ('roh' in pipeline_steps) {
+    if ('roh' in RunContext.steps) {
         def panel_name = params.ancestry_panel_name
         def kinds = rohFamilyTableKinds()
 
@@ -1608,7 +1614,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def has_vaf_bedgraph = !require_vaf_bedgraph ||
             (new File(vaf_bedgraph_path).exists() && new File(vaf_bedgraph_tbi_path).exists())
 
-        if (hasGvcf(barcode) && new File(gvcf_tbi_path).exists() && has_vaf_bedgraph) {
+        if (hasGvcf(gvcf_exists, barcode) && new File(gvcf_tbi_path).exists() && has_vaf_bedgraph) {
             plan.deepvariant_sample.existing.add(barcode)
         } else {
             // Only need DeepVariant if the individual's family needs deepvariant_family
@@ -1648,7 +1654,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             plan.alignment.no_cram.add(barcode)
             // Hoisted out of the two branches below, which each needed it anyway, so the
             // three CRAM-less buckets can be told apart later without a second stat
-            def has_gvcf = hasGvcf(barcode)
+            def has_gvcf = hasGvcf(gvcf_exists, barcode)
             if (has_gvcf) {
                 plan.alignment.no_cram_with_gvcf.add(barcode)
             }
@@ -1682,7 +1688,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // many per family is a large share of a planning pass that nothing reads otherwise: every
     // consumer of plan.wisecondorx - the WISECONDORX call, the summary and the completion block -
     // is itself gated on the step.
-    if ('wisecondorx' in pipeline_steps) {
+    if ('wisecondorx' in RunContext.steps) {
         // Check existing WisecondorX NPZ and predict files
         individuals.each { barcode ->
             def smp_dir = Sharding.getSampleDir(params.data, barcode)
@@ -1767,7 +1773,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // The catalog label is part of every file name, as the ancestry panel label is: nothing on
     // disk records which catalog a call was made with, so a new label is what makes a new
     // catalog recompute rather than reuse calls made with the old one.
-    if ('expansionhunter' in pipeline_steps) {
+    if ('expansionhunter' in RunContext.steps) {
         def label = params.expansionhunter_catalog_name
 
         individuals.each { barcode ->
@@ -1793,7 +1799,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             (CohortState.sha256(params.expansionhunter_thresholds.toString()) ?: 'missing') : 'none'
         def eh_table_script = CohortState.sha256("${projectDir}/modules/expansionhunter/scripts/eh_family_table".toString())
         def eh_rows = [:]
-        InputsSnapshot.pedigreeRows(new File(ghfc_run_state.pedigree_file.toString()).readLines()).each { row ->
+        InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
             eh_rows.get(row[0], []) << row
         }
         families.each { fid ->
@@ -1860,7 +1866,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
     // Check existing MELT outputs, as for ExpansionHunter: only when the step is requested, and
     // with melt_label in every file name as the only record of how a call was made.
-    if ('melt' in pipeline_steps) {
+    if ('melt' in RunContext.steps) {
         def label = params.melt_label
 
         individuals.each { barcode ->
@@ -1907,7 +1913,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
     // Check existing CNV coverage, when either step is requested: the panel is built from it. The
     // tag is in every file name, as melt_label is: a new bin or MAPQ is a new set of files.
-    if ('cnv_coverage' in pipeline_steps || 'cnv_panel' in pipeline_steps) {
+    if ('cnv_coverage' in RunContext.steps || 'cnv_panel' in RunContext.steps) {
         def tag = cnvTag()
         individuals.each { barcode ->
             def prefix = "${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${tag}"
@@ -1923,7 +1929,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
         // The fit depends on every sample, as the MELT cohort files do, so it is rebuilt whenever
         // one is (re)computed. A new panel version is a new file name.
-        def panel = ('cnv_coverage' in pipeline_steps) ? readCnvPanel() : null
+        def panel = ('cnv_coverage' in RunContext.steps) ? readCnvPanel() : null
         if (panel && !panel.error) {
             if (panel.tag != tag) {
                 plan.cnv_coverage.fit_skip = "the panel in ${panel.dir} is ${panel.tag}, and this cohort's coverage ${tag}".toString()
@@ -1936,7 +1942,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
         // A complete panel version is done for good. Samples that gained coverage since it was
         // built are only reported: rebuilding it is a new cnv_panel_version.
-        if ('cnv_panel' in pipeline_steps) {
+        if ('cnv_panel' in RunContext.steps) {
             if (cnvPanelComplete()) {
                 plan.cnv_panel.existing.add('cohort')
                 def built_from = [] as Set
@@ -1967,7 +1973,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     // coverage JSON, whether the family BCF is read - so that a pedigree edit, which leaves every
     // file in place, still redoes the family and the cohort. Planned after the CNV coverage,
     // whose JSONs the sex check reads.
-    if ('sampleqc' in pipeline_steps) {
+    if ('sampleqc' in RunContext.steps) {
         def qc = plan.sampleqc
         def label = params.sampleqc_label
         def cov_tag = cnvTag()
@@ -1986,7 +1992,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
 
         def rows_by_family = [:]
-        InputsSnapshot.pedigreeRows(new File(ghfc_run_state.pedigree_file.toString()).readLines()).each { row ->
+        InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
             rows_by_family.get(row[0], []) << row
         }
         def cohort_rows = []
@@ -2003,7 +2009,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 if (new File("${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${cov_tag}.json").length() > 0) {
                     return true
                 }
-                if ('cnv_coverage' in pipeline_steps && barcode in plan.cnv_coverage.needed) {
+                if ('cnv_coverage' in RunContext.steps && barcode in plan.cnv_coverage.needed) {
                     qc.coverage_from_run.add(barcode)
                     return true
                 }
@@ -2013,7 +2019,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def members = rows.collect { row -> row[1] } as Set
             def has_parent_child = rows.any { row -> row[2] in members || row[3] in members }
             def has_bcf = fid in plan.deepvariant_family.existing ||
-                ('deepvariant_family' in pipeline_steps && fid in plan.deepvariant_family.needed)
+                ('deepvariant_family' in RunContext.steps && fid in plan.deepvariant_family.needed)
             if (has_parent_child && has_bcf) {
                 qc.mendelian.add(fid)
             }
@@ -2127,23 +2133,23 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
     WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
-    WOMBAT_COHORT: ${'wombat_cohort' in pipeline_steps ? "cohort wombat merges due: ${analysis_plan.wombat_cohort.need_merges.count { _k, v -> v == true }}" : 'Skipped (step not requested)'}
+    WOMBAT_COHORT: ${'wombat_cohort' in RunContext.steps ? "cohort wombat merges due: ${analysis_plan.wombat_cohort.need_merges.count { _k, v -> v == true }}" : 'Skipped (step not requested)'}
     == Common Variants ==
-    SNVS_COHORT: ${'snvs_cohort' in pipeline_steps ? "common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    SNVS_COHORT: ${'snvs_cohort' in RunContext.steps ? "common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == SVs Calling ==
-    WISECONDORX PREDICT: ${'wisecondorx' in pipeline_steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
+    WISECONDORX PREDICT: ${'wisecondorx' in RunContext.steps ? "${analysis_plan.wisecondorx.existing.size()} individuals done and ${analysis_plan.wisecondorx.needed.size()} to do" : 'Skipped (step not requested)'}
     == Short Tandem Repeats ==
-    EXPANSIONHUNTER: ${'expansionhunter' in pipeline_steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}, ${analysis_plan.expansionhunter.need_reviewer.size()} individuals to draw with REViewer" : 'Skipped (step not requested)'}
+    EXPANSIONHUNTER: ${'expansionhunter' in RunContext.steps ? "${analysis_plan.expansionhunter.existing.size()} individuals done and ${analysis_plan.expansionhunter.needed.size()} to do (${analysis_plan.expansionhunter.no_cram.size()} with no CRAM), ${analysis_plan.expansionhunter.need_family.size()} families to merge, cohort merge: ${analysis_plan.expansionhunter.need_cohort_merge ? 'Yes' : 'No'}, ${analysis_plan.expansionhunter.need_reviewer.size()} individuals to draw with REViewer" : 'Skipped (step not requested)'}
     == Mobile Element Insertions ==
-    MELT: ${'melt' in pipeline_steps ? "${analysis_plan.melt.existing.size()} individuals done and ${analysis_plan.melt.needed.size()} to do (${analysis_plan.melt.no_cram.size()} with no CRAM), ${analysis_plan.melt.need_family.size()} families to merge, cohort scoring: ${analysis_plan.melt.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    MELT: ${'melt' in RunContext.steps ? "${analysis_plan.melt.existing.size()} individuals done and ${analysis_plan.melt.needed.size()} to do (${analysis_plan.melt.no_cram.size()} with no CRAM), ${analysis_plan.melt.need_family.size()} families to merge, cohort scoring: ${analysis_plan.melt.need_cohort_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Coverage for CNV/SV ==
-    CNV_COVERAGE: ${'cnv_coverage' in pipeline_steps ? "${analysis_plan.cnv_coverage.existing.size()} individuals done and ${analysis_plan.cnv_coverage.needed.size()} to do (${analysis_plan.cnv_coverage.no_cram.size()} with no CRAM), cohort fit: ${analysis_plan.cnv_coverage.need_fit ? 'Yes' : (analysis_plan.cnv_coverage.fit_skip ? 'Skipped (panel of another tag)' : 'No')}" : 'Skipped (step not requested)'}
-    CNV_PANEL: ${'cnv_panel' in pipeline_steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
+    CNV_COVERAGE: ${'cnv_coverage' in RunContext.steps ? "${analysis_plan.cnv_coverage.existing.size()} individuals done and ${analysis_plan.cnv_coverage.needed.size()} to do (${analysis_plan.cnv_coverage.no_cram.size()} with no CRAM), cohort fit: ${analysis_plan.cnv_coverage.need_fit ? 'Yes' : (analysis_plan.cnv_coverage.fit_skip ? 'Skipped (panel of another tag)' : 'No')}" : 'Skipped (step not requested)'}
+    CNV_PANEL: ${'cnv_panel' in RunContext.steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
     == Sample QC ==
-    SAMPLEQC: ${'sampleqc' in pipeline_steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    SAMPLEQC: ${'sampleqc' in RunContext.steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
-    ANCESTRY: ${'ancestry' in pipeline_steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
-    ROH: ${'roh' in pipeline_steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
+    ANCESTRY: ${'ancestry' in RunContext.steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
+    ROH: ${'roh' in RunContext.steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
     == Other ==
     EXTRACTOR: ${analysis_plan.extractor.tsv_count > 0 ? "${analysis_plan.extractor.tsv_count} TSV files to process on ${analysis_plan.extractor.families.size()} families / ${analysis_plan.extractor.samples.size()} samples" : 'Skipped (no TSV files provided)'}
     ========================================================================================
@@ -2164,11 +2170,11 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.annotation.needed) {
         log.info "Families needing annotation (gnomAD annotation, filtering, and VEP): ${analysis_plan.annotation.needed.join(', ')}"
     }
-    if (analysis_plan.snvs_cohort.need_bcf_merge && 'snvs_cohort' in pipeline_steps) {
+    if (analysis_plan.snvs_cohort.need_bcf_merge && 'snvs_cohort' in RunContext.steps) {
         log.info "Cohort needing common variant merge: Yes"
     }
     def due_wombat_merges = analysis_plan.wombat_cohort.need_merges.findAll { _k, v -> v == true }.keySet()
-    if (due_wombat_merges && 'wombat_cohort' in pipeline_steps) {
+    if (due_wombat_merges && 'wombat_cohort' in RunContext.steps) {
         log.info "Cohort wombat merges needed for: ${due_wombat_merges.join(', ')}"
     }
     if (analysis_plan.ancestry.needed) {
@@ -2346,7 +2352,7 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
     def verb = rehearsal ? 'would delete' : 'deleted'
 
     def wombat_configs = (params.wombat_config_list ?: []) as List
-    def with_wisecondorx = 'wisecondorx' in pipeline_steps
+    def with_wisecondorx = 'wisecondorx' in RunContext.steps
 
     if (!wombat_configs) {
         log.info "No wombat_config_list is set, so no wombat result TSVs will be removed"
@@ -2363,7 +2369,7 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
                                            analysis_plan.alignment.existing as Set,
                                            resolved_inputs.resolvable as Set,
                                            resolved_inputs.index_missing ?: [:],
-                                           pipeline_steps)
+                                           RunContext.steps)
         if (!verdict.recoverable) {
             report.families_skipped.add([family_id: fid, members: drift.members,
                                          missing: drift.missing,
@@ -2415,7 +2421,7 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
         StaleFamily.cohortOutputs(params.data as String, params.cohort_name as String,
                                   params.vep_config_name as String,
                                   wombat_configs, with_wisecondorx).each { group ->
-            if (group.steps.every { step -> step in pipeline_steps }) {
+            if (group.steps.every { step -> step in RunContext.steps }) {
                 def failed = [:]
                 log.info "Cohort ${params.cohort_name}: ${verb} the cohort merges rebuilt by ${group.steps.join(', ')}, which contain data from the call sets just removed"
                 group.paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
@@ -2465,7 +2471,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     def errors = []
     
     // Check if alignment is needed but not available
-    if (analysis_plan.alignment.needed.size() > 0 && !('alignment' in pipeline_steps)) {
+    if (analysis_plan.alignment.needed.size() > 0 && !('alignment' in RunContext.steps)) {
         errors.add("Alignment step is required for ${analysis_plan.alignment.needed.size()} individuals but not included in steps parameter")
     }
 
@@ -2479,7 +2485,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     }
 
     // Check if deepvariant_sample is needed but not available  
-    if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in pipeline_steps)) {
+    if (analysis_plan.deepvariant_sample.needed.size() > 0 && !('deepvariant_sample' in RunContext.steps)) {
         errors.add("DeepVariant sample step is required for ${analysis_plan.deepvariant_sample.needed.size()} individuals but not included in steps parameter")
     }
     
@@ -2492,34 +2498,34 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     def annotation_consumers = ['annotation', 'wombat', 'wombat_cohort', 'snvs_cohort']
 
     // Check if deepvariant_family is needed but not available
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in pipeline_steps) &&
-        family_consumers.any { step -> step in pipeline_steps }) {
+    if (analysis_plan.deepvariant_family.needed.size() > 0 && !('deepvariant_family' in RunContext.steps) &&
+        family_consumers.any { step -> step in RunContext.steps }) {
         errors.add("DeepVariant family step is required for ${analysis_plan.deepvariant_family.needed.size()} families but not included in steps parameter")
     }
     
     // Check if annotation is needed but not available
-    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in pipeline_steps) &&
-        annotation_consumers.any { step -> step in pipeline_steps }) {
+    if (analysis_plan.annotation.needed.size() > 0 && !('annotation' in RunContext.steps) &&
+        annotation_consumers.any { step -> step in RunContext.steps }) {
         errors.add("Annotation step is required for ${analysis_plan.annotation.needed.size()} families but not included in steps parameter")
     }
 
     // roh reads the ancestry step's outputs and nothing else, so it is blocked exactly when they
     // are absent and this run will not make them
-    if (analysis_plan.roh.blocked.size() > 0 && 'roh' in pipeline_steps) {
+    if (analysis_plan.roh.blocked.size() > 0 && 'roh' in RunContext.steps) {
         errors.add("Ancestry step is required for ${analysis_plan.roh.blocked.size()} families before ROH can be called (no family panel or ancestry table under the label ${params.ancestry_panel_name}) but not included in steps parameter")
     }
 
     // A cohort wombat table is only merged from every family's table, so without the wombat
     // step a family that has none would only make the merge skip itself with a warning
-    if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in pipeline_steps) && 'wombat_cohort' in pipeline_steps &&
+    if (analysis_plan.wombat.needed.size() > 0 && !('wombat' in RunContext.steps) && 'wombat_cohort' in RunContext.steps &&
         analysis_plan.wombat_cohort.needed) {
         errors.add("Wombat step is required for ${analysis_plan.wombat.needed.size()} families but not included in steps parameter")
     }
     
     // The panel is built from every sample's coverage, so without the cnv_coverage step a sample
     // that has none would only make the build skip itself with a warning
-    if ('cnv_panel' in pipeline_steps && analysis_plan.cnv_panel.needed && analysis_plan.cnv_coverage.needed.size() > 0 &&
-        !('cnv_coverage' in pipeline_steps)) {
+    if ('cnv_panel' in RunContext.steps && analysis_plan.cnv_panel.needed && analysis_plan.cnv_coverage.needed.size() > 0 &&
+        !('cnv_coverage' in RunContext.steps)) {
         errors.add("CNV coverage step is required for ${analysis_plan.cnv_coverage.needed.size()} individuals before the CNV panel can be built but not included in steps parameter")
     }
 
@@ -2762,6 +2768,21 @@ def reconcilePlanWithInputs(analysis_plan, resolved_inputs, family_members) {
     return errors
 }
 
+// A file under a sample's or a family's sharded directory, for createChannels
+def sampleFile(String barcode, String rel) {
+    return file("${Sharding.getSampleDir(params.data, barcode)}/${rel}")
+}
+
+def familyFile(String fid, String rel) {
+    return file("${Sharding.getFamilyDir(params.data, fid)}/${rel}")
+}
+
+// A sample's [barcode, CRAM, index] row
+def cramRow(String barcode) {
+    def cram = sampleFile(barcode, "sequences/${barcode}.${params.ref_name}.cram")
+    return [barcode, cram, file("${cram}.crai")]
+}
+
 def createChannels(analysis_plan, resolved_inputs) {
     def channels = [:]
     
@@ -2825,13 +2846,7 @@ def createChannels(analysis_plan, resolved_inputs) {
     // could only re-discover the same set the slow way: each one was a walk of the whole tree,
     // a dozen of them a run, over every cohort sharing the data directory, before the first
     // task could start. Built this way a path is also the one the planner checked, rather
-    // than any file under any directory whose name happens to match.
-    def sampleFile = { String barcode, String rel -> file("${Sharding.getSampleDir(params.data, barcode)}/${rel}") }
-    def familyFile = { String fid, String rel -> file("${Sharding.getFamilyDir(params.data, fid)}/${rel}") }
-    def cramRow = { String barcode ->
-        def cram = sampleFile(barcode, "sequences/${barcode}.${params.ref_name}.cram")
-        [barcode, cram, file("${cram}.crai")]
-    }
+    // than any file under any directory whose name happens to match. See sampleFile above.
 
     // CRAMs on disk, and the subset that only needs a coverage bedgraph (no realignment).
     // alignment.existing requires the .crai, and need_bedgraph is a subset of it.
@@ -2900,18 +2915,20 @@ def createChannels(analysis_plan, resolved_inputs) {
 ========================================================================================
 */
 
-// Registered at script level on purpose. An onComplete closure is delegated to the *script*
-// binding, so one registered inside `workflow {}` would see a per-run binding in which even
-// `workflow` and `params` read back as null - and, because the delegate is a Map, those
-// misses return null silently instead of raising.
+// The body of the workflow.onComplete handler, which the entry workflow registers. A function
+// rather than the handler's own body: in a handler registered inside `workflow {}`, even
+// `workflow` and `params` read back as null by the time it runs - and, because its delegate
+// is a Map, those misses return null silently instead of raising. A function reads them from
+// the script, as a handler registered at script level did; the strict syntax parser refuses
+// that registration. `success` is passed in, read from the run's metadata the workflow kept.
 //
 // This fires on success and on task failure. It does NOT fire for `exit 1`, Ctrl-C or a
 // SLURM kill; those are covered by recordFailedRun and by the 'running' marker.
-workflow.onComplete {
-    def pedigree_file = ghfc_run_state.pedigree_file
-    def pedigree_data = ghfc_run_state.pedigree_data
-    def plan = ghfc_run_state.plan
-    def scan = ghfc_run_state.alignment_scan
+def recordRunCompletion(boolean success) {
+    def pedigree_file = RunContext.state.pedigree_file
+    def pedigree_data = RunContext.state.pedigree_data
+    def plan = RunContext.state.plan
+    def scan = RunContext.state.alignment_scan
     def measured = 'before'
 
     try {
@@ -2930,15 +2947,15 @@ workflow.onComplete {
     }
     catch (Throwable t) {
         log.warn "Could not re-scan outputs for ${CohortState.FILE_NAME} (${t}) - recording the counts from the start of the run instead"
-        pedigree_data = ghfc_run_state.pedigree_data
-        plan = ghfc_run_state.plan
-        scan = ghfc_run_state.alignment_scan
+        pedigree_data = RunContext.state.pedigree_data
+        plan = RunContext.state.plan
+        scan = RunContext.state.alignment_scan
         measured = 'before'
     }
 
     try {
         // Last word of the live file, with the same re-scan the state file gets below
-        ghfc_run_state.progress?.stop(workflow.success ? 'success' : 'failed',
+        RunContext.state.progress?.stop(success ? 'success' : 'failed',
             measured == 'after'
                 ? buildCompletionBlock(plan, pedigree_data?.families?.size(), pedigree_data?.individuals?.size())
                 : null)
@@ -2948,7 +2965,7 @@ workflow.onComplete {
     }
 
     recordRunState(
-        status: workflow.success ? 'success' : 'failed',
+        status: success ? 'success' : 'failed',
         plan: plan,
         pedigree_data: pedigree_data,
         pedigree_file: pedigree_file,
@@ -2956,6 +2973,6 @@ workflow.onComplete {
         measured: measured,
         // On a failed run Nextflow cancels in-flight publishDir copies, so outputs this run
         // produced may not have landed yet and the counts above can under-report.
-        incomplete: !workflow.success
+        incomplete: !success
     )
 }
