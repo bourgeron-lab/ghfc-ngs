@@ -28,9 +28,11 @@ class InputsSnapshot {
      * first line starting FID taken for a header. An unknown parent (0, -9, . or empty) is 0;
      * the sex is 1 or 2, with a trailing .0 dropped, and 0 for anything else. The phenotype is
      * left out: no step that uses this reads it, and an edit of it should rebuild nothing.
+     * A row that repeats an earlier one of the same member is dropped, as parsePedigreeFile
+     * drops it; a member given two different rows is refused.
      */
     static List<List<String>> pedigreeRows(List<String> lines) {
-        def rows = []
+        def rows = [:]
         lines.eachWithIndex { String line, int index ->
             if (line.startsWith('#') || line.trim().isEmpty()) return
             def cols = line.split('\t', -1)*.trim()
@@ -38,11 +40,25 @@ class InputsSnapshot {
             if (cols.size() < 6) {
                 throw new IllegalArgumentException("pedigree row with ${cols.size()} columns instead of 6: ${line}")
             }
-            def parent = { String p -> p in ['', '0', '-9', '.'] ? '0' : p }
-            def sex = cols[4].replaceAll(/\.0+$/, '')
-            rows << [cols[0], cols[1], parent(cols[2]), parent(cols[3]), sex in ['1', '2'] ? sex : '0']
+            def row = pedigreeRow(cols)
+            def earlier = rows[row[1]]
+            if (earlier == null) {
+                rows[row[1]] = row
+            } else if (earlier != row) {
+                throw new IllegalArgumentException("pedigree with two different rows for ${row[1]}: ${earlier.join(' ')} and ${row.join(' ')}")
+            }
         }
-        return rows
+        return rows.values() as List
+    }
+
+    /**
+     * One pedigree row's first five columns, normalised as pedigreeRows says: two rows of a
+     * member that only differ in how they write an unknown parent or a sex are the same row.
+     */
+    static List<String> pedigreeRow(List<String> cols) {
+        def parent = { String p -> p in ['', '0', '-9', '.'] ? '0' : p }
+        def sex = cols[4].trim().replaceAll(/\.0+$/, '')
+        return [cols[0].trim(), cols[1].trim(), parent(cols[2].trim()), parent(cols[3].trim()), sex in ['1', '2'] ? sex : '0']
     }
 
     /**
