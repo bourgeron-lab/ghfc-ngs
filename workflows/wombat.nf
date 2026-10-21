@@ -7,8 +7,6 @@
  *   - External MNV annotation: PYWOMBAT_FILTER → VEP_MNV_ANNOTATION → WOMBAT_MERGE_ANNOTATIONS
  */
 
-import org.yaml.snakeyaml.Yaml
-
 // Include modules
 include { BCF2PARQUET } from '../modules/wombat/bcf2parquet'
 include { PYWOMBAT } from '../modules/wombat/pywombat'
@@ -57,7 +55,8 @@ workflow WOMBAT {
         wombat_outputs_channel = Channel.empty()
     } else {
         // Parse each wombat config YAML to check for external MNV annotation
-        def yaml_parser = new Yaml()
+        // Fully qualified: the strict syntax parser refuses Groovy imports
+        def yaml_parser = new org.yaml.snakeyaml.Yaml()
 
         // Create input channel for PyWombat by combining Parquet files with pedigrees and wombat configs
         // For each Parquet file, create entries for each wombat config

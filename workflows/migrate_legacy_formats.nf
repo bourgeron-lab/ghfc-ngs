@@ -20,15 +20,20 @@ include { CLEANUP_LEGACY_FILES } from '../modules/migration/cleanup_legacy_files
 
 /*
 ========================================================================================
-    VALIDATE INPUTS
+    MAIN WORKFLOW
 ========================================================================================
 */
 
-if (!params.data) {
-    exit 1, "ERROR: --data parameter is required"
-}
+workflow MIGRATE_LEGACY_FORMATS {
+    
+    main:
 
-log.info """
+    // Validated here rather than at script level, which the strict syntax parser refuses
+    if (!params.data) {
+        error "ERROR: --data parameter is required"
+    }
+
+    log.info """
 ========================================================================================
                     GHFC WGS Legacy Format Migration
 ========================================================================================
@@ -42,34 +47,44 @@ This workflow will:
    - {FID}.gnomad.vcf.gz / {FID}.gnomad.bcf (gnomAD annotation)
 ========================================================================================
 """
-
-/*
-========================================================================================
-    MAIN WORKFLOW
-========================================================================================
-*/
-
-workflow MIGRATE_LEGACY_FORMATS {
     
-    main:
-    
-    // Discover families from directory structure
+    // Registered here rather than at script level, which the strict syntax parser refuses. The
+    // run's metadata is held in a variable: inside the handler, `workflow` is null by then.
+    def run = workflow
+    run.onComplete {
+        log.info ""
+        log.info "========================================================================================"
+        log.info "Migration workflow completed!"
+        log.info "========================================================================================"
+        log.info "Status: ${run.success ? 'SUCCESS' : 'FAILED'}"
+        log.info "Duration: ${run.duration}"
+        log.info ""
+        if (run.success) {
+            log.info "✓ Legacy VCF.gz files have been converted to BCF format"
+            log.info "✓ Obsolete intermediate files have been removed"
+            log.info ""
+            log.info "You can now run the main pipeline safely."
+        } else {
+            log.info "✗ Migration failed. Please check the error messages above."
+        }
+        log.info "========================================================================================"
+    }
+
+    // Discover families from directory structure. With none, every channel below is empty and
+    // the workflow ends without a task: a workflow body cannot return early.
     def families_dir = new File("${params.data}/families")
+    def families = []
     if (!families_dir.exists()) {
         log.warn "No families directory found at: ${params.data}/families"
         log.warn "Nothing to migrate."
-        return
-    }
-    
-    def families = []
-    families_dir.eachDir { family_dir ->
-        families.add(family_dir.name)
-    }
-    
-    if (families.isEmpty()) {
-        log.warn "No family directories found in: ${params.data}/families"
-        log.warn "Nothing to migrate."
-        return
+    } else {
+        families_dir.eachDir { family_dir ->
+            families.add(family_dir.name)
+        }
+        if (families.isEmpty()) {
+            log.warn "No family directories found in: ${params.data}/families"
+            log.warn "Nothing to migrate."
+        }
     }
     
     log.info "Found ${families.size()} families to check for migration"
@@ -151,31 +166,6 @@ workflow MIGRATE_LEGACY_FORMATS {
     norm_converted = norm_converted
     common_converted = common_converted
     cleanup_status = CLEANUP_LEGACY_FILES.out.status
-}
-
-/*
-========================================================================================
-    COMPLETION HANDLER
-========================================================================================
-*/
-
-workflow.onComplete {
-    log.info ""
-    log.info "========================================================================================"
-    log.info "Migration workflow completed!"
-    log.info "========================================================================================"
-    log.info "Status: ${workflow.success ? 'SUCCESS' : 'FAILED'}"
-    log.info "Duration: ${workflow.duration}"
-    log.info ""
-    if (workflow.success) {
-        log.info "✓ Legacy VCF.gz files have been converted to BCF format"
-        log.info "✓ Obsolete intermediate files have been removed"
-        log.info ""
-        log.info "You can now run the main pipeline safely."
-    } else {
-        log.info "✗ Migration failed. Please check the error messages above."
-    }
-    log.info "========================================================================================"
 }
 
 /*
