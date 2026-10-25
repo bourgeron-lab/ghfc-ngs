@@ -51,7 +51,7 @@ flowchart TB
         direction TB
         glnexus_glnexus["glnexus"]
         glnexus_norm["bcftools norm"]
-        glnexus_vcf["families/**{FID}**/snvs/**{FID}**.norm.vcf.gz"]:::of
+        glnexus_vcf["families/**{FID}**/vcfs/**{FID}**.norm.bcf"]:::of
         glnexus_glnexus --> glnexus_norm --> glnexus_vcf
     end
 
@@ -59,31 +59,24 @@ flowchart TB
         direction TB
         annotation_a_gnomad["annotate gnomAD (bcftools)"]
         annotation_f_gnomad["filter on gnomAD (bcftools)"]
-        annotation_common_vcf["families/**{FID}**/snvs/**{FID}**.common.bcf"]:::of
+        annotation_common_vcf["families/**{FID}**/vcfs/**{FID}**.common.bcf"]:::of
         annotation_common_ex["extract GTs only and fill *NA* with *0/0*"]
-        annotation_common_gt["families/**{FID}**/snvs/**{FID}**.common_gt.bcf"]:::of
-        annotation_rare_vcf["families/**{FID}**/snvs/**{FID}**.rare.bcf"]:::of
+        annotation_common_gt["families/**{FID}**/vcfs/**{FID}**.common_gt.bcf"]:::of
+        annotation_rare_vcf["families/**{FID}**/vcfs/**{FID}**.rare.vcf.gz"]:::of
         annotation_rare_vep["VEP annotation (using **{vep_config}**)"]
+        annotation_rare_vep_vcf["families/**{FID}**/vcfs/**{FID}**.rare.**{vep_config}**.vcf.gz"]:::of
         annotation_rare_annot["bcftools annotate for MPC-v2, Revel, spliceAI"]
-        annotation_rare_file["families/**{FID}**/snvs/**{FID}**.rare.**{vep_config}**.annotated.bcf"]:::of
-        annotation_rare_split["split by impact HIGH, MEDIUM, LOW (slivar)"]
-
-        annotation_rare_high["families/**{FID}**/snvs/**{FID}**.rare.high.bcf families/**{FID}**/snvs/**{FID}**.rare.high.tsv"]:::of
-        annotation_rare_medium["families/**{FID}**/snvs/**{FID}**.rare.medium.bcf families/**{FID}**/snvs/**{FID}**.rare.medium.tsv"]:::of
-        annotation_rare_low["families/**{FID}**/snvs/**{FID}**.rare.low.bcf families/**{FID}**/snvs/**{FID}**.rare.low.tsv"]:::of
+        annotation_rare_file["families/**{FID}**/vcfs/**{FID}**.rare.**{vep_config}**.annotated.bcf"]:::of
 
         annotation_a_gnomad --> annotation_f_gnomad
         annotation_f_gnomad --> annotation_common_vcf --> annotation_common_ex --> annotation_common_gt
-        annotation_f_gnomad --> annotation_rare_vcf --> annotation_rare_vep --> annotation_rare_annot --> annotation_rare_file --> annotation_rare_split
-        annotation_rare_split --> annotation_rare_high
-        annotation_rare_split --> annotation_rare_medium
-        annotation_rare_split --> annotation_rare_low
+        annotation_f_gnomad --> annotation_rare_vcf --> annotation_rare_vep --> annotation_rare_vep_vcf --> annotation_rare_annot --> annotation_rare_file
     end
 
     subgraph snps [**SNPs files**]
         direction TB
-        snps_merge["bdftools merge"]
-        snps_bcf["cohorts/**{cohort}**/snvs/**{cohort}**.common_gt.bcf"]:::oc
+        snps_merge["bcftools merge"]
+        snps_bcf["cohorts/**{cohort}**/vcfs/**{cohort}**.common_gt.bcf"]:::oc
         snps_merge --> snps_bcf
     end
 
