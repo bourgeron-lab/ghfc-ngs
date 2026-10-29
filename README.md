@@ -28,7 +28,7 @@ This is a Nextflow implementation of the GHFC WGS family-based variant calling p
 
 ## Requirements
 
-- Nextflow (≥23.04.0)
+- Nextflow 24.10.5 or 25.10.4, the two versions CI tests (25.10.4 is the cluster's)
 - SLURM workload manager (for cluster execution)
 - Apptainer or Singularity (recommended for containerized execution)
 - A pedigree file in TSV format
@@ -332,7 +332,7 @@ The pipeline supports sixteen main steps that must be explicitly listed in the `
 - `wombat` requires annotated BCF files (triggers `annotation` if missing)
 - `wombat_cohort` requires every family's Wombat outputs (triggers `wombat` if missing)
 - `snvs_cohort` requires common filtered BCFs (triggers `annotation` if missing)
-- `wisecondorx` requires CRAM files (triggers `alignment` if missing)
+- `wisecondorx` requires CRAM files. A sample with no CRAM is not sent to alignment: it is called only if its CRAM exists or is aligned in the same run for `deepvariant_sample`, and is left out otherwise
 - `extractor` requires normalized BCFs, Wombat outputs, or gVCFs depending on extraction mode
 - `ancestry` requires gVCF files only (triggers `deepvariant_sample` if missing). It does **not** use the normalized, annotated or cohort-merged call sets, so it can be run on its own with `steps: ["ancestry"]` even on a cohort whose annotation is incomplete
 - `roh` requires the ancestry step's family panel and ancestry table (needs `ancestry` in `steps` if they are missing). Like `ancestry` it never reads the call sets, so `steps: ["ancestry", "roh"]` runs on its own
@@ -1223,7 +1223,7 @@ Only processes that haven't completed successfully will be re-run.
 The pipeline uses the following containers by default:
 
 - **Alignment**: `fcliquet/bioinfo-swissknife:latest` (BWA-MEM2, SAMtools, etc.)
-- **DeepVariant**: `google/deepvariant:1.9.0`
+- **DeepVariant**: `google/deepvariant:1.10.0-beta` for `MAKE_EXAMPLES`, `google/deepvariant:1.9.0` for `CALL_VARIANTS` and `POSTPROCESS_VARIANTS`
 - **GLnexus**: `cgrlab/glnexus:v1.4.1`
 - **SAMtools**: `biocontainers/samtools:1.19.2--h50ea8bc_1`
 - **MELT**: `fcliquet/melt-deps:1.0.0` (OpenJDK 11, samtools, bowtie2, bcftools; MELT itself is staged from `melt_dir`, see `containers/melt/Dockerfile`)
@@ -1282,8 +1282,9 @@ process {
 }
 ```
 
-> `slurm_account` and `slurm_partition` appear in some parameters files but are **not read by
-> anything** — the `clusterOptions` strings above are the only place these are configured.
+> `slurm_account` and `slurm_partition` may still be in cohort parameters files copied from older
+> templates, but are **not read by anything** — the `clusterOptions` strings above are the only
+> place these are configured.
 > See [documentation/params.md](documentation/params.md#keys-that-look-live-but-are-inert).
 
 ### Queue Management

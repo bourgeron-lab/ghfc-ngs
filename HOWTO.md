@@ -112,7 +112,7 @@ ghfc-ngs --params-file my_params.yml
 To create a parameter files, the easiest way is to copy the one from this repository ([available here](params.yml)) and then edit it with your favorite code editor.
 
 ```bash
-curl xxxxx
+curl -s -o my_params.yml https://raw.githubusercontent.com/bourgeron-lab/ghfc-ngs/refs/heads/main/params.yml
 ```
 
 > **Note**
@@ -184,11 +184,15 @@ A few interesting things are hardcoded in the run script, but they are specific 
 There is the loading of the required modules of the cluster.
 
 ```bash
-module load graalvm
+module load graalvm/ce-java23-23.0.1
 module load apptainer
 module load graphviz
-module load nextflow
+# module load nextflow
 ```
+
+Nextflow itself is not loaded: the script expects a `nextflow` already on your `PATH`, and stops
+before launching anything if there is none. Load the module or put your own launcher there before
+running `ghfc-ngs`.
 
 The ulimit parameters and OPENBLAS_NUM_THREADS are here to solve numerous problems mainly in DeepVariant with tensorflow, or for GLNexus for its RockDB use.
 

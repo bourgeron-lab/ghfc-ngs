@@ -281,7 +281,7 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the thirteen above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the sixteen above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: the 'roh' step requires ...` | `roh` listed without `ancestry_reference` and `ancestry_panel_name` |
 | `ERROR: the 'expansionhunter' step requires ...` | `expansionhunter` listed without `expansionhunter_catalog`, `expansionhunter_catalog_name` or `ref` |
@@ -794,17 +794,18 @@ they are also rebuilt when the pedigree they were built from changes, see [Sampl
 
 ## Keys that look live but are inert
 
-These appear in the repository's own parameters files, carry confident comments, and **have no
-effect whatsoever** in the current code. They are listed here so you can recognise them rather
-than tune them.
+These **have no effect whatsoever** in the current code. Most were removed from the repository's
+own parameters files, but they carried confident comments there, and cohort files copied from
+those templates still have them. They are listed here so you can recognise them rather than tune
+them.
 
 | Key(s) | Why it does nothing |
 |---|---|
 | `annotation_dnm_min_callrate`, `annotation_dnm_min_DP`, `annotation_dnm_min_GQ`, `annotation_dnm_min_VAF` | Were read only by the `DNM_EXTRACTION` process, which no workflow ever invoked and which has been removed. The de novo thresholds in effect are whatever a wombat config specifies. |
 | `ref_par1_start`, `ref_par1_end`, `ref_par2_start`, `ref_par2_end` | Same: the pseudo-autosomal coordinates were only consumed by the removed `DNM_EXTRACTION`. |
 | `slurm_account`, `slurm_partition` | SLURM options are hardcoded in the `clusterOptions` strings in `nextflow.config`. Change them there. |
-| `bin_size` | Present in both files in `params_example/`. The code reads `bin`. Those cohorts silently run with `bin = 1000`. |
-| `oldref`, `cram4realignment_pattern` | Superseded by `old_ref_37` / `old_ref_38`. |
+| `bin_size` | Was in two of the files in `params_example/`. The code reads `bin`, so a cohort file that still sets `bin_size` silently runs with `bin = 1000`. |
+| `oldref`, `cram4realignment_pattern` | Superseded by `old_ref_37` / `old_ref_38`. `cram4realignment_pattern` is still defined in `nextflow.config`. |
 | `enable_conda`, `singularity_pull_docker_container`, `skip_alignment`, `skip_deepvariant` | Defined in `nextflow.config` and never read. |
 
 ## Examples

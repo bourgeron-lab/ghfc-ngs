@@ -38,11 +38,6 @@ ref_name: "GRCh38_GIABv3"
 wisecondorx_reference: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/WisecondorX/reference_wisecondorX_hg38_{binsize}_refsize100.npz"
 wisecondorx_binsize: 1000
 wisecondorx_predict_args: "--zscore 5 --minrefbins 50 --resegment-all --fix-zero-bins"
-# Pseudo-autosomal regions (PAR) coordinates for our reference genome
-ref_par1_start: "10001" # PAR1 start position on chrX (GRCh38)
-ref_par1_end: "2781479" # PAR1 end position on chrX (GRCh38)
-ref_par2_start: "155701383" # PAR2 start position on chrX (GRCh38)
-ref_par2_end: "156030895" # PAR2 end position on chrX (GRCh38)
 
 ## Realignment of old CRAMs parameters
 # old hg38 reference genome used for old CRAMs realignment
@@ -76,7 +71,6 @@ gnomad_filter_threshold: "0.01" # Frequency threshold for filtering (e.g., 0.01 
 # VEP annotation configuration
 vep_config: "/pasteur/appa/scratch/ghfc/scratch-cache/GRCh38_112_standard.ini" # Path to VEP config INI file
 vep_config_name: "VEP_GRCh38_112_standard" # Name suffix for output files
-bin_size: 10000 # Number of variants per VCF chunk for parallel VEP processing
 
 # Wombat additional annotation configuration
 annotation_annotation_path: "/pasteur/appa/scratch/ghfc/scratch-cache/annotations" # Directory containing annotation BCF files
@@ -93,12 +87,6 @@ annotation_annotation_list: [
     "LCR.grch38.bed.gz",
   ] # List of BCF files for additional annotation
 annotation_gencode: "gencode.v47.basic" # Gencode version for WisecondorX aberrations annotation
-
-# Wombat de novo mutation extraction configuration
-annotation_dnm_min_callrate: "0.9" # Minimum call rate for de novo variants (default: 0.9)
-annotation_dnm_min_DP: "10" # Minimum depth (DP) for de novo variants in child (default: 10)
-annotation_dnm_min_GQ: "18" # Minimum genotype quality (GQ) for de novo variants in child (default: 20)
-annotation_dnm_min_VAF: "0.25" # Minimum variant allele frequency (VAF) for de novo variants in child (default: 0.2)
 
 # Wombat configuration
 wombat_config_path: "/pasteur/appa/scratch/ghfc/scratch-cache/pywombat" # Directory containing Wombat YAML configuration files
@@ -164,10 +152,6 @@ extractor_tsvs_list: [
     "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohorts/dataset_paper_20251010/extractor/ZM_variants.tsv",
   ] # List of TSV files with variants to extract (e.g., ["/path/to/variants1.tsv", "/path/to/variants2.tsv"])
 liftover_chain: "/pasteur/helix/projects/ghfc_wgs/references/liftover/hg19ToHg38.over.chain.gz" # Chain file for GRCh37 to GRCh38 liftover
-
-# SLURM account and partition settings
-slurm_account: "your_account"
-slurm_partition: "ghfc"
 
 # Container cache directory
 apptainer_cache: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/container-cache/"
