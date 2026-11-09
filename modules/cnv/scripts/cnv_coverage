@@ -80,6 +80,9 @@ SEX_TOLERANCE = 0.25
 GROUPS = ("autosomes", "XX", "XY")
 STATS = ("median", "mad")
 
+# A dummy pedigree member (lib/DummyMember.groovy): never sequenced, never a sample
+DUMMY_PREFIX = "DUMMY_"
+
 
 def fail(message):
     sys.exit("cnv_coverage: ERROR: {}".format(message))
@@ -196,7 +199,8 @@ def bigwig_lengths(path):
 
 def read_pedigree(path):
     """(family_id, sample, sex) per row, as main.nf's parsePedigreeFile reads it: a trailing .0
-    is dropped from the sex code, 1 is male, 2 female, anything else unknown."""
+    is dropped from the sex code, 1 is male, 2 female, anything else unknown. A dummy member's
+    row (DUMMY_..., lib/DummyMember.groovy) is left out: it is never a sample."""
     rows = []
     with open(path) as handle:
         for index, line in enumerate(handle):
@@ -208,6 +212,8 @@ def read_pedigree(path):
                 continue
             if len(cols) < 6:
                 fail("{}: pedigree row with {} columns instead of 6: {}".format(path, len(cols), line))
+            if cols[1].startswith(DUMMY_PREFIX):
+                continue
             code = re.sub(r"\.0+$", "", cols[4].strip())
             rows.append((cols[0], cols[1], {"1": "male", "2": "female"}.get(code, "unknown")))
     return rows

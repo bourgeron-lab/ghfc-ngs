@@ -1219,6 +1219,12 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
     // as there is no telling which family, parents or sex is right.
     def rows = [:]
     def repeated = [] as LinkedHashSet
+    // Dummy members (lib/DummyMember.groovy): rows of the pedigree, never samples, so they are
+    // kept out of individuals, family_members and sex - and of every step and report built
+    // from them. named_parents is every father and mother any row names, to tell a dummy that
+    // links no one.
+    def dummies = [] as LinkedHashSet
+    def named_parents = [] as Set
 
     file(pedigree_file).readLines().eachWithIndex { line, index ->
         // Skip comments and empty lines
@@ -1251,6 +1257,12 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
             return
         }
         rows[barcode] = row
+        named_parents.addAll(row[2..3].findAll { parent -> parent != '0' })
+
+        if (DummyMember.isDummy(barcode)) {
+            dummies.add(barcode)
+            return
+        }
 
         families.add(fid)
         individuals.add(barcode)
@@ -1261,12 +1273,20 @@ def parsePedigreeFile(pedigree_file, quiet = false) {
     if (repeated && !quiet) {
         log.warn "Pedigree lists ${repeated.size()} individual(s) more than once, with the same row; the repeats are ignored: ${repeated.join(', ')}"
     }
+    if (dummies && !quiet) {
+        log.info "Pedigree has ${dummies.size()} dummy member(s) (${DummyMember.PREFIX}...): pedigree links only, never processed as samples"
+        def unlinked = dummies.findAll { dummy -> !(dummy in named_parents) }
+        if (unlinked) {
+            log.warn "Pedigree has ${unlinked.size()} dummy member(s) that no row names as a father or mother, so they link no one: ${unlinked.join(', ')}"
+        }
+    }
 
     return [
         families: families,
         individuals: individuals,
         family_members: family_members,
-        sex: sex
+        sex: sex,
+        dummies: dummies
     ]
 }
 
@@ -1798,9 +1818,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def eh_thresholds = params.expansionhunter_thresholds ?
             (CohortState.sha256(params.expansionhunter_thresholds.toString()) ?: 'missing') : 'none'
         def eh_table_script = CohortState.sha256("${projectDir}/modules/expansionhunter/scripts/eh_family_table".toString())
+        // A dummy's row is left out: the table never reads it, so editing one redoes nothing
         def eh_rows = [:]
         InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
-            eh_rows.get(row[0], []) << row
+            if (!DummyMember.isDummy(row[1])) {
+                eh_rows.get(row[0], []) << row
+            }
         }
         families.each { fid ->
             def members = members_by_family[fid] ?: []
@@ -2015,8 +2038,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 }
                 return false
             } as LinkedHashSet
-            // The norm.bcf, on disk or called in this run, when the family has a parent and child
-            def members = rows.collect { row -> row[1] } as Set
+            // The norm.bcf, on disk or called in this run, when the family has a parent and child.
+            // A dummy parent has no genotypes to count errors against. Its row stays in the
+            // snapshot all the same: the expected kinships go through it.
+            def members = rows.collect { row -> row[1] }.findAll { barcode -> !DummyMember.isDummy(barcode) } as Set
             def has_parent_child = rows.any { row -> row[2] in members || row[3] in members }
             def has_bcf = fid in plan.deepvariant_family.existing ||
                 ('deepvariant_family' in RunContext.steps && fid in plan.deepvariant_family.needed)

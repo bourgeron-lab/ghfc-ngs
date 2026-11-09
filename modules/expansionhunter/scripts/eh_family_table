@@ -59,6 +59,8 @@ SPAN_MARGIN = 20        # bp of flank a spanning read needs, both sides together
 MIN_SPANNING = 2        # spanning reads for an allele a read can span: one can be a misaligned read
 MIN_INREPEAT = 3        # in-repeat reads for an allele longer than a read
 REPORTS = ("flag", "risk")
+# A dummy pedigree member (lib/DummyMember.groovy): never sequenced, never a sample
+DUMMY_PREFIX = "DUMMY_"
 
 COLUMNS = [
     "family_id", "sample", "father", "mother", "sex", "phenotype",
@@ -83,7 +85,9 @@ def die(msg):
 
 
 def read_pedigree(path, fid):
-    """The family's rows, in file order: barcode -> (father, mother, sex, phenotype)."""
+    """The family's rows, in file order: barcode -> (father, mother, sex, phenotype). A dummy
+    member's row is left out, so it is not reported as a member with no call; a child's dummy
+    parent is still named in its row, and is not genotyped."""
     members = {}
     with open(path) as fh:
         for index, line in enumerate(fh):
@@ -94,7 +98,7 @@ def read_pedigree(path, fid):
                 continue
             if len(cols) < 6:
                 die(f"pedigree row with {len(cols)} columns instead of 6: {line.strip()}")
-            if cols[0] != fid:
+            if cols[0] != fid or cols[1].startswith(DUMMY_PREFIX):
                 continue
             sex = {"1": "male", "2": "female"}.get(cols[4].strip().split(".")[0], ".")
             pheno = {"1": "unaffected", "2": "affected"}.get(cols[5].strip().split(".")[0], ".")

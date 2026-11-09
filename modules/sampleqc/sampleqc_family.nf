@@ -81,8 +81,12 @@ process SAMPLEQC_FAMILY {
 
   ${InputsSnapshot.decodeCommand(snapshot, "${prefix}.inputs.tsv")}
 
-  # somalier's pedigree: the snapshot's members with an extract
-  awk -F'\\t' -v OFS='\\t' '!/^#/ && \$6 == "yes" { print \$1, \$2, \$3, \$4, \$5, -9 }' ${prefix}.inputs.tsv > family.ped
+  # somalier's pedigree: the snapshot's members with an extract. A parent with none - a dummy,
+  # or a member with no CRAM - is written 0, so the file names no one it does not hold
+  awk -F'\\t' -v OFS='\\t' '!/^#/ && \$6 == "yes" { with[\$2] = 1; row[++n] = \$0 }
+    END { for (i = 1; i <= n; i++) { split(row[i], c, "\\t")
+          print c[1], c[2], (c[3] in with ? c[3] : 0), (c[4] in with ? c[4] : 0), c[5], -9 } }' \\
+    ${prefix}.inputs.tsv > family.ped
   find extracts -name '*.somalier' | sort > extracts.list
   if [ "\$(wc -l < extracts.list)" -ne "\$(wc -l < family.ped)" ]; then
     echo "ERROR: ${fid} has \$(wc -l < extracts.list | tr -d ' ') extracts staged, and \$(wc -l < family.ped | tr -d ' ') members with one in its snapshot" >&2
