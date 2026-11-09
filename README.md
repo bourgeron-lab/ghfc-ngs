@@ -140,6 +140,31 @@ One row per individual. A repeat of an individual's row - same family, parents a
 ignored, with a warning; an individual given two rows that differ in any of them stops the run
 before anything starts.
 
+**Dummy members.** An individual who was never sequenced can be written in only to link real
+members: the shared parents of MZ twins, or the grandparents that join an aunt to a parent. Its
+ID starts with `DUMMY_`, then the barcode of a sequenced child it hangs from and the path up to
+it: `F` father, `M` mother, `MF` the mother's father, `FM` the father's mother, and so on. It has
+a row of its own, with its sex and phenotype `0`, and its parents may be dummies too:
+
+```tsv
+FAM003 C000G1A DUMMY_C000G1A_F DUMMY_C000G1A_M 1 2
+FAM003 C000G1B DUMMY_C000G1A_F DUMMY_C000G1A_M 1 2
+FAM003 DUMMY_C000G1A_F 0 0 1 0
+FAM003 DUMMY_C000G1A_M 0 0 2 0
+FAM004 C000G2C C000G2D DUMMY_C000G2C_M 2 2
+FAM004 DUMMY_C000G2C_M DUMMY_C000G2C_MF DUMMY_C000G2C_MM 2 0
+FAM004 DUMMY_C000G2C_MF 0 0 1 0
+FAM004 DUMMY_C000G2C_MM 0 0 2 0
+```
+
+A dummy is never a sample: no step looks for its reads, calls or coverage, it is not counted as
+a member of its family, and it is not reported as a sample without input. It stays in the
+pedigree, so `sampleqc` works out the expected kinships through it - twins with the same dummy
+parents are siblings, and identical twins are `MZ_TWIN_CANDIDATE` rather than
+`DUPLICATE_OR_MZ` - and the family pedigree written for wombat and genetics-viz keeps its row. A
+dummy parent has no genotypes, so a child's calls are never de novo against it. A dummy that no
+row names as a father or mother links no one, and is warned about.
+
 ### 3. Configure Parameters
 
 Copy and modify the example parameters file:

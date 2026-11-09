@@ -29,7 +29,9 @@ mkdir vcfs tables
 L=cat_test
 
 printf 'FID\tbarcode\tfather\tmother\tsex\tphenotype\n' > ped.tsv
-printf 'FAM1\tKID\tDAD\tMUM\t1\t2\nFAM1\tDAD\t0\t0\t1\t1\nFAM1\tMUM\t0\t0\t2.0\t1\n' >> ped.tsv
+printf 'FAM1\tKID\tDAD\tMUM\t1\t2\nFAM1\tDAD\tDUMMY_DAD_F\tDUMMY_DAD_M\t1\t1\nFAM1\tMUM\t0\t0\t2.0\t1\n' >> ped.tsv
+# DAD's parents are dummy members (DUMMY_..., never sequenced): rows of the pedigree, never samples
+printf 'FAM1\tDUMMY_DAD_F\t0\t0\t1\t0\nFAM1\tDUMMY_DAD_M\t0\t0\t2\t0\n' >> ped.tsv
 printf 'FAM2\tSOLO\t-9\t-9\t2\t2\n' >> ped.tsv
 
 printf 'locus\tmotif\tdisease\tinheritance\tnormal_range\tnormal_max\tintermediate_min\tpathogenic_min\n' > thr.tsv
@@ -123,6 +125,8 @@ check "no normal bound: pathogenic still applies" 'is "${F1}" MUM DAB1 status pa
 check "a locus with no thresholds row is unclassified" 'is "${F1}" KID AFF3 status . && is "${F1}" KID AFF3 disease .'
 check "parents_max_allele is the longest parental allele" 'is "${F1}" KID HTT parents_max_allele 28'
 check "parents_max_allele is empty for a founder" 'is "${F1}" DAD HTT parents_max_allele .'
+check "a dummy member is neither a row nor a member with no call" \
+    '! grep -q DUMMY_ "${F1}" && ! grep -q DUMMY_ log.txt'
 check "per-allele support split" 'is "${F1}" KID HTT allele1_support SPANNING && is "${F1}" KID HTT allele2_support INREPEAT'
 check "the confidence interval follows the allele" 'is "${F1}" KID FXN allele2_ci 80-80'
 

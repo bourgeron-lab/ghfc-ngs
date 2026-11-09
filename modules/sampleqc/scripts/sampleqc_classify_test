@@ -23,6 +23,10 @@
 #   FAM6  members with missing parents: half-sibs by the pedigree who are full ones (no flag),
 #         siblings whose parents are not in it (RELATED_BEYOND_PEDIGREE), and full siblings
 #         whose four parents are all recorded and distinct (UNEXPECTED_RELATED_IN_FAMILY)
+#   FAM7  dummy members (DUMMY_..., never sequenced): MZ twin brothers whose parents are dummies
+#         (MZ_TWIN_CANDIDATE, not DUPLICATE_OR_MZ), the dummy mother's own dummy parents, and
+#         her sister, sequenced: an aunt expected at the second degree through the dummies, so
+#         no flag; the dummies have no row in any table
 # and the cohort tables made from them. FAM1 and FAM5 have synthetic extracts, from which CHARR
 # is computed: FAM1's NPK has 4% stray reads at its homozygous sites (POSSIBLE_CONTAMINATION).
 # A second cohort of 16 singletons has enough unrelated pairs for the IBS0 yardstick: a
@@ -93,7 +97,7 @@ PY
 # --- synthetic somalier tables -----------------------------------------------------------------
 L=t1
 TAG=cov_b250q1
-mkdir cov fam1 fam2 fam3 fam4 fam5 fam6 ext
+mkdir cov fam1 fam2 fam3 fam4 fam5 fam6 fam7 ext
 
 # snapshot <file> then one "fid sample father mother sex somalier coverage" per row
 snapshot() {
@@ -111,7 +115,10 @@ snapshot fam5/inputs.tsv "FAM5 U_F 0 0 1 yes -" "FAM5 U_M 0 0 2 yes -" "FAM5 U_C
     "FAM5 T1 U_F U_M 2 yes -" "FAM5 T2 U_F U_M 2 yes -"
 snapshot fam6/inputs.tsv "FAM6 MO 0 0 2 yes -" "FAM6 S1 0 MO 1 yes -" "FAM6 S2 0 MO 1 yes -" \
     "FAM6 Z1 0 0 1 yes -" "FAM6 Z2 0 0 1 yes -" "FAM6 Q1 QF QM 1 yes -" "FAM6 Q2 QF2 QM2 1 yes -"
-{ head -2 fam1/inputs.tsv; for f in fam1 fam2 fam3 fam4 fam5 fam6; do grep -v '^#' "${f}/inputs.tsv"; done; } > cohort_inputs.tsv
+snapshot fam7/inputs.tsv "FAM7 W1 DUMMY_W1_F DUMMY_W1_M 1 yes -" "FAM7 W2 DUMMY_W1_F DUMMY_W1_M 1 yes -" \
+    "FAM7 DUMMY_W1_F 0 0 1 no -" "FAM7 DUMMY_W1_M DUMMY_W1_MF DUMMY_W1_MM 2 no -" "FAM7 DUMMY_W1_MF 0 0 1 no -" \
+    "FAM7 DUMMY_W1_MM 0 0 2 no -" "FAM7 AUNT DUMMY_W1_MF DUMMY_W1_MM 2 yes -"
+{ head -2 fam1/inputs.tsv; for f in fam1 fam2 fam3 fam4 fam5 fam6 fam7; do grep -v '^#' "${f}/inputs.tsv"; done; } > cohort_inputs.tsv
 
 python3 - <<'PY'
 import json
@@ -188,8 +195,13 @@ rel6 = {("MO", "S1"): "po", ("MO", "S2"): "po", ("S1", "S2"): "fs", ("Z1", "Z2")
 write("fam6/pairs.tsv", PAIR_HEADER, [pair(a, b, rel6.get((a, b), "unrel"))
                                       for i, a in enumerate(fam6) for b in fam6[i + 1:]])
 
+write("fam7/samples.tsv", SAMPLE_HEADER, [sample("FAM7", "W1", x=1, y=1, xhet=0),
+                                          sample("FAM7", "W2", x=1, y=1, xhet=0), sample("FAM7", "AUNT")])
+write("fam7/pairs.tsv", PAIR_HEADER, [pair("W1", "W2", "dup"), pair("W1", "AUNT", "second"),
+                                      pair("W2", "AUNT", "second")])
+
 within = []
-for f in ("fam1", "fam2", "fam3", "fam5", "fam6"):
+for f in ("fam1", "fam2", "fam3", "fam5", "fam6", "fam7"):
     within += open(f + "/pairs.tsv").read().splitlines()[1:]
 write("cohort_pairs.tsv", PAIR_HEADER, within + [
     pair("X", "C", "po"), pair("DAD", "X", "dup"), pair("GM", "X", "third"), pair("A", "X", "unrel"),
@@ -261,7 +273,7 @@ awk 'BEGIN { for (i = 0; i < 200000; i++) print "0/0\t30\t20\t" }' \
 [[ $(wc -l < fam1/mendel_none.tsv) -eq 1 ]]
 echo "ok    mendelian with no pair reads its stream to the end"
 mkdir tables
-for f in 1 2 3 4 5 6; do
+for f in 1 2 3 4 5 6 7; do
     extra=()
     [[ ${f} == 1 ]] && extra=(--coverage-dir cov --mendelian fam1/mendel.tsv)
     [[ ${f} == 1 || ${f} == 5 ]] && extra+=(--extracts "fam${f}/extracts.list" --sites ext/sites.vcf.gz)
@@ -312,6 +324,7 @@ want = {
     ("family", "MZ_TWIN_CANDIDATE", "T1", "T2", "info"),
     ("family", "RELATED_BEYOND_PEDIGREE", "Z1", "Z2", "info"),
     ("family", "UNEXPECTED_RELATED_IN_FAMILY", "Q1", "Q2", "high"),
+    ("family", "MZ_TWIN_CANDIDATE", "W1", "W2", "info"),
 }
 assert got == want, "unexpected flags:\n  extra {}\n  missing {}".format(sorted(got - want), sorted(want - got))
 swap = [f for f in flags if f["flag"] == "SAMPLE_SWAP_CANDIDATE"][0]
@@ -327,7 +340,8 @@ assert "CHARR 0.080" in unreliable["evidence"] and "its 1 pairs" in unreliable["
 
 samples = {r["sample"]: r for r in table(f"COH.{L}.samples.tsv")}
 assert set(samples) == {"DAD", "MUM", "KID1", "KID2", "NPK", "GF", "GM", "H1", "H2", "LOW", "A", "B", "C", "X",
-                        "U_F", "U_M", "U_C", "T1", "T2", "MO", "S1", "S2", "Z1", "Z2", "Q1", "Q2"}
+                        "U_F", "U_M", "U_C", "T1", "T2", "MO", "S1", "S2", "Z1", "Z2", "Q1", "Q2",
+                        "W1", "W2", "AUNT"}
 assert "NOCRAM" not in samples
 k = {s: (r["karyotype"], r["inferred_sex"], r["sex_evidence"]) for s, r in samples.items()}
 assert k["KID1"] == ("XXY", "male", "coverage") and k["KID2"] == ("XY", "male", "coverage"), k
@@ -343,9 +357,16 @@ c = {s: (samples[s]["contamination_charr"], samples[s]["charr_sites"], samples[s
 assert c == {"NPK": ("0.0800", "800", "0.0800"), "DAD": ("0.0000", "800", "0.0100"), "H1": (".", "0", "0.0100")}, c
 
 pairs = {(r["sample_a"], r["sample_b"]): r for r in table(f"COH.{L}.pairs.tsv")}
-# 10 + 10 + 3 + 10 + 21 within families, and three related pairs across them; the unrelated
+# 10 + 10 + 3 + 10 + 21 + 3 within families, and three related pairs across them; the unrelated
 # and low-confidence ones across families are left out, and so is the contaminated NPK's
-assert len(pairs) == 57, len(pairs)
+assert len(pairs) == 60, len(pairs)
+# FAM7: the twins are siblings through their dummy parents, and their aunt a second-degree
+# relative through the dummy grandparents; no dummy has a pair
+p = pairs[("W1", "W2")]
+assert p["expected_relationship"] == "full-sibs" and p["observed_relationship"] == "duplicate", p
+p = pairs[("W1", "AUNT")]
+assert p["expected_relationship"] == "second-degree" and p["expected_kinship"] == "0.1250" and p["status"] == "ok", p
+assert not any(s.startswith("DUMMY_") for pair_ in pairs for s in pair_)
 assert ("NPK", "X") not in pairs
 assert pairs[("S1", "S2")]["expected_relationship"] == "half-sibs" and pairs[("S1", "S2")]["status"] == "ok"
 assert ("A", "X") not in pairs and ("B", "H1") not in pairs and ("H1", "B") not in pairs

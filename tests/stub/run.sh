@@ -10,7 +10,11 @@
 #                   the pedigree;
 #   5. editpedigree - the same again, after FAM01's child loses its recorded father: every file
 #                   is in place, and only the steps that compare the pedigree they were built
-#                   from (sampleqc, and expansionhunter's tables) redo the family and the cohort.
+#                   from (sampleqc, and expansionhunter's tables) redo the family and the cohort;
+#   6. adddummy   - the same again, after FAM02's singleton gets dummy parents and its dummy mother
+#                   dummy parents of her own (DUMMY_..., rows with no data): only FAM02's
+#                   pedigree-reading tables and the cohort's are redone, and nothing is planned
+#                   for a dummy.
 #
 # A pass fails on any FAILED task, and when the tasks it ran - name and tag, sorted - differ from
 # expected/<pass>.tasks.txt. The rerun is the planner's own test: anything it schedules is
@@ -197,6 +201,35 @@ done
 if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_FAMILY \(FAM0[23]\)|EXPANSIONHUNTER_CALL' \
         "${out}/editpedigree.tasks.txt"; then
     echo "  FAIL  editpedigree: the unedited families, the extracts or the calls were redone"; fail=1
+fi
+
+# --- 6. dummy members added to a family -----------------------------------------------------
+
+# FAM02's singleton gets dummy parents, and its dummy mother dummy parents of her own: rows with
+# no data anywhere. Were any taken for a sample, the run would stop on it as one with no input.
+awk -F '\t' -v OFS='\t' '$2 == "BC004" { $3 = "DUMMY_BC004_F"; $4 = "DUMMY_BC004_M" } { print }' \
+    "${data}/cohorts/STUB/STUB.pedigree.tsv" > "${out}/dummies.pedigree.tsv"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    FAM02 DUMMY_BC004_F 0 0 1 0 \
+    FAM02 DUMMY_BC004_M DUMMY_BC004_MF DUMMY_BC004_MM 2 0 \
+    FAM02 DUMMY_BC004_MF 0 0 1 0 \
+    FAM02 DUMMY_BC004_MM 0 0 2 0 \
+    >> "${out}/dummies.pedigree.tsv"
+mv "${out}/dummies.pedigree.tsv" "${data}/cohorts/STUB/STUB.pedigree.tsv"
+stub_pass adddummy
+
+# FAM02's pedigree-reading tables and the cohort's are redone, and nothing is done for a dummy
+for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM02)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
+            'EXPANSIONHUNTER:EXPANSIONHUNTER_FAMILY (FAM02)'; do
+    if ! grep -qxF -- "${task}" "${out}/adddummy.tasks.txt"; then
+        echo "  FAIL  adddummy: ${task} was not run"; fail=1
+    fi
+done
+if grep -E 'DUMMY_|SAMPLEQC_FAMILY \(FAM0[13]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_CALL' "${out}/adddummy.tasks.txt"; then
+    echo "  FAIL  adddummy: a task for a dummy, an unedited family, an extract or a call"; fail=1
+fi
+if ! grep -qF 'Pedigree has 4 dummy member(s)' "${out}/adddummy.out"; then
+    echo "  FAIL  adddummy: the plan does not report the 4 dummies"; fail=1
 fi
 
 if (( fail )); then

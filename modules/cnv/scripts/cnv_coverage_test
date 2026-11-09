@@ -71,6 +71,8 @@ with open("ped.tsv", "w") as ped:
                              ("FAMD", "M3", "1.0"), ("FAME", "K1", "1"), ("FAME", "W1", "2.0"),
                              ("FAMF", "U1", "-9.0"), ("FAMF", "N1", "2"), ("FAMG", "Z1", "1")]:
         ped.write("{}\t{}\t0\t0\t{}\t1\n".format(fid, sample, sex))
+    # A dummy member (never sequenced) is not a sample: no row, not even as one with no coverage
+    ped.write("FAMG\tDUMMY_Z1_F\t0\t0\t1\t0\n")
 
 def par_bins(chrom):
     nb = -(-lengths[chrom] // BIN)

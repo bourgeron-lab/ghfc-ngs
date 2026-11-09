@@ -205,10 +205,11 @@ process REFACTOR {
     """
 
     stub:
-    // Every family and sample of the pedigree, laid out as the script lays them out
+    // Every family and sample of the pedigree, laid out as the script lays them out. A dummy
+    // member (DUMMY_..., lib/DummyMember.groovy) has no data, so the script never writes one.
     """
     awk '\$1 != "FID" && NF { print \$1 }' ${pedigree} | sort -u > family_list.txt
-    awk '\$1 != "FID" && NF { print \$2 }' ${pedigree} | sort -u > sample_list.txt
+    awk '\$1 != "FID" && NF && \$2 !~ /^DUMMY_/ { print \$2 }' ${pedigree} | sort -u > sample_list.txt
     shard() { local s=\$(printf '%s' "\$1" | tr -d '._-' | tr '[:lower:]' '[:upper:]'); printf '%s/%s' "\${s: -1}" "\${s: -2:1}"; }
     while read -r id; do
         mkdir -p families/\$(shard "\$id")/\$id/extractor
