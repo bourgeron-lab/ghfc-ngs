@@ -7,3 +7,7 @@
 .nextflow.log*
 work/
 reports/
+
+# Python bytecode, written by py_compile or a test that imports a helper script
+__pycache__/
+*.pyc
