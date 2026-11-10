@@ -9,7 +9,7 @@
 # parents sharing a haplotype there; C3 has a segmental maternal isodisomy of chr11, away from
 # 11p15.5. C1 and C2 also share an artefact on chr8: their genotypes copy their mother's over
 # 5 Mb. Asserts that:
-#   - the trio finds C1's three events (the deletion by its depth) and nothing in C2 but the
+#   - the trio finds C1's two UPDs, sets her deletion aside by its depth, and finds nothing in C2 but the
 #     chr8 artefact, which both siblings carry and so is low; C3's chr11 carries no imprinting;
 #   - MZ twins with the same UPD keep it high;
 #   - a segment never spans a region the mask left without sites, and an event joins across it;
@@ -19,7 +19,12 @@
 #   - a DUMMY_ father counts as missing, and a father who is not the father is excluded;
 #   - chrX is read for the daughter only, with no false call from the hemizygous father;
 #   - solo members get the roh step's whole-chromosome and terminal ROH, and nothing when the
-#     rest of the genome is not outbred or the parents are related;
+#     rest of the genome is not outbred or the parents are related; one long interstitial ROH
+#     on the roh step's upd_candidate_chrom is one low interstitial event, not a whole chromosome;
+#     two separate long ROH on one chromosome are one medium event (a mixed UPD's pattern); a
+#     ROH at half the depth is a deletion, set aside; an interstitial ROH on chr15 is medium and
+#     carries 15q11-q13 even where it does not reach it;
+#   - a duo writes no UPD of its present parent below the solo extents, deletions apart;
 #   - a position held twice (a split multiallelic site) is dropped, and with the roh panel as a
 #     mask, so is a site outside its covered segments;
 #   - the cohort marks events found in three other families as recurrent, and refuses a cohort
@@ -226,11 +231,7 @@ check(e["imprinting"] == "Prader-Willi (15q11-q13)", f"trio C1 chr15 imprinting:
 e = one(ev, "22", "trio C1")
 check((e["origin"], e["composition"], e["extent"], e["confidence"]) ==
       ("paternal", "het", "whole_chromosome", "high"), f"trio C1 chr22: {e}")
-e = one(ev, "3", "trio C1")
-check(e["interpretation"] == "deletion" and e["origin"] == "maternal", f"trio C1 chr3: {e}")
-check(abs(int(e["start"]) - positions("3")[1500]) <= 10 * STEP and abs(int(e["end"]) - positions("3")[2099]) <= 10 * STEP,
-      f"trio C1 chr3 deletion bounds {e['start']}-{e['end']}")
-check(float(e["depth_ratio"]) < 0.7, f"trio C1 chr3 depth {e['depth_ratio']}")
+check(not [x for x in ev if x["chrom"] == "3"], f"trio C1: the chr3 deletion is written: {ev}")
 others = [x for x in ev if x["chrom"] not in ("15", "22", "3", "8")]
 check(not others, f"trio C1 has other events: {others}")
 shared = [x for x in ev + events_of(t, "C2") if x["chrom"] == "8"]
@@ -246,7 +247,7 @@ check(member(t, "F")["mode"] == "solo" and member(t, "F")["status"] == "no_roh_t
 check(float(member(t, "C1")["error_rate"]) < 0.01, f"trio C1 error rate {member(t, 'C1')['error_rate']}")
 seg = [s for s in t["segments"] if s["sample"] == "C1" and s["chrom"] == "15"]
 check(all(int(s["n_strong"]) >= 20 and float(s["lod"]) > 20 for s in seg), f"trio C1 chr15 segments: {seg}")
-print("ok    trio: maternal isodisomy 15, paternal heterodisomy 22, a deletion; no call in an autozygous block;"
+print("ok    trio: maternal isodisomy 15, paternal heterodisomy 22, the deletion set aside; no call in an autozygous block;"
       " an artefact two siblings share is low; a segmental UPD away from 11p15.5 has no imprinting")
 
 T1 = child(F, M, special={"15": "iso_mat"})
@@ -261,8 +262,11 @@ seg = {"weak": False, "diffuse": False, "lod": 100.0, "length_mb": 5.0, "depth_r
        "n_supporting": 100, "state": "het", "support_fraction": 0.5}
 check(upd.classify(seg) == ("heterodisomy", "low"), f"support 0.5 in a trio: {upd.classify(seg)}")
 check(upd.classify(dict(seg, support_fraction=0.95)) == ("heterodisomy", "high"), "support 0.95 in a trio")
-check(upd.classify(dict(seg, diffuse=True)) == ("heterodisomy", "high"), "support 0.5 of a missing parent")
-print("ok    the support fraction gates trio states, not those of a duo's missing parent")
+check(upd.classify(dict(seg, diffuse=True)) == ("heterodisomy", "high"), "support 0.5 of a missing parent's het")
+check(upd.classify(dict(seg, diffuse=True, support_fraction=0.4))[1] == "low", "support 0.4 of a missing parent's het")
+check(upd.classify(dict(seg, diffuse=True, state="iso", support_fraction=0.8))[1] == "low", "iso of a missing parent at 0.8")
+check(upd.classify(dict(seg, diffuse=True, state="iso", support_fraction=0.95))[1] == "high", "iso of a missing parent at 0.95")
+print("ok    the support fraction gates every state, at 0.5 for a heterodisomy of a duo's missing parent")
 
 # The roh panel as a mask: a site every 100 kb, but on chr22 only up to 3 Mb, and none on chr15
 # between 10 and 16 Mb; chrX not held
@@ -293,12 +297,15 @@ check((e["origin"], e["composition"], e["confidence"]) == ("paternal", "het", "h
 e = one(ev, "15", "duo mother C1")
 check((e["origin"], e["composition"], e["extent"], e["confidence"]) == ("maternal", "iso", "whole_chromosome", "high"),
       f"duo mother C1 chr15: {e}")
-e = one(ev, "3", "duo mother C1")
-check(e["interpretation"] == "deletion", f"duo mother C1 chr3: {e}")
+check(not [x for x in ev if x["chrom"] == "3"], f"duo mother C1: the chr3 deletion is written: {ev}")
 check(member(d, "C1")["mode"] == "duo" and member(d, "C1")["father_used"] == ".", f"duo mother C1: {member(d, 'C1')}")
+small = [x for x in d["events"] if x["origin"] == "maternal" and x["interpretation"] != "deletion"
+         and x["extent"] != "whole_chromosome" and float(x["length_mb"]) < 15 and
+         not (x["terminal"] == "yes" and float(x["length_mb"]) >= 5)]
+check(not small, f"duo mother: UPDs of the present parent below the solo extents: {small}")
 ev2 = events_of(d, "C2")
 check(all(x["confidence"] == "low" for x in ev2), f"duo mother C2 autozygous block not held low: {ev2}")
-print("ok    duo with the mother: paternal heterodisomy, maternal isodisomy, deletion; autozygosity held low")
+print("ok    duo with the mother: paternal heterodisomy, maternal isodisomy, the deletion set aside; autozygosity held low")
 
 rows_no_m = [rows[0], ("M", "0", "0", "2", False)] + rows[2:]
 d = run("duo_father", "FAM", rows_no_m, [("F", F), ("C1", C1)])
@@ -307,7 +314,7 @@ e = one(ev, "15", "duo father C1")
 check((e["origin"], e["composition"], e["confidence"]) == ("maternal", "iso", "high"), f"duo father C1 chr15: {e}")
 e = one(ev, "22", "duo father C1")
 check((e["origin"], e["composition"], e["confidence"]) == ("paternal", "het", "high"), f"duo father C1 chr22: {e}")
-check(one(ev, "3", "duo father C1")["interpretation"] == "deletion", "duo father C1 chr3 not a deletion")
+check(not [x for x in ev if x["chrom"] == "3"], f"duo father C1: the chr3 deletion is written: {ev}")
 print("ok    duo with the father: the same events, from the other side")
 
 # --- dummy father, non-father --------------------------------------------------------------------
@@ -340,6 +347,12 @@ S1 = solo_person([("15", 0, N_SITES)])
 S2 = solo_person([("2", 0, 1200), ("7", 2000, 3000)])
 S3 = solo_person([("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)])
 S4 = solo_person([("15", 0, N_SITES)])
+S5 = solo_person([("5", 1000, 5000), ("5", 5400, 5500)])
+S6 = solo_person([("13", 500, 1700), ("13", 3500, 4700)])
+S7 = founder()
+S7["14"] = ([None if 1000 <= j < 1900 else a for j, a in enumerate(S7["14"][0])], list(S7["14"][1]),
+            [0.5 if 1000 <= j < 1900 else 1.0 for j in range(N_SITES)])
+S8 = solo_person([("15", 1000, 4600)])
 
 
 def roh_rows(sample, roh):
@@ -351,7 +364,9 @@ def roh_rows(sample, roh):
 
 
 rohs = {"S1": [("15", 0, 2950), ("15", 3050, N_SITES)], "S2": [("2", 0, 1200), ("7", 2000, 3000)],
-        "S3": [("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)], "S4": [("15", 0, N_SITES)]}
+        "S3": [("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)], "S4": [("15", 0, N_SITES)],
+        "S5": [("5", 1000, 5000), ("5", 5400, 5500)], "S6": [("13", 500, 1700), ("13", 3500, 4700)],
+        "S7": [("14", 1000, 1900)], "S8": [("15", 1000, 4600)]}
 with open("solo.roh.tsv", "w") as fh:
     fh.write("IID\tchrom\tstart\tend\tlength_mb\tlength_cm\tn_sites\tquality\troh_class\thotspot_group\t"
              "hotspot_fraction\thotspot_fraction_pooled\n")
@@ -361,9 +376,11 @@ with open("solo.roh.tsv", "w") as fh:
 with open("solo.froh.tsv", "w") as fh:
     fh.write("IID\tregion\tfroh_1.5mb\tupd_candidate_chrom\tfather\tmother\tparents_kinship\n")
     fh.write("S1\tEUR\t0.04\t15\t.\t.\tNA\nS2\tEUR\t0.01\t.\t.\t.\tNA\nS3\tEUR\t0.2\t.\t.\t.\tNA\n"
-             "S4\tEUR\t0.04\t15\tP1\tP2\t0.06\n")
-d = run("solo", "SOLO", [(s, "0", "0", "2", True) for s in ("S1", "S2", "S3", "S4")],
-        [("S1", S1), ("S2", S2), ("S3", S3), ("S4", S4)], roh=("solo.roh.tsv", "solo.froh.tsv"))
+             "S4\tEUR\t0.04\t15\tP1\tP2\t0.06\nS5\tEUR\t0.03\t5\t.\t.\tNA\n"
+             "S6\tEUR\t0.02\t13\t.\t.\tNA\nS7\tEUR\t0.0\t.\t.\t.\tNA\nS8\tEUR\t0.02\t15\t.\t.\tNA\n")
+d = run("solo", "SOLO", [(s, "0", "0", "2", True) for s in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")],
+        [("S1", S1), ("S2", S2), ("S3", S3), ("S4", S4), ("S5", S5), ("S6", S6), ("S7", S7), ("S8", S8)],
+        roh=("solo.roh.tsv", "solo.froh.tsv"))
 e = one(events_of(d, "S1"), "15", "solo S1")
 check((e["origin"], e["extent"], e["confidence"], e["n_segments"]) == ("unknown", "whole_chromosome", "high", "2"),
       f"solo S1: {e}")
@@ -374,7 +391,21 @@ check(len(ev) == 1 and ev[0]["chrom"] == "2" and ev[0]["confidence"] == "medium"
       f"solo S2 (terminal chr2, short interstitial chr7): {ev}")
 check(not events_of(d, "S3"), f"solo S3 (consanguineous) has events: {events_of(d, 'S3')}")
 check(member(d, "S4")["status"].startswith("not_isolated"), f"solo S4: {member(d, 'S4')}")
-print("ok    solo: whole-chromosome and terminal ROH, none in a consanguineous background or with related parents")
+ev = events_of(d, "S5")
+check(len(ev) == 1 and (ev[0]["chrom"], ev[0]["extent"], ev[0]["confidence"]) == ("5", "segmental", "low")
+      and "interstitial" in ev[0]["notes"] and "upd_candidate_chrom" in ev[0]["notes"],
+      f"solo S5 (one interstitial ROH on upd_candidate_chrom): {ev}")
+ev = events_of(d, "S6")
+check(len(ev) == 1 and (ev[0]["chrom"], ev[0]["confidence"], ev[0]["n_segments"]) == ("13", "medium", "2")
+      and "mixed UPD" in ev[0]["notes"], f"solo S6 (two long ROH on chr13): {ev}")
+check(not events_of(d, "S7"), f"solo S7 (a ROH at half the depth) has events: {events_of(d, 'S7')}")
+ev = events_of(d, "S8")
+check(len(ev) == 1 and (ev[0]["chrom"], ev[0]["confidence"]) == ("15", "medium")
+      and ev[0]["imprinting"] == "Prader-Willi if maternal or Angelman if paternal (15q11-q13, if the UPD reaches it)",
+      f"solo S8 (an interstitial ROH on chr15, short of 15q11-q13): {ev}")
+print("ok    solo: whole-chromosome and terminal ROH, none in a consanguineous background or with related parents;"
+      " a long interstitial ROH on upd_candidate_chrom stays an interstitial, low; two long ROH on one chromosome"
+      " are one medium event; a ROH at half the depth is set aside; an interstitial ROH on chr15 is medium")
 
 # --- parsing -----------------------------------------------------------------------------------
 lines = ["chr1\t100\t0.1\t0/1\t50\t30", "chr1\t200\t0.2\t0/1\t50\t30", "chr1\t200\t0.2\t1/1\t50\t30",
