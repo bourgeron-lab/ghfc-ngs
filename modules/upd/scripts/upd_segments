@@ -42,12 +42,27 @@ gVCF is missing.
           below), and held to the extents of solo mode.
     solo  no parent in the BCF, founders included: isodisomy only, from the roh step's ROH
           segments (bcftools roh with ancestry-matched frequencies). Heterodisomy cannot be seen
-          without a parent. A segment is a candidate when it is long and the rest of the genome
-          is outbred: on the roh step's upd_candidate_chrom (whole_chromosome), reaching an end
-          of the chromosome and at least SOLO_TERMINAL_MB long (terminal), or at least
-          SOLO_INTERSTITIAL_MB (interstitial). Terminal ROH rarely occurs without UPD, while an
-          interstitial one needs 15-20 Mb to stand out from chance and consanguinity (ACMG,
-          del Gaudio et al. 2020).
+          without a parent. The roh step's segments at most SOLO_ROH_JOIN_MB of covered genome
+          apart are one ROH (the roh step splits a ROH at the panel's gaps, and a stray genotype
+          splits one too); the ROH of ISOLATION_ROH_MB or more are the runs. A run at
+          DELETION_DEPTH_MAX of the depth or less is a deletion,
+          a lost copy reading as a ROH (a 15q11-q13 deletion as one of 4.8 Mb), and is set aside.
+          The other runs are candidates when the rest of the genome is outbred:
+            whole_chromosome  a run spans WHOLE_CHROMOSOME_SPAN of the chromosome
+            multiple          two runs or more of SOLO_TERMINAL_MB on one chromosome, made one
+                              event: the isodisomic parts of a mixed UPD, whose crossovers leave
+                              heterodisomy between them, more often than chance
+            terminal          a run reaching an end of the chromosome, SOLO_TERMINAL_MB long
+            interstitial      a run of SOLO_INTERSTITIAL_MB
+          Terminal ROH rarely occurs without UPD, while an interstitial one needs 15-20 Mb to
+          stand out from chance and consanguinity (ACMG, del Gaudio et al. 2020). On a chromosome
+          with an imprinted region, any of them marks a possible UPD of the whole chromosome,
+          whose heterodisomic parts a ROH cannot show: a maternal UPD15 is mostly heterodisomy.
+          The ROH need not reach the imprinted region (ACMG), so the imprinting the event carries
+          is that of every imprinted region of the chromosome, and an interstitial event there is
+          medium, not low. The roh step's
+          upd_candidate_chrom, the chromosome holding most of the long ROH, is noted, not taken
+          for a whole-chromosome isodisomy: one long interstitial ROH makes it.
 A trio or duo in which a parent fails the parentage rule (below) is redone without that parent.
 
 Sites. A genotype counts at GQ >= 20 and DP >= 10, with alleles 0 and 1 only, and DP at most
@@ -94,7 +109,8 @@ probability 1 - SOLO_HET_IN_ROH in a ROH and p / (2 - p) otherwise, a het site S
 and 2(1 - p) / (2 - p).
 
 Interpretation. A depth ratio at or below DELETION_DEPTH_MAX is a deletion: the child has one
-copy, which looks like an isodisomy of the other parent. Segments of one member, chromosome and
+copy, which looks like an isodisomy of the other parent. It is set aside, never an event: this
+step calls UPD, and leaves CNVs to the CNV callers (WisecondorX). Segments of one member, chromosome and
 parent of origin at medium confidence or more, and at most EVENT_GAP_MB of covered genome apart
 (a gap with no site does not count, so the two arms of a chromosome join across its centromere),
 make one event:
@@ -102,8 +118,9 @@ iso, het or mixed; whole_chromosome when it spans at least WHOLE_CHROMOSOME_SPAN
 chromosome's sites, segmental otherwise; terminal when it reaches either end. A low segment
 makes no event, and only the segments of events are written. An event spanning one of the
 IMPRINTED regions (GRCh38 windows around the GENCODE spans of their imprinted genes) carries the
-disorder its parent of origin implies there; a segmental event outside them carries none, a
-terminal UPD of distal 15q, say, not Prader-Willi.
+disorder its parent of origin implies there; a trio or duo event outside them carries none, a
+terminal UPD of distal 15q, say, not Prader-Willi, since a trio sees the heterodisomic parts
+too. A solo event carries those of every imprinted region of its chromosome (above).
 
 Siblings. Two children sharing a parent in the BCF, with events on one chromosome overlapping by
 SIBLING_OVERLAP of the shorter, share an artefact, a parental CNV or reads mismapped alike, not a
@@ -118,17 +135,20 @@ Confidence of a segment, and of an event (its best segment's):
     medium  lod >= MEDIUM_LOD, at least MEDIUM_MIN_MB long, and n_strong >= MEDIUM_STRONG (or
             n_supporting >= MEDIUM_SUPPORT)
     low     the rest
-    Both high and medium also need a support fraction of MIN_SUPPORT_FRACTION, but for a UPD of
-    the missing parent of a duo. A trio state, and a duo's present-parent state, predict the
-    child's genotype from the parents' exactly, so a real UPD is all but never contradicted
-    (1.00 on the real events seen), where a mapping artefact is (0.15-0.85). A UPD of the missing
-    parent draws the child's alleles from the population, so a share of its sites favour N by
-    chance.
-    solo: whole_chromosome high, terminal medium, interstitial low; any of them low with a depth
-    outside DEPTH_NORMAL.
-An iso_P or het_P event of a duo is at most low when the member is not isolated, and at most
-what its extent would get in solo mode: short haplotypes shared by the parents make a child
-identical to the parent it has, which a duo cannot tell from a UPD.
+    Both high and medium also need a support fraction of MIN_SUPPORT_FRACTION. A trio state, a
+    duo's present-parent state, and an isodisomy of its missing parent (the child homozygous)
+    predict the child's genotypes closely, so a real UPD is all but never contradicted (1.00 on
+    the real events seen, the known UPD15 as either duo included), where a mapping artefact is
+    (0.11-0.85). A heterodisomy of a duo's missing parent draws both of the child's alleles
+    from the population, so a share of its sites favour N by chance (0.69 in simulation): it
+    needs MIN_DIFFUSE_HET_SUPPORT.
+    solo: whole_chromosome high, multiple and terminal medium, interstitial low (medium on a
+    chromosome with an imprinted region), any of them low with a depth outside DEPTH_NORMAL.
+An iso_P or het_P event of a duo is held to the extents of solo mode: high only over a whole
+chromosome, medium for a terminal one, low for an interstitial one, and not written below
+those; and it is low when the member is not isolated. Short haplotypes shared by the parents
+make a child identical to the parent it has, which a duo cannot tell from a UPD: they gave
+dozens of short events per duo child.
 
 Isolation. The member's F_ROH at segments of at least ISOLATION_ROH_MB on the other autosomes,
 over their span, is below ISOLATION_MAX_FROH, and its parents, when the roh step measured them,
@@ -173,6 +193,7 @@ EVENT_GAP_MB = 5.0
 SOLO_HET_IN_ROH = 0.02
 SOLO_TERMINAL_MB = 5.0
 SOLO_INTERSTITIAL_MB = 15.0
+SOLO_ROH_JOIN_MB = 1.0
 TERMINAL_SLACK_MB = 2.0
 ISOLATION_ROH_MB = 1.5
 ISOLATION_MAX_FROH = 0.01
@@ -189,6 +210,7 @@ MEDIUM_STRONG = 10
 MEDIUM_SUPPORT = 20
 MEDIUM_MIN_MB = 0.5
 MIN_SUPPORT_FRACTION = 0.9
+MIN_DIFFUSE_HET_SUPPORT = 0.5
 SIBLING_OVERLAP = 0.5
 MZ_MAX_DISCORDANCE = 0.02
 PARENTAGE_MAX_OPPOSITE = 0.01
@@ -806,9 +828,9 @@ def classify(segment):
         high, medium = segment["n_supporting"] >= HIGH_SUPPORT, segment["n_supporting"] >= MEDIUM_SUPPORT
     else:
         high, medium = segment["n_strong"] >= HIGH_STRONG, segment["n_strong"] >= MEDIUM_STRONG
-    if not segment["diffuse"]:
-        supported = segment["support_fraction"] is not None and segment["support_fraction"] >= MIN_SUPPORT_FRACTION
-        high, medium = high and supported, medium and supported
+    needed = MIN_DIFFUSE_HET_SUPPORT if segment["diffuse"] and segment["state"] == "het" else MIN_SUPPORT_FRACTION
+    supported = segment["support_fraction"] is not None and segment["support_fraction"] >= needed
+    high, medium = high and supported, medium and supported
     if lod >= HIGH_LOD and length >= HIGH_MIN_MB and depth_ok and high:
         return kind, "high"
     if lod >= MEDIUM_LOD and length >= MEDIUM_MIN_MB and medium:
@@ -859,7 +881,8 @@ def roh_fraction(segment, roh_segments):
 
 
 def solo_member(chroms, member, roh, spans, mean_depth, cap, solo):
-    """Candidate isodisomies of a member with no parent in the BCF, from its ROH segments."""
+    """Candidate isodisomies of a member with no parent in the BCF: runs of its ROH segments,
+    graded by their extent."""
     member.segments = []
     segs, froh = roh
     simple = [(n, s, e) for n, s, e, _, _ in segs]
@@ -869,54 +892,88 @@ def solo_member(chroms, member, roh, spans, mean_depth, cap, solo):
         member.status = "not_isolated: parents' kinship {}".format(fmt(kinship))
         return
     slack = TERMINAL_SLACK_MB * 1e6
+    by_chrom = {}
     for name, start, end, _, quality in segs:
-        if name not in AUTOSOMES or name not in spans:
+        if name in AUTOSOMES and name in spans:
+            by_chrom.setdefault(name, []).append((start, end, quality))
+    for name in sorted(by_chrom, key=AUTOSOMES.index):
+        rows = sorted(by_chrom[name])
+        joined, run = [], [rows[0]]
+        for r in rows[1:]:
+            if covered_between(chroms.get(name), max(c[1] for c in run), r[0]) <= SOLO_ROH_JOIN_MB * 1e6:
+                run.append(r)
+            else:
+                joined.append(run)
+                run = [r]
+        joined.append(run)
+        runs_of_roh = [run for run in joined if max(c[1] for c in run) - run[0][0] + 1 >= ISOLATION_ROH_MB * 1e6]
+        if not runs_of_roh:
             continue
-        length_mb = (end - start + 1) / 1e6
         first, last = spans[name]
-        terminal = start <= first + slack or end >= last - slack
-        if name == candidate_chrom:
-            extent = "whole_chromosome"
-        elif terminal and length_mb >= SOLO_TERMINAL_MB:
-            extent = "terminal"
-        elif length_mb >= SOLO_INTERSTITIAL_MB:
-            extent = "interstitial"
-        else:
-            continue
         rest = rest_froh(simple, name, spans)
-        if extent != "whole_chromosome" and (rest is None or rest >= ISOLATION_MAX_FROH):
+        scored = []
+        for run in runs_of_roh:
+            segments = [dict(solo_segment(chroms[name], member, s, e, mean_depth, cap, solo), roh_quality=q)
+                        for s, e, q in run]
+            sites = sum(x["n_sites"] for x in segments)
+            depth = sum(x["depth_ratio"] * x["n_sites"] for x in segments if x["depth_ratio"] is not None)
+            scored.append({"start": run[0][0], "end": max(c[1] for c in run), "segments": segments,
+                           "depth": depth / sites if sites else None})
+        # A deletion reads as a ROH: set aside, a CNV for the CNV callers
+        others = [r for r in scored if not (r["depth"] is not None and r["depth"] <= DELETION_DEPTH_MAX)]
+        candidates = []
+        if others and rest is not None and rest < ISOLATION_MAX_FROH:
+            whole = [r for r in others if r["end"] - r["start"] + 1 >= WHOLE_CHROMOSOME_SPAN * (last - first + 1)]
+            long_runs = [r for r in others if r["end"] - r["start"] + 1 >= SOLO_TERMINAL_MB * 1e6]
+            if whole:
+                candidates += [("whole_chromosome", r["segments"]) for r in whole]
+            elif len(long_runs) >= 2:
+                candidates.append(("multiple", [s for r in others for s in r["segments"]]))
+            else:
+                for r in others:
+                    length_mb = (r["end"] - r["start"] + 1) / 1e6
+                    if (r["start"] <= first + slack or r["end"] >= last - slack) and length_mb >= SOLO_TERMINAL_MB:
+                        candidates.append(("terminal", r["segments"]))
+                    elif length_mb >= SOLO_INTERSTITIAL_MB:
+                        candidates.append(("interstitial", r["segments"]))
+        for k, (kind, segments) in enumerate(candidates):
+            for segment in segments:
+                segment.update(extent=kind, chain=f"{name}:{k}", rest_froh=rest, candidate=name == candidate_chrom)
+                member.segments.append(segment)
+
+
+def solo_segment(chrom, member, start, end, mean_depth, cap, solo):
+    """The score of a ROH segment at the member's non-reference SNVs inside it."""
+    name, length_mb = chrom.name, (end - start + 1) / 1e6
+    g, dp, af = chrom.g[member.index], chrom.dp[member.index], chrom.af
+    lod, supporting, contradicting, strong, depth_total, n = 0.0, 0, 0, 0, 0, 0
+    for j in range(bisect.bisect_left(chrom.pos, start), bisect.bisect_right(chrom.pos, end)):
+        d = g[j]
+        if d == MISSING or d == 0 or dp[j] > cap:
             continue
-        chrom = chroms[name]
-        g, dp, af = chrom.g[member.index], chrom.dp[member.index], chrom.af
-        lod, supporting, contradicting, strong, depth_total, n = 0.0, 0, 0, 0, 0, 0
-        for j in range(bisect.bisect_left(chrom.pos, start), bisect.bisect_right(chrom.pos, end)):
-            d = g[j]
-            if d == MISSING or d == 0 or dp[j] > cap:
-                continue
-            lr = solo[(af[j], d)]
-            lod += lr
-            if lr >= LOG2:
-                supporting += 1
-                strong += lr >= 1
-            elif lr <= -LOG2:
-                contradicting += 1
-            depth_total += dp[j]
-            n += 1
-        segment = {"chrom": name, "start": start, "end": end, "length_mb": length_mb, "state": "iso",
-                   "origin": "unknown", "source": "roh", "n_sites": n, "n_informative": supporting + contradicting,
-                   "n_supporting": supporting, "n_contradicting": contradicting, "n_strong": strong,
-                   "support_fraction": supporting / (supporting + contradicting) if supporting + contradicting
-                   else None, "lod": lod,
-                   "depth_ratio": (depth_total / n) / mean_depth if n and mean_depth else None,
-                   "roh_fraction": 1.0, "extent": extent, "rest_froh": rest, "roh_quality": quality}
-        member.segments.append(segment)
+        lr = solo[(af[j], d)]
+        lod += lr
+        if lr >= LOG2:
+            supporting += 1
+            strong += lr >= 1
+        elif lr <= -LOG2:
+            contradicting += 1
+        depth_total += dp[j]
+        n += 1
+    return {"chrom": name, "start": start, "end": end, "length_mb": length_mb, "state": "iso",
+            "origin": "unknown", "source": "roh", "n_sites": n, "n_informative": supporting + contradicting,
+            "n_supporting": supporting, "n_contradicting": contradicting, "n_strong": strong,
+            "support_fraction": supporting / (supporting + contradicting) if supporting + contradicting
+            else None, "lod": lod,
+            "depth_ratio": (depth_total / n) / mean_depth if n and mean_depth else None,
+            "roh_fraction": 1.0}
 
 
 def solo_confidence(segment):
-    if segment["depth_ratio"] is not None and segment["depth_ratio"] <= DELETION_DEPTH_MAX:
-        return "deletion", "low"
     depth_ok = segment["depth_ratio"] is None or DEPTH_NORMAL[0] <= segment["depth_ratio"] <= DEPTH_NORMAL[1]
-    level = {"whole_chromosome": "high", "terminal": "medium", "interstitial": "low"}[segment["extent"]]
+    level = {"whole_chromosome": "high", "multiple": "medium", "terminal": "medium", "interstitial": "low"}[segment["extent"]]
+    if level == "low" and segment["chrom"] in IMPRINTED:
+        level = "medium"
     return "isodisomy", level if depth_ok else "low"
 
 
@@ -979,13 +1036,17 @@ def event_groups(member, chroms):
     event; every solo segment is a candidate already."""
     groups = {}
     for s in member.segments:
-        if s["source"] == "hmm" and RANK[s["confidence"]] < RANK["medium"]:
+        if s["source"] == "hmm" and (RANK[s["confidence"]] < RANK["medium"] or s["interpretation"] == "deletion"):
             continue
-        groups.setdefault((s["chrom"], s["origin"]), []).append(s)
+        groups.setdefault((s["chrom"], s["origin"], s.get("chain") or ""), []).append(s)
     order = {n: i for i, n in enumerate(AUTOSOMES + ["X"])}
     out = []
-    for (chrom, origin), segs in sorted(groups.items(), key=lambda kv: (order[kv[0][0]], kv[0][1])):
+    for (chrom, origin, run), segs in sorted(groups.items(), key=lambda kv: (order[kv[0][0]], kv[0][1], kv[0][2])):
         segs.sort(key=lambda s: s["start"])
+        if run:
+            # A solo run of ROH, made by solo_member already
+            out.append((chrom, origin, segs))
+            continue
         chain = [segs[0]]
         for s in segs[1:]:
             if covered_between(chroms.get(chrom), max(c["end"] for c in chain), s["start"]) <= EVENT_GAP_MB * 1e6:
@@ -998,14 +1059,15 @@ def event_groups(member, chroms):
 
 
 def imprinting_of(chrom, start, end, origin):
-    """The disorders the imprinted regions an event spans imply, by its parent of origin."""
+    """The disorders the imprinted regions an event spans imply, by its parent of origin. A solo
+    event, whose heterodisomic parts are unseen, gets every imprinted region of its chromosome."""
     out = []
     for a, b, region, disorders in IMPRINTED.get(chrom, []):
-        if start > b or end < a:
-            continue
+        spans = not (start > b or end < a)
         if origin == "unknown":
-            out.append("{} ({})".format(" or ".join(f"{d} if {o}" for o, d in sorted(disorders.items())), region))
-        elif origin in disorders:
+            out.append("{} ({}{})".format(" or ".join(f"{d} if {o}" for o, d in sorted(disorders.items())), region,
+                                         "" if spans else ", if the UPD reaches it"))
+        elif spans and origin in disorders:
             out.append(f"{disorders[origin]} ({region})")
     return "; ".join(out) or None
 
@@ -1025,39 +1087,43 @@ def collapse(fid, member, spans, isolation, chroms):
         states = {s["state"] for s in segs}
         sites = sum(s["n_sites"] for s in segs)
         depth = sum(s["depth_ratio"] * s["n_sites"] for s in segs if s["depth_ratio"] is not None)
-        interpretations = {s["interpretation"] for s in segs}
         confidence = max((s["confidence"] for s in segs), key=RANK.get)
         notes = []
         if member.mode == "solo":
-            extents = {s["extent"] for s in segs}
-            extent = "whole_chromosome" if "whole_chromosome" in extents else "segmental"
-            notes.append("from ROH ({}); rest F_ROH {}".format(
-                ", ".join(sorted(extents)), fmt(min(s["rest_froh"] for s in segs) if
-                                                 all(s["rest_froh"] is not None for s in segs) else None)))
+            kind = segs[0]["extent"]
+            extent = "whole_chromosome" if kind == "whole_chromosome" else "segmental"
+            notes.append("from ROH ({}); rest F_ROH {}".format({
+                "multiple": "several runs on the chromosome: the isodisomic parts of a mixed UPD, or chance",
+            }.get(kind, kind), fmt(segs[0]["rest_froh"])))
+            if segs[0]["candidate"]:
+                notes.append("the roh step's upd_candidate_chrom")
         else:
             extent = "whole_chromosome" if (end - start + 1) >= WHOLE_CHROMOSOME_SPAN * (last - first + 1) \
                 else "segmental"
             present = member.father if origin == "paternal" else member.mother
             if member.mode == "duo" and present is not None:
+                terminal = start <= first + slack or end >= last - slack
+                length_mb = (end - start + 1) / 1e6
+                cap = "high" if extent == "whole_chromosome" else \
+                    "medium" if terminal and length_mb >= SOLO_TERMINAL_MB else \
+                    "low" if length_mb >= SOLO_INTERSTITIAL_MB else None
+                if cap is None:
+                    # Below the solo extents: a haplotype the parents share, most likely
+                    for s in segs:
+                        s["event_id"] = None
+                    continue
                 rest = isolation(chrom)
                 if rest is None or rest >= ISOLATION_MAX_FROH:
                     confidence = "low"
                     notes.append("UPD of the parent in the duo, not isolated (rest F_ROH {}): "
                                  "autozygosity or related parents look the same".format(fmt(rest)))
-                else:
-                    terminal = start <= first + slack or end >= last - slack
-                    length_mb = (end - start + 1) / 1e6
-                    cap = "high" if extent == "whole_chromosome" else \
-                        "medium" if terminal and length_mb >= SOLO_TERMINAL_MB else "low"
-                    if RANK[cap] < RANK[confidence]:
-                        confidence = cap
-                        notes.append("UPD of the parent in the duo: a ROH, or a haplotype the parents share, "
-                                     "looks the same; held to the solo extents ({})".format(
-                                         "terminal" if terminal else "interstitial"))
-        if interpretations == {"deletion"}:
-            interpretation = "deletion"
-        else:
-            interpretation = "UPD"
+                elif RANK[cap] < RANK[confidence]:
+                    confidence = cap
+                    notes.append("UPD of the parent in the duo: a ROH, or a haplotype the parents share, "
+                                 "looks the same; held to the solo extents ({})".format(
+                                     "whole chromosome" if extent == "whole_chromosome" else
+                                     "terminal" if terminal else "interstitial"))
+        interpretation = "UPD"
         imprinting = imprinting_of(chrom, start, end, origin)
         supporting = sum(s["n_supporting"] for s in segs)
         contradicting = sum(s["n_contradicting"] for s in segs)
