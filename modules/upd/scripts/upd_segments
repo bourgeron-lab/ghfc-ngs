@@ -74,7 +74,9 @@ child's genotype a distribution; an observed genotype is the true one with proba
 Segments. Viterbi per chromosome. Entering or leaving a UPD state, or changing its parent, costs
 SWITCH per site; going between the iso and het states of one parent, as a mixed UPD does at its
 crossovers, costs MIX_SWITCH; going between N and the shared-haplotype states costs
-AUTO_SWITCH. A segment is a run of one UPD state. With LR the likelihood of a
+AUTO_SWITCH. A segment is a run of one UPD state, cut wherever two of its sites are more than
+SEGMENT_MAX_GAP apart: a segment never spans a region with no site, such as one the mask removed,
+so its length is covered genome. With LR the likelihood of a
 site under the segment's state over N:
     lod              sum of log10 LR over the segment's sites: the score
     n_informative    sites where LR is at least 2-fold either way
@@ -93,19 +95,35 @@ and 2(1 - p) / (2 - p).
 
 Interpretation. A depth ratio at or below DELETION_DEPTH_MAX is a deletion: the child has one
 copy, which looks like an isodisomy of the other parent. Segments of one member, chromosome and
-parent of origin at medium confidence or more, and at most EVENT_GAP_MB apart, make one event:
+parent of origin at medium confidence or more, and at most EVENT_GAP_MB of covered genome apart
+(a gap with no site does not count, so the two arms of a chromosome join across its centromere),
+make one event:
 iso, het or mixed; whole_chromosome when it spans at least WHOLE_CHROMOSOME_SPAN of the
 chromosome's sites, segmental otherwise; terminal when it reaches either end. A low segment
-makes no event, and only the segments of events are written. Chromosomes 6, 7, 11, 14, 15 and 20 carry the imprinting disorder their parent of
-origin implies. Confidence:
+makes no event, and only the segments of events are written. An event spanning one of the
+IMPRINTED regions (GRCh38 windows around the GENCODE spans of their imprinted genes) carries the
+disorder its parent of origin implies there; a segmental event outside them carries none, a
+terminal UPD of distal 15q, say, not Prader-Willi.
+
+Siblings. Two children sharing a parent in the BCF, with events on one chromosome overlapping by
+SIBLING_OVERLAP of the shorter, share an artefact, a parental CNV or reads mismapped alike, not a
+UPD: a UPD is sporadic. Both events are then low, whatever their origin, unless the two are MZ
+twins (genotypes discordant at MZ_MAX_DISCORDANCE or less of the sites they are called at), who
+share their UPDs.
+
+Confidence of a segment, and of an event (its best segment's):
     high    lod >= HIGH_LOD, at least HIGH_MIN_MB long, depth ratio within DEPTH_NORMAL, and
             n_strong >= HIGH_STRONG; for a UPD of the present parent in a duo, whose evidence is
             weak site by site, n_supporting >= HIGH_SUPPORT instead
     medium  lod >= MEDIUM_LOD, at least MEDIUM_MIN_MB long, and n_strong >= MEDIUM_STRONG (or
             n_supporting >= MEDIUM_SUPPORT)
     low     the rest
-    The support fraction is reported, not used: a UPD of the missing parent draws the child's
-    alleles from the population, so a share of the sites favour N by chance.
+    Both high and medium also need a support fraction of MIN_SUPPORT_FRACTION, but for a UPD of
+    the missing parent of a duo. A trio state, and a duo's present-parent state, predict the
+    child's genotype from the parents' exactly, so a real UPD is all but never contradicted
+    (1.00 on the real events seen), where a mapping artefact is (0.15-0.85). A UPD of the missing
+    parent draws the child's alleles from the population, so a share of its sites favour N by
+    chance.
     solo: whole_chromosome high, terminal medium, interstitial low; any of them low with a depth
     outside DEPTH_NORMAL.
 An iso_P or het_P event of a duo is at most low when the member is not isolated, and at most
@@ -143,6 +161,7 @@ MIN_GQ = 20
 MIN_DP = 10
 MAX_DP_FACTOR = 2.5
 MASK_MAX_GAP = 300000
+SEGMENT_MAX_GAP = 300000
 AF_MIN = 0.001
 AF_MAX = 0.999
 AF_BINS = 1000
@@ -169,6 +188,9 @@ MEDIUM_LOD = 10.0
 MEDIUM_STRONG = 10
 MEDIUM_SUPPORT = 20
 MEDIUM_MIN_MB = 0.5
+MIN_SUPPORT_FRACTION = 0.9
+SIBLING_OVERLAP = 0.5
+MZ_MAX_DISCORDANCE = 0.02
 PARENTAGE_MAX_OPPOSITE = 0.01
 X_HET_TWO_X_MIN = 0.1
 SEX_TOLERANCE = 0.25
@@ -187,13 +209,21 @@ SIBLING = {1: 2, 2: 1, 3: 4, 4: 3}
 MISSING = 3
 LN10 = math.log(10)
 
-IMPRINTING = {
-    "6": {"paternal": "transient neonatal diabetes (6q24)"},
-    "7": {"maternal": "Silver-Russell"},
-    "11": {"maternal": "Silver-Russell (11p15)", "paternal": "Beckwith-Wiedemann (11p15)"},
-    "14": {"maternal": "Temple", "paternal": "Kagami-Ogata"},
-    "15": {"maternal": "Prader-Willi", "paternal": "Angelman"},
-    "20": {"maternal": "Mulchandani-Bhoj-Conlin", "paternal": "pseudohypoparathyroidism 1B"},
+# Imprinted regions, GRCh38, 1-based: windows around the GENCODE spans of their imprinted genes
+# (from the gene BED of the lab's references): PLAGL1 143.94 Mb; GRB10 50.59-50.73, PEG10/SGCE
+# 94.59-94.66, MEST 130.49-130.51; IGF2 2.13, KCNQ1 2.44-2.85, CDKN1C 2.88 (H19 lies just distal
+# of IGF2); DLK1 100.73 to RTL1 100.88 (MEG3 between them); MKRN3 23.57 to UBE3A 25.41; GNAS
+# 58.84-58.91. The disorders by parent of origin, after del Gaudio et al. 2020 and Scuffins et al.
+IMPRINTED = {
+    "6": [(143900000, 144000000, "6q24", {"paternal": "transient neonatal diabetes"})],
+    "7": [(50550000, 50750000, "7p12", {"maternal": "Silver-Russell"}),
+          (94550000, 94700000, "7q21", {"maternal": "Silver-Russell"}),
+          (130450000, 130550000, "7q32", {"maternal": "Silver-Russell"})],
+    "11": [(1900000, 2900000, "11p15.5", {"maternal": "Silver-Russell", "paternal": "Beckwith-Wiedemann"})],
+    "14": [(100700000, 100900000, "14q32", {"maternal": "Temple", "paternal": "Kagami-Ogata"})],
+    "15": [(23500000, 25500000, "15q11-q13", {"maternal": "Prader-Willi", "paternal": "Angelman"})],
+    "20": [(58800000, 58950000, "20q13", {"maternal": "Mulchandani-Bhoj-Conlin",
+                                          "paternal": "pseudohypoparathyroidism 1B"})],
 }
 
 SEGMENT_COLUMNS = ["family_id", "sample", "mode", "father", "mother", "chrom", "start", "end", "length_mb",
@@ -201,8 +231,9 @@ SEGMENT_COLUMNS = ["family_id", "sample", "mode", "father", "mother", "chrom", "
                    "n_strong", "support_fraction", "lod", "depth_ratio", "roh_fraction", "interpretation",
                    "confidence", "event_id"]
 EVENT_COLUMNS = ["family_id", "sample", "mode", "event_id", "chrom", "start", "end", "length_mb", "origin",
-                 "composition", "extent", "terminal", "n_segments", "n_supporting", "n_strong", "lod",
-                 "depth_ratio", "interpretation", "imprinting", "confidence", "notes"]
+                 "composition", "extent", "terminal", "n_segments", "n_supporting", "n_strong",
+                 "support_fraction", "lod", "depth_ratio", "interpretation", "imprinting", "confidence",
+                 "shared_with", "notes"]
 LOG2 = math.log10(2)
 MEMBER_COLUMNS = ["family_id", "sample", "father", "mother", "mode", "father_used", "mother_used", "chrx",
                   "n_sites", "error_rate", "status", "n_events", "n_events_high"]
@@ -697,13 +728,14 @@ def model_sites(chrom, member, used, caps):
     return idx, codes
 
 
-def runs(path):
-    """(state, first, last) of each run of a UPD state in a Viterbi path."""
+def runs(path, idx, pos):
+    """(state, first, last) of each run of a UPD state in a Viterbi path, cut where two of its
+    sites are more than SEGMENT_MAX_GAP apart."""
     out, i, n = [], 0, len(path)
     while i < n:
         s = path[i]
         j = i
-        while j + 1 < n and path[j + 1] == s:
+        while j + 1 < n and path[j + 1] == s and pos[idx[j + 1]] - pos[idx[j]] <= SEGMENT_MAX_GAP:
             j += 1
         if s in UPD_STATES:
             out.append((s, i, j))
@@ -730,9 +762,11 @@ def score_run(chrom, member, idx, codes, table, state, a, b, mean_depth):
     n = b - a + 1
     name = STATES[state]
     start, end = chrom.pos[idx[a]], chrom.pos[idx[b]]
-    # A UPD of the parent a duo has: its evidence is many sites, each weak
+    # A UPD of the parent a duo has: its evidence is many sites, each weak. One of the parent it
+    # lacks: the child's alleles drawn from the population, so its support fraction says little
     weak = member.mode == "duo" and (ORIGIN[name] == "paternal") == (member.father is not None)
-    return {"weak": weak, "chrom": chrom.name, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6,
+    diffuse = member.mode == "duo" and not weak
+    return {"weak": weak, "diffuse": diffuse, "chrom": chrom.name, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6,
             "state": name.split("_")[0], "origin": ORIGIN[name], "source": "hmm", "n_sites": n,
             "n_informative": informative, "n_supporting": supporting, "n_contradicting": contradicting,
             "n_strong": strong,
@@ -752,7 +786,7 @@ def hmm_member(chroms, member, used, caps, mean_depth, tables):
         idx, codes = model_sites(chrom, member, used, caps)
         path = viterbi(codes, table)
         member.n_sites += len(codes)
-        for s, a, b in runs(path):
+        for s, a, b in runs(path, idx, chrom.pos):
             member.segments.append(score_run(chrom, member, idx, codes, table, s, a, b, mean_depth))
         # Sites the normal state cannot explain, outside the segments: the genotyping error
         for i, code in enumerate(codes):
@@ -772,6 +806,9 @@ def classify(segment):
         high, medium = segment["n_supporting"] >= HIGH_SUPPORT, segment["n_supporting"] >= MEDIUM_SUPPORT
     else:
         high, medium = segment["n_strong"] >= HIGH_STRONG, segment["n_strong"] >= MEDIUM_STRONG
+    if not segment["diffuse"]:
+        supported = segment["support_fraction"] is not None and segment["support_fraction"] >= MIN_SUPPORT_FRACTION
+        high, medium = high and supported, medium and supported
     if lod >= HIGH_LOD and length >= HIGH_MIN_MB and depth_ok and high:
         return kind, "high"
     if lod >= MEDIUM_LOD and length >= MEDIUM_MIN_MB and medium:
@@ -920,10 +957,26 @@ def parentage_failures(chroms, member, index, caps):
     return None
 
 
-def event_groups(member):
+def covered_between(chrom, a, b):
+    """The genome between positions a and b that has sites: the stretches between consecutive
+    sites at most SEGMENT_MAX_GAP apart."""
+    if chrom is None:
+        return b - a
+    pos = chrom.pos
+    total, previous = 0, a
+    for k in range(bisect.bisect_right(pos, a), bisect.bisect_left(pos, b)):
+        if pos[k] - previous <= SEGMENT_MAX_GAP:
+            total += pos[k] - previous
+        previous = pos[k]
+    if b - previous <= SEGMENT_MAX_GAP:
+        total += b - previous
+    return total
+
+
+def event_groups(member, chroms):
     """(chrom, origin, segments) of each event of a member: its segments of one chromosome and
-    origin, at most EVENT_GAP_MB apart. An HMM segment below medium makes no event; every solo
-    segment is a candidate already."""
+    origin, at most EVENT_GAP_MB of covered genome apart. An HMM segment below medium makes no
+    event; every solo segment is a candidate already."""
     groups = {}
     for s in member.segments:
         if s["source"] == "hmm" and RANK[s["confidence"]] < RANK["medium"]:
@@ -935,7 +988,7 @@ def event_groups(member):
         segs.sort(key=lambda s: s["start"])
         chain = [segs[0]]
         for s in segs[1:]:
-            if s["start"] - max(c["end"] for c in chain) <= EVENT_GAP_MB * 1e6:
+            if covered_between(chroms.get(chrom), max(c["end"] for c in chain), s["start"]) <= EVENT_GAP_MB * 1e6:
                 chain.append(s)
             else:
                 out.append((chrom, origin, chain))
@@ -944,12 +997,25 @@ def event_groups(member):
     return out
 
 
-def collapse(fid, member, spans, isolation):
+def imprinting_of(chrom, start, end, origin):
+    """The disorders the imprinted regions an event spans imply, by its parent of origin."""
+    out = []
+    for a, b, region, disorders in IMPRINTED.get(chrom, []):
+        if start > b or end < a:
+            continue
+        if origin == "unknown":
+            out.append("{} ({})".format(" or ".join(f"{d} if {o}" for o, d in sorted(disorders.items())), region))
+        elif origin in disorders:
+            out.append(f"{disorders[origin]} ({region})")
+    return "; ".join(out) or None
+
+
+def collapse(fid, member, spans, isolation, chroms):
     """Events of one member, from event_groups."""
     events = []
     for s in member.segments:
         s["event_id"] = None
-    for chrom, origin, segs in event_groups(member):
+    for chrom, origin, segs in event_groups(member, chroms):
         event_id = f"{member.sample}:{chrom}:{origin}:{segs[0]['start']}"
         for s in segs:
             s["event_id"] = event_id
@@ -992,21 +1058,70 @@ def collapse(fid, member, spans, isolation):
             interpretation = "deletion"
         else:
             interpretation = "UPD"
-        disorders = IMPRINTING.get(chrom, {})
-        if origin == "unknown":
-            imprinting = "; ".join(f"{d} if {o}" for o, d in sorted(disorders.items()))
-        else:
-            imprinting = disorders.get(origin)
+        imprinting = imprinting_of(chrom, start, end, origin)
+        supporting = sum(s["n_supporting"] for s in segs)
+        contradicting = sum(s["n_contradicting"] for s in segs)
         events.append({
             "family_id": fid, "sample": member.sample, "mode": member.mode, "event_id": event_id,
             "chrom": chrom, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6, "origin": origin,
             "composition": "mixed" if len(states) > 1 else states.pop(), "extent": extent,
             "terminal": start <= first + slack or end >= last - slack, "n_segments": len(segs),
-            "n_supporting": sum(s["n_supporting"] for s in segs), "n_strong": sum(s["n_strong"] for s in segs),
+            "n_supporting": supporting, "n_strong": sum(s["n_strong"] for s in segs),
+            "support_fraction": supporting / (supporting + contradicting) if supporting + contradicting else None,
             "lod": sum(s["lod"] for s in segs),
             "depth_ratio": depth / sites if sites else None, "interpretation": interpretation,
-            "imprinting": imprinting or None, "confidence": confidence, "notes": "; ".join(notes) or None})
+            "imprinting": imprinting, "confidence": confidence, "shared_with": None,
+            "notes": notes})
     return events
+
+
+def discordance(chroms, a, b, caps):
+    """Share of the autosomal sites two members are called at, one of them carrying the ALT,
+    where their genotypes differ: about 0.4 for siblings, the genotyping error for MZ twins."""
+    n = differ = 0
+    for name in AUTOSOMES:
+        chrom = chroms.get(name)
+        if chrom is None:
+            continue
+        ga, da, gb, db = chrom.g[a], chrom.dp[a], chrom.g[b], chrom.dp[b]
+        for j in range(len(chrom)):
+            x, y = ga[j], gb[j]
+            if x == MISSING or y == MISSING or x + y == 0 or da[j] > caps[a] or db[j] > caps[b]:
+                continue
+            n += 1
+            differ += x != y
+    return differ / n if n else None
+
+
+def sibling_artefacts(analysed, members, chroms, index, caps):
+    """Mark the events children sharing a parent have in common: an artefact unless they are MZ
+    twins. analysed: sample -> its events."""
+    children = [s for s in analysed if any(members[s][p] != "0" for p in ("father", "mother"))]
+    for i, a in enumerate(children):
+        for b in children[i + 1:]:
+            if not any(members[a][p] == members[b][p] != "0" for p in ("father", "mother")):
+                continue
+            shared = []
+            for ea in analysed[a]:
+                for eb in analysed[b]:
+                    if ea["chrom"] != eb["chrom"]:
+                        continue
+                    ov = overlap(ea["start"], ea["end"], eb["start"], eb["end"])
+                    if ov >= SIBLING_OVERLAP * min(ea["end"] - ea["start"] + 1, eb["end"] - eb["start"] + 1):
+                        shared.append((ea, eb))
+            if not shared:
+                continue
+            d = discordance(chroms, index[a], index[b], caps)
+            mz = d is not None and d <= MZ_MAX_DISCORDANCE
+            for ea, eb in shared:
+                for e, other in ((ea, b), (eb, a)):
+                    e["shared_with"] = ",".join(filter(None, [e["shared_with"], other]))
+                    if mz:
+                        e["notes"].append(f"also in {other}, an MZ twin (discordance {fmt(d)})")
+                    else:
+                        e["notes"].append(f"also in the sibling {other}: an artefact, a parental CNV or "
+                                          "reads mismapped alike, not a UPD")
+                        e["confidence"] = "low"
 
 
 def cmd_family(args):
@@ -1030,7 +1145,7 @@ def cmd_family(args):
     duo_tables = {}
     solo = solo_table()
 
-    rows_members, rows_segments, rows_events = [], [], []
+    rows_members, rows_segments, rows_events, analysed = [], [], [], {}
     for sample, info in members.items():
         if not info["sequenced"]:
             continue
@@ -1107,7 +1222,8 @@ def cmd_family(args):
                    if s["state"] == "iso" and s["origin"] == present]
             return rest_froh(own, chrom, spans)
 
-        events = collapse(fid, member, spans, isolation)
+        events = collapse(fid, member, spans, isolation, chroms)
+        analysed[sample] = events
         for s in member.segments:
             if s["event_id"] is None:
                 continue
@@ -1118,8 +1234,16 @@ def cmd_family(args):
                                  mother_used=member.mother or ".", chrx=member.chrx,
                                  n_sites=member.n_sites if member.mode != "solo" else None,
                                  error_rate=member.errors / member.n_sites if member.n_sites else None,
-                                 status=member.status, n_events=len(events),
-                                 n_events_high=sum(e["confidence"] == "high" for e in events)))
+                                 status=member.status))
+
+    sibling_artefacts(analysed, members, chroms, index, caps)
+    for e in rows_events:
+        e["notes"] = "; ".join(e["notes"]) or None
+    for row in rows_members:
+        if row["sample"] in analysed:
+            events = analysed[row["sample"]]
+            row["n_events"] = len(events)
+            row["n_events_high"] = sum(e["confidence"] == "high" for e in events)
 
     write_tsv(f"{args.out_prefix}.segments.tsv", SEGMENT_COLUMNS, rows_segments)
     write_tsv(f"{args.out_prefix}.events.tsv", EVENT_COLUMNS, rows_events)

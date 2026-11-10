@@ -688,9 +688,9 @@ Uniparental disomy segments, per family and then per cohort. sampleqc's `UPD_CAN
    - **Duo**: UPDhmm's five states, the missing parent transmitting the ALT at its gnomAD frequency. A UPD of the missing parent rests on opposite homozygotes with the present one; one of the present parent looks like autozygosity or a shared haplotype, and is trusted only over a whole chromosome (or, `medium`, a terminal 5 Mb) when the rest of the genome is outbred
    - **Solo** (no parent in the BCF, founders included): the `roh` step's segments of a member whose rest of the genome is outbred - the whole chromosome of `upd_candidate_chrom`, terminal ROH from 5 Mb, interstitial ones from 15 Mb - scored at the member's SNVs. Isodisomy only, of unknown origin
 
-   Each segment gets a LOD against normal inheritance and its supporting, contradicting and strong sites (in a trio, the Mendelian errors it explains), a depth ratio (a deletion of one copy looks like an isodisomy of the other parent), and a confidence. A child whose opposite homozygotes with a parent exceed 1% outside its segments is not that parent's child: the parent is dropped and the child redone. Segments of medium confidence or more, of one member, chromosome and parent of origin and at most 5 Mb apart, make an event: whole or segmental, iso, het or mixed, with the imprinting disorder of chromosomes 6, 7, 11, 14, 15 and 20
+   Each segment, cut where its sites are more than 300 kb apart, gets a LOD against normal inheritance and its supporting, contradicting and strong sites (in a trio, the Mendelian errors it explains), a depth ratio (a deletion of one copy looks like an isodisomy of the other parent), and a confidence, which in a trio needs a support fraction of 0.9. A child whose opposite homozygotes with a parent exceed 1% outside its segments is not that parent's child: the parent is dropped and the child redone. Segments of medium confidence or more, of one member, chromosome and parent of origin and at most 5 Mb of covered genome apart, make an event: whole or segmental, iso, het or mixed, with the imprinting disorder of each imprinted region it spans (6q24, 7p12/q21/q32, 11p15.5, 14q32, 15q11-q13, 20q13). An event two siblings share is an artefact and is held `low`, unless they are MZ twins
 
-   On real data, the trio of a son with a known paternal isodisomy 15 gives that one event, whole-chromosome and `high` (about 31,000 Mendelian errors), and so do both of its duos and the son alone; a normal quad gives no `high` event
+   On real data, the trio of a son with a known paternal isodisomy 15 gives that one event, whole-chromosome and `high` (about 31,000 Mendelian errors), and so do both of its duos and the son alone; a normal quad gives no `high` event, and in a 10-family cohort the one `high` event is the UPD sampleqc flags
 2. **Cohort** - The family tables in one, an event overlapped by events of three other families marked `recurrent`, most likely an artefact region
 
 **What reruns.** As for the sample QC: each family's tables are written beside `inputs.tsv`, a snapshot of its pedigree rows, which members are in the BCF and have a coverage JSON, which roh tables are read, the gnomAD file and field, and the mask. A family is redone when its snapshot differs, or when its BCF, its roh tables or a member's coverage JSON is made in the run.
@@ -872,10 +872,10 @@ data/
 │               │   ├── FID001.somalier_hg38.flags.tsv       # One row per flag, with its evidence
 │               │   └── FID001.somalier_hg38.inputs.tsv      # The pedigree snapshot they were built from
 │               ├── upd/
-│               │   ├── FID001.upd_v1.segments.tsv           # UPD segments: coordinates, state, origin, score
-│               │   ├── FID001.upd_v1.events.tsv             # Segments per member, chromosome and origin
-│               │   ├── FID001.upd_v1.members.tsv            # Each member's mode (trio, duo, solo) and status
-│               │   └── FID001.upd_v1.inputs.tsv             # The snapshot they were built from
+│               │   ├── FID001.upd_v2.segments.tsv           # UPD segments: coordinates, state, origin, score
+│               │   ├── FID001.upd_v2.events.tsv             # Segments per member, chromosome and origin
+│               │   ├── FID001.upd_v2.members.tsv            # Each member's mode (trio, duo, solo) and status
+│               │   └── FID001.upd_v2.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -960,9 +960,9 @@ data/
 │           ├── COHORT_NAME.somalier_hg38.html                 # somalier's interactive relatedness plot
 │           └── COHORT_NAME.somalier_hg38.inputs.tsv
 │       └── upd/
-│           ├── COHORT_NAME.upd_v1.{segments,members}.tsv      # The family tables in one
-│           ├── COHORT_NAME.upd_v1.events.tsv                  # ... with the events other families share
-│           └── COHORT_NAME.upd_v1.inputs.tsv
+│           ├── COHORT_NAME.upd_v2.{segments,members}.tsv      # The family tables in one
+│           ├── COHORT_NAME.upd_v2.events.tsv                  # ... with the events other families share
+│           └── COHORT_NAME.upd_v2.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
@@ -1174,7 +1174,7 @@ Paths use `${L}` as shorthand for `${sampleqc_label}`. Missing values are `.`.
 Paths use `${U}` as shorthand for `${upd_label}`. Missing values are `.`. Columns, modes and thresholds are in [documentation/params.md](documentation/params.md#upd).
 
 - **Family segments**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.segments.tsv` - one row per segment of an event: `family_id sample mode father mother chrom start end length_mb state origin source n_sites n_informative n_supporting n_contradicting n_strong support_fraction lod depth_ratio roh_fraction interpretation confidence event_id`. `father` and `mother` are the parents used; `state` is `iso` or `het`, `origin` `maternal`, `paternal` or `unknown` (solo), `source` `hmm` or `roh`, `interpretation` `isodisomy`, `heterodisomy` or `deletion`, `confidence` `high`, `medium` or `low`
-- **Family events**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.events.tsv` - one row per member, chromosome and parent of origin: `family_id sample mode event_id chrom start end length_mb origin composition extent terminal n_segments n_supporting n_strong lod depth_ratio interpretation imprinting confidence notes`, `composition` `iso`, `het` or `mixed`, `extent` `whole_chromosome` or `segmental`, `interpretation` `UPD` or `deletion`
+- **Family events**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.events.tsv` - one row per event: `family_id sample mode event_id chrom start end length_mb origin composition extent terminal n_segments n_supporting n_strong support_fraction lod depth_ratio interpretation imprinting confidence shared_with notes`, `composition` `iso`, `het` or `mixed`, `extent` `whole_chromosome` or `segmental`, `interpretation` `UPD` or `deletion`, `shared_with` the siblings with an overlapping event
 - **Family members**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.members.tsv` - one row per member in the BCF: `family_id sample father mother mode father_used mother_used chrx n_sites error_rate status n_events n_events_high`, `status` `analysed`, or why not (`parentage: ...`, `no_roh_tables`, `not_in_roh_tables`, `not_isolated: ...`, `not_in_bcf`)
 - **Inputs snapshot**: `${FID}.${U}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex in_bcf coverage_tag` per member
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${U}.{segments,events,members}.tsv` - the family tables concatenated; `events.tsv` adds `recurrent_families recurrent`
