@@ -2220,7 +2220,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             upd.coverage_members[fid] = with_coverage as List
 
             def prefix = "${Sharding.getFamilyDir(params.data, fid)}/upd/${fid}.${label}"
-            def tables_exist = ['segments', 'events', 'members'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
+            def tables_exist = ['segments', 'events', 'members', 'windows'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
             def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
             def remade = bcf_from_run || roh_from_run || with_coverage.any { barcode -> barcode in upd.coverage_from_run }
             if (tables_exist && same_inputs && !remade) {

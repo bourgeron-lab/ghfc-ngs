@@ -30,9 +30,16 @@
 #   - a position held twice (a split multiallelic site) is dropped, and with the roh panel as a
 #     mask, so is a site outside its covered segments;
 #   - the cohort marks events found in three other families as recurrent, and refuses a cohort
-#     whose family tables are missing.
+#     whose family tables are missing;
+#   - the windows table has the columns genetics-viz reads, and per 500 kb window the signature
+#     of each event: a maternal isodisomy with no het, no maternal- or paternal-specific allele
+#     and many opposite homozygotes with the father; a maternal heterodisomy with no
+#     paternal-specific allele; the father's deletion the same as an isodisomy, at half the
+#     depth; a duo with the mother filling only her columns, solo mode none; chrX for the members
+#     with two X, outside the PARs, the father hemizygous.
 #
 #   modules/upd/scripts/upd_segments_test
+#   UPD_TEST_SEED=3 modules/upd/scripts/upd_segments_test     # other families (seed 11 by default)
 
 set -euo pipefail
 
@@ -52,7 +59,7 @@ from importlib.machinery import SourceFileLoader
 script = sys.argv[1]
 upd = SourceFileLoader("upd_segments", script).load_module()
 
-random.seed(11)
+random.seed(int(os.environ.get("UPD_TEST_SEED", "11")))
 CHROMS = [str(i) for i in range(1, 23)] + ["X"]
 N_SITES = 6000
 STEP = 5000
@@ -192,9 +199,36 @@ def run(prefix, fid, rows, people, roh=None, expect_fail=False, extra=()):
         return r
     check(r.returncode == 0, f"{prefix}: exit {r.returncode}\n{r.stderr}")
     tables = {}
-    for kind in ("segments", "events", "members"):
-        tables[kind] = upd.read_tsv(f"{prefix}.{kind}.tsv")[1]
+    for kind in ("segments", "events", "members", "windows"):
+        header, tables[kind] = upd.read_tsv(f"{prefix}.{kind}.tsv")
+    check(header == WINDOW_CONTRACT, f"{prefix}: windows columns {header}")
     return tables
+
+
+# The columns genetics-viz reads by name
+WINDOW_CONTRACT = ["family_id", "sample", "mode", "chrom", "start", "end", "n_sites", "n_het", "n_hom_alt", "n_mat",
+                   "n_pat", "n_lacks_father", "n_lacks_mother", "depth_ratio"]
+PARENT_COLUMNS = ("n_mat", "n_pat", "n_lacks_father", "n_lacks_mother")
+
+
+def windows(tables, sample, chrom=None, sites=None):
+    """A member's windows, on a chromosome, lying within the span of its sites a to b - 1."""
+    lo, hi = (positions(chrom)[sites[0]], positions(chrom)[sites[1] - 1]) if sites else (None, None)
+    return [w for w in tables["windows"] if w["sample"] == sample and (chrom is None or w["chrom"] == chrom)
+            and (lo is None or lo <= int(w["start"]) and int(w["end"]) <= hi)]
+
+
+def total(rows, column):
+    return sum(int(w[column]) for w in rows)
+
+
+def rate(rows, column):
+    """A count over the windows' sites."""
+    return total(rows, column) / total(rows, "n_sites")
+
+
+def het_fraction(rows):
+    return total(rows, "n_het") / (total(rows, "n_het") + total(rows, "n_hom_alt"))
 
 
 def events_of(tables, sample):
@@ -252,6 +286,52 @@ check(all(int(s["n_strong"]) >= 20 and float(s["lod"]) > 20 for s in seg), f"tri
 print("ok    trio: maternal isodisomy 15, paternal heterodisomy 22, the deletion set aside; no call in an autozygous block;"
       " an artefact two siblings share is low; a segmental UPD away from 11p15.5 has no imprinting")
 
+# The windows, against the chromosomes of C1 that are inherited normally
+W = upd.WINDOW_BP
+check(all(int(w["start"]) % W == 1 and int(w["end"]) == int(w["start"]) + W - 1 and int(w["n_sites"]) > 0
+          for w in t["windows"]), "trio windows: not 500 kb bins from 1, or a window with no site")
+for sample in ("C1", "C2", "C3", "F", "M"):
+    keys = [(CHROMS.index(w["chrom"]), int(w["start"])) for w in windows(t, sample)]
+    check(keys == sorted(set(keys)), f"trio windows of {sample}: not in chromosome and position order")
+normal = [w for w in windows(t, "C1") if w["chrom"] in ("1", "2", "4", "6", "7", "9", "10")]
+check(all(w["mode"] == "trio" for w in windows(t, "C1")), "trio windows: C1 not in trio mode")
+check(0.8 < total(normal, "n_mat") / total(normal, "n_pat") < 1.25, "trio windows: n_mat and n_pat differ "
+      f"on normal chromosomes: {total(normal, 'n_mat')} {total(normal, 'n_pat')}")
+check(rate(normal, "n_lacks_father") < 0.005 and rate(normal, "n_lacks_mother") < 0.005,
+      f"trio windows: opposite homozygotes on normal chromosomes: {rate(normal, 'n_lacks_father')}")
+check(all(0.8 <= float(w["depth_ratio"]) <= 1.25 for w in normal), "trio windows: depth ratio of normal windows")
+iso_mat = windows(t, "C1", "15")
+check(len(iso_mat) >= 50, f"trio windows: {len(iso_mat)} windows on chr15")
+check(rate(iso_mat, "n_het") < 0.01 and rate(iso_mat, "n_mat") < 0.01 and rate(iso_mat, "n_pat") < 0.01,
+      f"trio windows: the maternal isodisomy has hets: {total(iso_mat, 'n_het')} of {total(iso_mat, 'n_sites')}")
+check(rate(iso_mat, "n_lacks_father") > 0.05 and rate(iso_mat, "n_lacks_father") > 20 * rate(normal, "n_lacks_father")
+      and rate(iso_mat, "n_lacks_mother") < 0.01, "trio windows: opposite homozygotes in the maternal isodisomy: "
+      f"father {rate(iso_mat, 'n_lacks_father')}, mother {rate(iso_mat, 'n_lacks_mother')}")
+het_mat = windows(t, "C1", "8", (2000, 3000))
+check(len(het_mat) >= 8 and rate(het_mat, "n_pat") < 0.01 and rate(het_mat, "n_mat") > 0.5 * rate(normal, "n_mat")
+      and abs(het_fraction(het_mat) - het_fraction(normal)) < 0.1,
+      f"trio windows: the maternal heterodisomy: n_mat {total(het_mat, 'n_mat')}, n_pat {total(het_mat, 'n_pat')}")
+het_pat = windows(t, "C1", "22")
+check(rate(het_pat, "n_mat") < 0.01 and rate(het_pat, "n_pat") > 0.5 * rate(normal, "n_pat"),
+      f"trio windows: the paternal heterodisomy: n_mat {total(het_pat, 'n_mat')}, n_pat {total(het_pat, 'n_pat')}")
+deletion = windows(t, "C1", "3", (1500, 2100))
+check(deletion and all(float(w["depth_ratio"]) < 0.65 for w in deletion)
+      and rate(deletion, "n_het") < 0.1 * rate(normal, "n_het") and rate(deletion, "n_lacks_father") > 0.05, "trio windows: the father's deletion is not an isodisomy at half "
+      f"the depth: {deletion}")
+check(windows(t, "C1", "X") and windows(t, "C3", "X") and not windows(t, "C2", "X") and not windows(t, "F", "X"),
+      "trio windows: chrX not for the members with two X only")
+x = windows(t, "C1", "X")
+check(total(x, "n_mat") == total(x, "n_het") > 0 and rate(x, "n_lacks_father") < 0.01,
+      f"trio windows: chrX of C1, with a hemizygous father: {total(x, 'n_mat')} {total(x, 'n_het')}")
+for sample in ("F", "M"):
+    rows_solo = windows(t, sample)
+    check(rows_solo and all(w["mode"] == "solo" and all(w[c] == "." for c in PARENT_COLUMNS) for w in rows_solo)
+          and 0.3 < het_fraction(rows_solo) < 0.9, f"trio windows: {sample}, solo, has parent counts or no het")
+check(windows(t, "M", "X"), "trio windows: no chrX for the mother")
+print("ok    windows: a maternal isodisomy has no het, no maternal- or paternal-specific allele and many opposite"
+      " homozygotes with the father; a maternal heterodisomy no paternal-specific allele; the father's deletion is"
+      " an isodisomy at half the depth; chrX for two X only, the father hemizygous; solo members have no parent column")
+
 T1 = child(F, M, special={"15": "iso_mat"})
 tw = run("twins", "TWIN", rows[:2] + [("T1", "F", "M", "2", True), ("T2", "F", "M", "2", True)],
          [("F", F), ("M", M), ("T1", T1), ("T2", T1)])
@@ -308,6 +388,16 @@ check(not small, f"duo mother: UPDs of the present parent below the solo extents
 ev2 = events_of(d, "C2")
 check(all(x["confidence"] == "low" for x in ev2), f"duo mother C2 autozygous block not held low: {ev2}")
 print("ok    duo with the mother: paternal heterodisomy, maternal isodisomy, the deletion set aside; autozygosity held low")
+rows_duo = windows(d, "C1")
+check(rows_duo and all(w["mode"] == "duo" and w["n_mat"] == w["n_lacks_father"] == "." and w["n_pat"] != "."
+                       and w["n_lacks_mother"] != "." for w in rows_duo), "duo windows: the father's columns are filled")
+normal = [w for w in rows_duo if w["chrom"] in ("1", "2", "4", "6", "7", "9", "10")]
+iso_mat, het_pat = windows(d, "C1", "15"), windows(d, "C1", "22")
+check(rate(iso_mat, "n_pat") < 0.01 and rate(iso_mat, "n_lacks_mother") < 0.01,
+      f"duo windows: the maternal isodisomy against the mother: {rate(iso_mat, 'n_lacks_mother')}")
+check(rate(het_pat, "n_lacks_mother") > 0.02 and rate(het_pat, "n_lacks_mother") > 20 * rate(normal, "n_lacks_mother"),
+      f"duo windows: the paternal heterodisomy lacks no maternal allele: {rate(het_pat, 'n_lacks_mother')}")
+print("ok    windows of a duo with the mother: her columns only, and no allele of hers in the paternal heterodisomy")
 
 rows_no_m = [rows[0], ("M", "0", "0", "2", False)] + rows[2:]
 d = run("duo_father", "FAM", rows_no_m, [("F", F), ("C1", C1)])
@@ -435,6 +525,17 @@ print("ok    solo: whole-chromosome and terminal ROH, none in a consanguineous b
       " a long interstitial ROH on upd_candidate_chrom stays an interstitial, low; two long ROH on one chromosome"
       " are one medium event; a ROH at half the depth is set aside; an interstitial ROH on chr15 is medium;"
       " lengths are of covered genome; a ROH full of hets is low; 12 Mb interstitial counts on an imprinted chromosome")
+rows_solo = windows(d, "S1")
+check(rows_solo and all(w["mode"] == "solo" and all(w[c] == "." for c in PARENT_COLUMNS) for w in rows_solo),
+      "solo windows: parent columns filled")
+roh, rest = windows(d, "S1", "15"), [w for w in rows_solo if w["chrom"] in ("1", "2", "3", "4")]
+check(het_fraction(roh) < 0.1 * het_fraction(rest) and het_fraction(rest) > 0.3,
+      f"solo windows: het fraction {het_fraction(roh)} in the whole-chromosome ROH, {het_fraction(rest)} elsewhere")
+deletion = windows(d, "S7", "14", (1000, 1900))
+check(deletion and all(float(w["depth_ratio"]) < 0.65 for w in deletion)
+      and het_fraction(deletion) < 0.1 * het_fraction(rest),
+      "solo windows: a deletion is not a ROH at half the depth")
+print("ok    windows in solo mode: het counts only, none in a ROH, and a deletion at half the depth")
 
 # --- parsing -----------------------------------------------------------------------------------
 lines = ["chr1\t100\t0.1\t0/1\t50\t30", "chr1\t200\t0.2\t0/1\t50\t30", "chr1\t200\t0.2\t1/1\t50\t30",
@@ -446,6 +547,35 @@ check(list(chroms["1"].g[0]) == [1, upd.MISSING, upd.MISSING], f"dosages {list(c
 check(chroms["1"].af[1] == 1 and "Y" not in chroms, "af or chrY")
 check(list(chroms["2"].g[0]) == [upd.MISSING], "DP 9 counted")
 print("ok    a position held twice is dropped; GQ, DP, missing calls and chrY")
+
+# chrX windows site by site: a site in each PAR, a father het (missing: he has one X), a missing
+# child call, a child call over its depth cap, then three sites the trio uses
+chrom = upd.Chrom("X", 3)
+for pos, f, m, c, depth in ((1000000, 0, 1, 1, 30), (155800000, 0, 1, 1, 30), (3000010, 1, 1, 1, 30),
+                            (3000020, 0, 1, upd.MISSING, 30), (3000025, 0, 1, 1, 200), (3000030, 2, 1, 1, 30),
+                            (3000040, 0, 2, 2, 30), (3500001, 0, 1, 1, 30)):
+    chrom.pos.append(pos)
+    chrom.af.append(100)
+    for i, d in enumerate((f, m, c)):
+        chrom.g[i].append(d)
+        chrom.dp[i].append(depth if i == 2 else 30)
+index, caps = {"F": 0, "M": 1, "C": 2}, [75, 75, 75]
+child_x = upd.Member("C", 2, {})
+child_x.father, child_x.mother, child_x.mode, child_x.chrx = "F", "M", "trio", "yes"
+got = [(w["start"], w["end"], [w[k] for k in WINDOW_CONTRACT[6:13]], w["depth_ratio"])
+       for w in upd.window_rows("FX", child_x, {"X": chrom}, index, caps, 30.0)]
+check(got == [(3000001, 3500000, [2, 1, 1, 1, 0, 1, 0], 1.0), (3500001, 4000000, [1, 1, 0, 1, 0, 0, 0], 1.0)],
+      f"chrX trio windows: {got}")
+child_x.father, child_x.mode = None, "duo"
+got = [[w[k] for k in WINDOW_CONTRACT[6:13]] for w in upd.window_rows("FX", child_x, {"X": chrom}, index, caps, 30.0)]
+check(got == [[3, 2, 1, None, 0, None, 0], [1, 1, 0, None, 0, None, 0]], f"chrX duo windows: {got}")
+child_x.mother, child_x.mode = None, "solo"
+got = [[w[k] for k in WINDOW_CONTRACT[6:13]] for w in upd.window_rows("FX", child_x, {"X": chrom}, index, caps, 30.0)]
+check(got == [[3, 2, 1, None, None, None, None], [1, 1, 0, None, None, None, None]], f"chrX solo windows: {got}")
+child_x.chrx = "no"
+check(not upd.window_rows("FX", child_x, {"X": chrom}, index, caps, 30.0), "chrX windows of a member with one X")
+print("ok    chrX windows: the PARs skipped, a father het missing, a call over the depth cap left out, and nothing for"
+      " a member with one X")
 
 # --- cohort ------------------------------------------------------------------------------------
 os.makedirs("fam", exist_ok=True)

@@ -20,7 +20,9 @@ process UPD_FAMILY {
   upd_af_field of gnomad_file, as INFO/UPD_AF), and stream into upd_segments family, which drops
   those outside the roh panel's covered segments when there is a mask: an HMM per member with
   both parents in the BCF (trio) or one (duo), and the roh step's ROH segments for a member with
-  none (solo). See its docstring for the states, the score and the rules.
+  none (solo). See its docstring for the states, the score and the rules. It also writes the
+  windows table, the sites of each member's model counted in 500 kb windows, for genetics-viz to
+  draw the evidence behind the calls; the cohort does not gather it.
 
   Parameters
   ----------
@@ -46,7 +48,8 @@ process UPD_FAMILY {
 
   Returns
   -------
-  Tuple of family ID and its segments, events and members tables, and the inputs snapshot
+  Tuple of family ID and its segments, events, members and windows tables, and the inputs
+  snapshot
   */
 
   tag "${fid}"
@@ -56,7 +59,7 @@ process UPD_FAMILY {
     "${params.data}/families/${s1}/${s2}/${fid}/upd"
   },
     mode: 'copy',
-    pattern: "${fid}.${label}.{segments,events,members,inputs}.tsv"
+    pattern: "${fid}.${label}.{segments,events,members,inputs,windows}.tsv"
 
   label 'upd_family'
 
@@ -68,7 +71,7 @@ process UPD_FAMILY {
 
   output:
   tuple val(fid), path("${prefix}.segments.tsv"), path("${prefix}.events.tsv"), path("${prefix}.members.tsv"),
-        path("${prefix}.inputs.tsv"), emit: tables
+        path("${prefix}.windows.tsv"), path("${prefix}.inputs.tsv"), emit: tables
 
   script:
   prefix = "${fid}.${label}"
@@ -114,5 +117,6 @@ process UPD_FAMILY {
   printf 'family_id\\tsample\\tchrom\\tstart\\tend\\n' > ${prefix}.segments.tsv
   printf 'family_id\\tsample\\tchrom\\tstart\\tend\\n' > ${prefix}.events.tsv
   printf 'family_id\\tsample\\tmode\\tstatus\\n${fid}\\t${fid}_s1\\ttrio\\tanalysed\\n' > ${prefix}.members.tsv
+  printf 'family_id\\tsample\\tmode\\tchrom\\tstart\\tend\\tn_sites\\tn_het\\tn_hom_alt\\tn_mat\\tn_pat\\tn_lacks_father\\tn_lacks_mother\\tdepth_ratio\\n' > ${prefix}.windows.tsv
   """
 }

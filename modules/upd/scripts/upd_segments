@@ -10,11 +10,12 @@ family
     order from --samples, the family's inputs snapshot (written by the pipeline: its pedigree
     rows, normalised, with which members are in the BCF and which have a coverage JSON), the
     coverage JSONs, and the roh step's roh.tsv and froh.tsv when there are, and writes
-    <prefix>.segments.tsv, <prefix>.events.tsv and <prefix>.members.tsv.
+    <prefix>.segments.tsv, <prefix>.events.tsv, <prefix>.members.tsv and <prefix>.windows.tsv.
 
 cohort
-    From every family's three tables, writes the cohort's: the family tables concatenated, and
-    on the events, how many other families have an overlapping event (recurrent).
+    From every family's segments, events and members, writes the cohort's: the family tables
+    concatenated, and on the events, how many other families have an overlapping event
+    (recurrent). The windows stay per family.
 
 Members and modes. Every member in the BCF is analysed, in the best mode its family allows. A
 parent counts only when it is in the BCF: a parent written 0, a DUMMY_ parent or one without a
@@ -167,6 +168,26 @@ outside the child's UPD segments: about 0.1% for a parent and its child, 8% for 
 (sampleqc's PO_OPPOSITE_HOM_MAX). It is not that parent's child, or not the sample it is named
 after, which sampleqc's NOT_PARENT reports. That parent is dropped and the child redone.
 
+Windows. The evidence behind the calls, to draw them (genetics-viz): for every member in the BCF
+with sites, whatever its status, the sites in fixed WINDOW_BP windows from position 1, a window
+with no site left out. Its sites are those of the member's model in its final mode, with the
+parents it used: in a trio or duo the sites of model_sites, in solo mode the member's called sites
+under its depth cap; on the autosomes, and on chrX outside the PARs for a member with two X. Per
+window:
+    n_sites          the sites
+    n_het, n_hom_alt the member's het and hom-alt calls
+    n_mat            father homozygous and the member het: its other allele is the mother's
+    n_pat            mother homozygous and the member het
+    n_lacks_father   the member and its father opposite homozygotes: no allele of his
+    n_lacks_mother   the same against the mother
+    depth_ratio      the member's mean DP over the sites, over its mean DP genome-wide
+A parent the model does not use gives '.' in its two columns: a duo fills the present parent's
+pair only, and solo mode none. Normal inheritance gives n_mat about n_pat and almost no opposite
+homozygote; a maternal isodisomy no het, so n_mat = n_pat = 0, and many n_lacks_father; a
+maternal heterodisomy no n_pat, and n_mat as usual. A deletion of the father's copy reads as a
+maternal isodisomy at half the depth. On chrX the father is hemizygous: every het of a daughter
+counts in n_mat.
+
 Cohort. An event is recurrent when events of RECURRENT_MIN_FAMILIES other families or more
 overlap it on the same chromosome, each by at least RECURRENT_OVERLAP of both: a region where the
 calls are artefacts more often than UPD.
@@ -224,6 +245,7 @@ X_HET_TWO_X_MIN = 0.1
 SEX_TOLERANCE = 0.25
 RECURRENT_MIN_FAMILIES = 3
 RECURRENT_OVERLAP = 0.5
+WINDOW_BP = 500_000
 # GRCh38 pseudoautosomal regions, 1-based inclusive
 PARS = ((10001, 2781479), (155701383, 156030895))
 
@@ -265,6 +287,9 @@ EVENT_COLUMNS = ["family_id", "sample", "mode", "event_id", "chrom", "start", "e
 LOG2 = math.log10(2)
 MEMBER_COLUMNS = ["family_id", "sample", "father", "mother", "mode", "father_used", "mother_used", "chrx",
                   "n_sites", "error_rate", "status", "n_events", "n_events_high"]
+# Read by name by genetics-viz: do not rename
+WINDOW_COLUMNS = ["family_id", "sample", "mode", "chrom", "start", "end", "n_sites", "n_het", "n_hom_alt", "n_mat",
+                  "n_pat", "n_lacks_father", "n_lacks_mother", "depth_ratio"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -822,6 +847,58 @@ def hmm_member(chroms, member, used, caps, mean_depth, tables):
                 member.errors += 1
 
 
+def window_rows(fid, member, chroms, index, caps, mean_depth):
+    """The member's sites counted in WINDOW_BP windows, with the parents its model used (see the
+    docstring). Rows in chromosome and position order; a window with no site has none."""
+    child, cap = member.index, caps[member.index]
+    used = [(index[p], caps[index[p]]) for p in (member.father, member.mother) if p is not None]
+    father = index[member.father] if member.father is not None else None
+    mother = index[member.mother] if member.mother is not None else None
+    rows = []
+    for name in AUTOSOMES + (["X"] if member.chrx == "yes" else []):
+        chrom = chroms.get(name)
+        if chrom is None:
+            continue
+        gc, dc, pos = chrom.g[child], chrom.dp[child], chrom.pos
+        if used:
+            idx = model_sites(chrom, member, used, caps)[0]
+        else:
+            on_x = name == "X"
+            idx = [j for j in range(len(chrom)) if gc[j] != MISSING and dc[j] <= cap
+                   and not (on_x and in_par(pos[j]))]
+        gf = chrom.g[father] if father is not None else None
+        gm = chrom.g[mother] if mother is not None else None
+        # Per window: sites, het, hom-alt, mat, pat, lacks father, lacks mother, total depth
+        windows = {}
+        for j in idx:
+            k = (pos[j] - 1) // WINDOW_BP
+            w = windows.get(k)
+            if w is None:
+                w = windows[k] = [0] * 8
+            c = gc[j]
+            w[0] += 1
+            w[1] += c == 1
+            w[2] += c == 2
+            w[7] += dc[j]
+            if gf is not None:
+                w[3] += c == 1 and gf[j] != 1
+                w[5] += abs(c - gf[j]) == 2
+            if gm is not None:
+                w[4] += c == 1 and gm[j] != 1
+                w[6] += abs(c - gm[j]) == 2
+        for k in sorted(windows):
+            n, het, hom_alt, mat, pat, lacks_f, lacks_m, depth = windows[k]
+            rows.append({
+                "family_id": fid, "sample": member.sample, "mode": member.mode, "chrom": name,
+                "start": k * WINDOW_BP + 1, "end": (k + 1) * WINDOW_BP, "n_sites": n, "n_het": het,
+                "n_hom_alt": hom_alt, "n_mat": mat if gf is not None else None,
+                "n_pat": pat if gm is not None else None,
+                "n_lacks_father": lacks_f if gf is not None else None,
+                "n_lacks_mother": lacks_m if gm is not None else None,
+                "depth_ratio": (depth / n) / mean_depth if mean_depth else None})
+    return rows
+
+
 def classify(segment):
     """(interpretation, confidence) of an HMM segment. A deletion is graded on its evidence as a
     UPD is, its depth keeping it below high."""
@@ -1229,7 +1306,7 @@ def cmd_family(args):
     duo_tables = {}
     solo = solo_table()
 
-    rows_members, rows_segments, rows_events, analysed = [], [], [], {}
+    rows_members, rows_segments, rows_events, rows_windows, analysed = [], [], [], [], {}
     for sample, info in members.items():
         if not info["sequenced"]:
             continue
@@ -1294,6 +1371,7 @@ def cmd_family(args):
                 solo_member(chroms, member, roh_member, spans, mean_depth, caps[i], solo)
                 for s in member.segments:
                     s["interpretation"], s["confidence"] = solo_confidence(s)
+        rows_windows += window_rows(fid, member, chroms, index, caps, mean_depth)
 
         def isolation(chrom, member=member, roh_member=roh_member):
             if roh_member is not None:
@@ -1332,6 +1410,7 @@ def cmd_family(args):
     write_tsv(f"{args.out_prefix}.segments.tsv", SEGMENT_COLUMNS, rows_segments)
     write_tsv(f"{args.out_prefix}.events.tsv", EVENT_COLUMNS, rows_events)
     write_tsv(f"{args.out_prefix}.members.tsv", MEMBER_COLUMNS, rows_members)
+    write_tsv(f"{args.out_prefix}.windows.tsv", WINDOW_COLUMNS, rows_windows)
     high = [e for e in rows_events if e["confidence"] == "high"]
     print(f"{fid}: {len(rows_members)} members, {len(rows_events)} events, {len(high)} high"
           + "".join(f"\n  {e['sample']} {e['chrom']} {e['origin']} {e['composition']} {e['extent']} "
