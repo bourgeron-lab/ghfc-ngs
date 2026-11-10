@@ -27,6 +27,7 @@ include { MELT } from './workflows/melt'
 include { CNV_COVERAGE } from './workflows/cnv_coverage'
 include { CNV_PANEL } from './workflows/cnv_panel'
 include { SAMPLEQC } from './workflows/sampleqc'
+include { UPD } from './workflows/upd'
 
 /*
 ========================================================================================
@@ -120,6 +121,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Samples extracted; the family and cohort tables follow from them and the pedigree
         sampleqc:           ('sampleqc' in RunContext.steps)
                                 ? CohortState.progress(plan.sampleqc.existing.size(), n_individuals)
+                                : null,
+        // Families with their tables built from the current snapshot
+        upd:                ('upd' in RunContext.steps)
+                                ? CohortState.progress(plan.upd.family_existing.size(), n_families)
                                 : null,
         // One sentinel entry: the panel version directory, complete or not
         cnv_panel:          ('cnv_panel' in RunContext.steps)
@@ -401,11 +406,11 @@ def validateParams() {
 
     if (RunContext.steps.isEmpty()) {
         recordFailedRun("no steps requested")
-        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc"
+        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd"
     }
 
     // Validate steps
-    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc']
+    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc', 'upd']
     def invalid_steps = RunContext.steps - valid_steps
     if (invalid_steps) {
         recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -584,6 +589,29 @@ def validateParams() {
         if (absent) {
             recordFailedRun("sampleqc inputs not found: ${absent.keySet().join(', ')}")
             exit 1, "ERROR: the 'sampleqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+        }
+    }
+
+    // The UPD analysis reads each family's norm.bcf with the gnomAD frequencies of upd_af_field, and
+    // names every file after upd_label
+    if ('upd' in RunContext.steps) {
+        def missing_upd_params = ['upd_label', 'upd_af_field', 'gnomad_file'].findAll { key -> !params[key] }
+        if (missing_upd_params) {
+            recordFailedRun("upd step is missing ${missing_upd_params.join(', ')}")
+            exit 1, "ERROR: the 'upd' step requires ${missing_upd_params.join(', ')} to be set"
+        }
+        if (!(params.upd_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid upd_label")
+            exit 1, "ERROR: upd_label '${params.upd_label}' may only hold letters, digits, '.', '_' and '-': it is part of every UPD file name"
+        }
+        if (!(params.upd_af_field.toString() ==~ /[A-Za-z0-9_]+/)) {
+            recordFailedRun("invalid upd_af_field")
+            exit 1, "ERROR: upd_af_field '${params.upd_af_field}' is not an INFO field name"
+        }
+        def gnomad = params.gnomad_file.toString()
+        if (!new File(gnomad).exists() || !(new File("${gnomad}.csi").exists() || new File("${gnomad}.tbi").exists())) {
+            recordFailedRun("upd gnomad_file or its index not found")
+            exit 1, "ERROR: the 'upd' step cannot find gnomad_file ${gnomad} with a .csi or .tbi index"
         }
     }
 
@@ -1160,7 +1188,8 @@ workflow {
     // Calls on the ancestry step's family panel, for the same reason ancestry reads gVCFs: ROH
     // calling reads homozygosity from hom-ref sites, which common_gt.bcf does not carry. A
     // family the ancestry step rebuilds in this run takes that run's panel and label; every
-    // other family reads its own from disk.
+    // other family reads its own from disk. The family tables it makes feed the UPD analysis.
+    roh_new_tables = Channel.empty()
     if ((analysis_plan.roh.needed.size() > 0 ||
          analysis_plan.roh.need_cohort_merge) && 'roh' in RunContext.steps) {
 
@@ -1194,6 +1223,29 @@ workflow {
             analysis_plan.roh.needed,
             analysis_plan.roh.need_cohort_merge,
             rohGeneBeds()
+        )
+        roh_new_tables = ROH.out.family_roh.join(ROH.out.family_froh)
+    }
+
+    // Run the UPD analysis if needed and allowed. It reads the family BCFs, existing and newly
+    // called, the coverage JSONs this run's cnv_coverage makes for the karyotype, and the ROH
+    // tables this run's roh step makes for the members with no parent in the BCF
+    if ((analysis_plan.upd.need_family.size() > 0 || analysis_plan.upd.need_cohort) && 'upd' in RunContext.steps) {
+        def upd_tasks = []
+        if (analysis_plan.upd.need_family.size() > 0) {
+            upd_tasks.add("segments of ${analysis_plan.upd.need_family.size()} families")
+        }
+        if (analysis_plan.upd.need_cohort) {
+            upd_tasks.add("cohort tables")
+        }
+        log.info "Running UPD: ${upd_tasks.join(', ')}..."
+
+        UPD(
+            channels.existing_normalized_bcfs.mix(normalized_bcfs_output),
+            cnv_new_coverage,
+            roh_new_tables,
+            pedigree_data.family_members,
+            analysis_plan.upd
         )
     }
 }
@@ -1428,6 +1480,16 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                    family_existing: planBucket(), edited: planBucket(), need_cohort: false, cohort_edited: false,
                    extract_members: [:], coverage_members: [:], coverage_from_run: planBucket(),
                    mendelian: planBucket(), snapshots: [:], cohort_snapshot: null],
+        // need_family, family_existing and edited are families, as for sampleqc. coverage_members:
+        // family -> its members in the BCF with a coverage JSON; coverage_from_run: members whose
+        // JSON the cnv_coverage step makes in this run; roh_families: families whose roh tables are
+        // read, roh_from_run: those the roh step makes in this run. snapshots: family -> its inputs
+        // snapshot (lib/InputsSnapshot.groovy).
+        // mask: the roh panel's sites file the analysis drops sites outside of, null without one.
+        upd: [need_family: planBucket(), family_existing: planBucket(), edited: planBucket(), need_cohort: false,
+              cohort_edited: false, coverage_members: [:], coverage_from_run: planBucket(),
+              roh_families: planBucket(), roh_from_run: planBucket(), snapshots: [:], cohort_snapshot: null,
+              mask: null],
         pedigree_drift: [:]
     ]
 
@@ -2087,6 +2149,102 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
+    // Check existing UPD tables, as for sampleqc: only when the step is requested, with upd_label in
+    // every file name, and against the inputs snapshot they were built from - the pedigree rows,
+    // which members are in the family BCF and have a coverage JSON, which ROH tables are read, the
+    // gnomAD file and field - so that a pedigree edit still redoes the family and the cohort. A
+    // family whose BCF or ROH tables are remade in this run is redone too: the snapshot names its
+    // inputs, not their content. Planned after the CNV coverage and the ROH.
+    if ('upd' in RunContext.steps) {
+        def upd = plan.upd
+        def label = params.upd_label
+        def cov_tag = cnvTag()
+        def roh_panel = params.ancestry_panel_name ?: ''
+        // The roh panel's covered segments, when the bundle has its roh/ tier: centromeres, the
+        // MHC and segmental duplications, where mismapped reads read as short UPDs, are left out
+        def mask = params.ancestry_reference ? "${params.ancestry_reference}/roh/sites.tsv.gz".toString() : null
+        upd.mask = mask && new File(mask).exists() ? mask : null
+        def settings = [step: 'upd', label: label, af_field: params.upd_af_field.toString(),
+                        gnomad: new File(params.gnomad_file.toString()).name, mask: upd.mask ?: 'none']
+
+        def rows_by_family = [:]
+        InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
+            rows_by_family.get(row[0], []) << row
+        }
+        def cohort_rows = []
+        families.each { fid ->
+            def bcf_from_run = 'deepvariant_family' in RunContext.steps && fid in plan.deepvariant_family.needed
+            if (!(fid in plan.deepvariant_family.existing) && !bcf_from_run) {
+                // validateStepsAvailability stops the run on it: upd is a consumer of the BCF
+                return
+            }
+            def rows = rows_by_family[fid] ?: []
+            // The members the BCF holds: a dummy never, and a member only with a gVCF, on disk or
+            // made in this run, as deepvariant_family's own drift check reads it
+            def in_bcf = rows.collect { row -> row[1] }.findAll { barcode ->
+                !DummyMember.isDummy(barcode) &&
+                    (hasGvcf(gvcf_exists, barcode) || barcode in plan.deepvariant_sample.needed)
+            } as LinkedHashSet
+            if (!in_bcf) {
+                return
+            }
+            def with_coverage = in_bcf.findAll { barcode ->
+                if (new File("${Sharding.getSampleDir(params.data, barcode)}/coverage/${barcode}.${cov_tag}.json").length() > 0) {
+                    return true
+                }
+                if ('cnv_coverage' in RunContext.steps && barcode in plan.cnv_coverage.needed) {
+                    upd.coverage_from_run.add(barcode)
+                    return true
+                }
+                return false
+            } as LinkedHashSet
+            // The roh step's tables, on disk or made in this run, for the members with no parent
+            def roh_prefix = "${Sharding.getFamilyDir(params.data, fid)}/roh/${fid}.${roh_panel}"
+            def roh_from_run = roh_panel && 'roh' in RunContext.steps && fid in plan.roh.needed
+            def roh_on_disk = roh_panel && ['roh', 'froh'].every { kind -> new File("${roh_prefix}.${kind}.tsv").length() > 0 }
+            if (roh_from_run || roh_on_disk) {
+                upd.roh_families.add(fid)
+                if (roh_from_run) {
+                    upd.roh_from_run.add(fid)
+                }
+            }
+
+            def snapshot_rows = rows.collect { row ->
+                row + [row[1] in in_bcf ? 'yes' : 'no', row[1] in with_coverage ? cov_tag : '-']
+            }
+            cohort_rows.addAll(snapshot_rows)
+            def snapshot = InputsSnapshot.render(settings + [family: fid, bcf: "${fid}.norm.bcf".toString(),
+                                                             roh: fid in upd.roh_families ? "${fid}.${roh_panel}.roh.tsv".toString() : 'none'],
+                                                 snapshot_rows)
+            upd.snapshots[fid] = snapshot
+            upd.coverage_members[fid] = with_coverage as List
+
+            def prefix = "${Sharding.getFamilyDir(params.data, fid)}/upd/${fid}.${label}"
+            def tables_exist = ['segments', 'events', 'members'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
+            def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
+            def remade = bcf_from_run || roh_from_run || with_coverage.any { barcode -> barcode in upd.coverage_from_run }
+            if (tables_exist && same_inputs && !remade) {
+                upd.family_existing.add(fid)
+            } else {
+                upd.need_family.add(fid)
+                if (tables_exist && new File("${prefix}.inputs.tsv").exists() && !same_inputs) {
+                    upd.edited.add(fid)
+                }
+            }
+        }
+
+        if (upd.snapshots) {
+            upd.cohort_snapshot = InputsSnapshot.render(settings + [cohort: params.cohort_name.toString()], cohort_rows)
+            def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/upd/${params.cohort_name}.${label}"
+            def cohort_exist = ['segments', 'events', 'members'].every { kind ->
+                new File("${cohort_prefix}.${kind}.tsv").length() > 0
+            }
+            def cohort_same = InputsSnapshot.matches("${cohort_prefix}.inputs.tsv", upd.cohort_snapshot)
+            upd.cohort_edited = cohort_exist && new File("${cohort_prefix}.inputs.tsv").exists() && !cohort_same
+            upd.need_cohort = !cohort_exist || !cohort_same || upd.need_family.size() > 0
+        }
+    }
+
     // Check existing Wombat files
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
@@ -2172,6 +2330,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     CNV_PANEL: ${'cnv_panel' in RunContext.steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
     == Sample QC ==
     SAMPLEQC: ${'sampleqc' in RunContext.steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    UPD: ${'upd' in RunContext.steps ? "${analysis_plan.upd.family_existing.size()} families done and ${analysis_plan.upd.need_family.size()} to do (${analysis_plan.upd.edited.size()} with changed inputs, ${analysis_plan.upd.roh_families.size()} with ROH tables for their members without a parent), cohort tables: ${analysis_plan.upd.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in RunContext.steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in RunContext.steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -2237,6 +2396,16 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.sampleqc.edited) {
         log.info "Families whose sample QC is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.sampleqc.edited.take(50).join(', ')}${analysis_plan.sampleqc.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.upd.edited) {
+        log.info "Families whose UPD analysis is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.upd.edited.take(50).join(', ')}${analysis_plan.upd.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if ('upd' in RunContext.steps && analysis_plan.upd.snapshots && !params.ancestry_panel_name) {
+        // Not an error: trios and duos need no ROH, and solo members are reported as skipped
+        log.warn "ancestry_panel_name is not set, so the UPD analysis reads no roh tables: members with no parent in their family's BCF get no isodisomy calls"
+    }
+    if ('upd' in RunContext.steps && analysis_plan.upd.snapshots && !analysis_plan.upd.mask) {
+        log.warn "ancestry_reference has no roh/ tier, so the UPD analysis runs without the roh panel's mask: its centromeres, MHC and segmental duplications give false short UPDs"
     }
     if (analysis_plan.sampleqc.no_cram) {
         // Not an error, as for melt: a gVCF-only sample has nothing to extract from
@@ -2519,7 +2688,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     // never touches the normalized or annotated call sets, so `steps: ["ancestry"]`
     // must not be blocked by families that have no norm.bcf yet. Every steps list
     // that includes one of the consumers below behaves exactly as before.
-    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'extractor']
+    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'extractor', 'upd']
     def annotation_consumers = ['annotation', 'wombat', 'wombat_cohort', 'snvs_cohort']
 
     // Check if deepvariant_family is needed but not available
@@ -2562,7 +2731,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")

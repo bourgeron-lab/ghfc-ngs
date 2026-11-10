@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+
+# Self-contained check of upd_segments, on simulated families. Needs only python3.
+#
+# Haplotypes are drawn site by site from a frequency, children inherit one haplotype of each
+# parent with a crossover per chromosome, and genotypes get a 0.1% error. The quad's first
+# daughter, C1, carries a maternal isodisomy of chr15, a paternal heterodisomy of chr22 and a
+# 3 Mb deletion of her father's chr3; her brother C2 is autozygous over 20 Mb of chr5, his
+# parents sharing a haplotype there. Asserts that:
+#   - the trio finds C1's three events (the deletion by its depth) and nothing in C2;
+#   - each duo, masked from the quad, finds C1's UPDs with the right parent, and holds C2's
+#     autozygous block to low confidence;
+#   - a DUMMY_ father counts as missing, and a father who is not the father is excluded;
+#   - chrX is read for the daughter only, with no false call from the hemizygous father;
+#   - solo members get the roh step's whole-chromosome and terminal ROH, and nothing when the
+#     rest of the genome is not outbred or the parents are related;
+#   - a position held twice (a split multiallelic site) is dropped, and with the roh panel as a
+#     mask, so is a site outside its covered segments;
+#   - the cohort marks events found in three other families as recurrent, and refuses a cohort
+#     whose family tables are missing.
+#
+#   modules/upd/scripts/upd_segments_test
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+python3 -B - "${here}/upd_segments" <<'EOF'
+import gzip
+import os
+import random
+import subprocess
+import sys
+from importlib.machinery import SourceFileLoader
+
+script = sys.argv[1]
+upd = SourceFileLoader("upd_segments", script).load_module()
+
+random.seed(11)
+CHROMS = [str(i) for i in range(1, 23)] + ["X"]
+N_SITES = 6000
+STEP = 5000
+X_START = 3000000          # past PAR1
+
+
+def check(cond, msg):
+    if not cond:
+        print("FAIL  " + msg)
+        sys.exit(1)
+
+
+def positions(c):
+    return [(X_START if c == "X" else 100000) + i * STEP for i in range(N_SITES)]
+
+
+def draw_af():
+    return random.uniform(0.01, 0.5) if random.random() < 0.6 else random.uniform(0.0005, 0.01)
+
+
+AF = {c: [draw_af() for _ in range(N_SITES)] for c in CHROMS}
+
+
+def haplotype(c):
+    return [int(random.random() < p) for p in AF[c]]
+
+
+def founder(male=False):
+    return {c: [haplotype(c)] if (c == "X" and male) else [haplotype(c), haplotype(c)] for c in CHROMS}
+
+
+def transmitted(parent, c, fixed=None):
+    """One allele per site from a parent: its haplotypes with one crossover, or a fixed one."""
+    haps = parent[c]
+    if len(haps) == 1:
+        return list(haps[0])
+    if fixed is not None:
+        return list(haps[fixed])
+    a, xo = random.randint(0, 1), random.randint(0, N_SITES - 1)
+    return [haps[a][j] if j < xo else haps[1 - a][j] for j in range(N_SITES)]
+
+
+def child(father, mother, male=False, special=None):
+    """{chrom: (allele list a, allele list b or None for hemizygous, depth factor list)}"""
+    special = special or {}
+    out = {}
+    for c in CHROMS:
+        depth = [1.0] * N_SITES
+        if c == "X" and male:
+            out[c] = (transmitted(mother, c), None, depth)
+            continue
+        kind = special.get(c)
+        if kind == "iso_mat":
+            m = transmitted(mother, c)
+            out[c] = (m, list(m), depth)
+        elif kind == "het_pat":
+            out[c] = (list(father[c][0]), list(father[c][1]), depth)
+        elif isinstance(kind, tuple) and kind[0] == "del_pat":
+            f, m = transmitted(father, c), transmitted(mother, c)
+            for j in range(kind[1], kind[2]):
+                f[j] = None
+                depth[j] = 0.5
+            out[c] = (f, m, depth)
+        elif isinstance(kind, tuple) and kind[0] == "haps":
+            out[c] = (transmitted(father, c, kind[1]), transmitted(mother, c, kind[2]), depth)
+        else:
+            out[c] = (transmitted(father, c), transmitted(mother, c), depth)
+    return out
+
+
+def genotypes_of(person, c):
+    """(dosage, depth factor) per site of a founder or child."""
+    if isinstance(person[c], tuple):
+        a, b, depth = person[c]
+        out = []
+        for j in range(N_SITES):
+            if b is None or a[j] is None:     # hemizygous: one allele, called homozygous
+                allele = b[j] if a[j] is None else a[j]
+                out.append((2 * allele, depth[j]))
+            else:
+                out.append((a[j] + b[j], depth[j]))
+        return out
+    haps = person[c]
+    if len(haps) == 1:
+        return [(2 * haps[0][j], 1.0) for j in range(N_SITES)]
+    return [(haps[0][j] + haps[1][j], 1.0) for j in range(N_SITES)]
+
+
+GT = {0: "0/0", 1: "0/1", 2: "1/1"}
+
+
+def stream(people, error=0.001):
+    """bcftools query lines of the given (name, person) list, at sites where one of them carries the ALT."""
+    lines = []
+    for c in CHROMS:
+        cols = [genotypes_of(p, c) for _, p in people]
+        for j, pos in enumerate(positions(c)):
+            calls = []
+            for col in cols:
+                d, factor = col[j]
+                if random.random() < error:
+                    d = random.choice([x for x in range(3) if x != d])
+                calls.append((d, max(10, int(random.randint(26, 34) * factor))))
+            if all(d == 0 for d, _ in calls):
+                continue
+            af = AF[c][j]
+            fields = ["chr" + c, str(pos), "." if af < 0.001 else f"{af:.4f}"]
+            for d, dp in calls:
+                fields += [GT[d], "50", str(dp)]
+            lines.append("\t".join(fields))
+    return "\n".join(lines) + "\n"
+
+
+def snapshot(path, fid, rows):
+    with open(path, "w") as fh:
+        fh.write("#inputs v1\n#step\tupd\n")
+        for sample, father, mother, sex, sequenced in rows:
+            fh.write("\t".join([fid, sample, father, mother, sex, "yes" if sequenced else "no", "-"]) + "\n")
+
+
+def run(prefix, fid, rows, people, roh=None, expect_fail=False, extra=()):
+    snapshot(f"{prefix}.inputs.tsv", fid, rows)
+    cmd = [sys.executable, script, "family", "--snapshot", f"{prefix}.inputs.tsv",
+           "--samples", ",".join(n for n, _ in people), "--out-prefix", prefix] + list(extra)
+    if roh:
+        cmd += ["--roh", roh[0], "--froh", roh[1]]
+    r = subprocess.run(cmd, input=stream(people), capture_output=True, text=True)
+    if expect_fail:
+        return r
+    check(r.returncode == 0, f"{prefix}: exit {r.returncode}\n{r.stderr}")
+    tables = {}
+    for kind in ("segments", "events", "members"):
+        tables[kind] = upd.read_tsv(f"{prefix}.{kind}.tsv")[1]
+    return tables
+
+
+def events_of(tables, sample):
+    return [e for e in tables["events"] if e["sample"] == sample]
+
+
+def member(tables, sample):
+    return [m for m in tables["members"] if m["sample"] == sample][0]
+
+
+def one(events, chrom, what):
+    found = [e for e in events if e["chrom"] == chrom]
+    check(len(found) == 1, f"{what}: {len(found)} events on chr{chrom}, not one: {found}")
+    return found[0]
+
+
+F, M = founder(male=True), founder()
+# The parents share haplotype 0 over chr5 sites 1000-4999 (20 Mb, interstitial)
+for j in range(1000, 5000):
+    M["5"][0][j] = F["5"][0][j]
+C1 = child(F, M, special={"15": "iso_mat", "22": "het_pat", "3": ("del_pat", 1500, 2100), "5": ("haps", 1, 1)})
+C2 = child(F, M, male=True, special={"5": ("haps", 0, 0)})
+quad = [("F", F), ("M", M), ("C1", C1), ("C2", C2)]
+rows = [("F", "0", "0", "1", True), ("M", "0", "0", "2", True), ("C1", "F", "M", "2", True),
+        ("C2", "F", "M", "1", True)]
+
+# --- trio --------------------------------------------------------------------------------------
+t = run("trio", "FAM", rows, quad)
+ev = events_of(t, "C1")
+e = one(ev, "15", "trio C1")
+check((e["origin"], e["composition"], e["extent"], e["confidence"], e["interpretation"]) ==
+      ("maternal", "iso", "whole_chromosome", "high", "UPD"), f"trio C1 chr15: {e}")
+check(e["imprinting"] == "Prader-Willi", f"trio C1 chr15 imprinting: {e['imprinting']}")
+e = one(ev, "22", "trio C1")
+check((e["origin"], e["composition"], e["extent"], e["confidence"]) ==
+      ("paternal", "het", "whole_chromosome", "high"), f"trio C1 chr22: {e}")
+e = one(ev, "3", "trio C1")
+check(e["interpretation"] == "deletion" and e["origin"] == "maternal", f"trio C1 chr3: {e}")
+check(abs(int(e["start"]) - positions("3")[1500]) <= 10 * STEP and abs(int(e["end"]) - positions("3")[2099]) <= 10 * STEP,
+      f"trio C1 chr3 deletion bounds {e['start']}-{e['end']}")
+check(float(e["depth_ratio"]) < 0.7, f"trio C1 chr3 depth {e['depth_ratio']}")
+others = [x for x in ev if x["chrom"] not in ("15", "22", "3")]
+check(not others, f"trio C1 has other events: {others}")
+check(not events_of(t, "C2"), f"trio C2 (autozygous chr5) has events: {events_of(t, 'C2')}")
+check(member(t, "C1")["mode"] == "trio" and member(t, "C1")["chrx"] == "yes", f"trio C1: {member(t, 'C1')}")
+check(member(t, "C2")["chrx"] == "no", f"trio C2 chrX: {member(t, 'C2')}")
+check(member(t, "F")["mode"] == "solo" and member(t, "F")["status"] == "no_roh_tables", f"trio F: {member(t, 'F')}")
+check(float(member(t, "C1")["error_rate"]) < 0.01, f"trio C1 error rate {member(t, 'C1')['error_rate']}")
+seg = [s for s in t["segments"] if s["sample"] == "C1" and s["chrom"] == "15"]
+check(all(int(s["n_strong"]) >= 20 and float(s["lod"]) > 20 for s in seg), f"trio C1 chr15 segments: {seg}")
+print("ok    trio: maternal isodisomy 15, paternal heterodisomy 22, a deletion; no call in an autozygous block")
+
+# The roh panel as a mask: a site every 100 kb, but on chr22 only up to 3 Mb; chrX not held
+with gzip.open("mask.tsv.gz", "wt") as fh:
+    fh.write("chrom\tpos\tref\talt\n")
+    for c in CHROMS[:-1]:
+        for pos in positions(c)[::20]:
+            if c != "22" or pos <= 3000000:
+                fh.write(f"{c}\t{pos}\tA\tG\n")
+m = run("mask", "FAM", rows, quad, extra=["--mask", "mask.tsv.gz"])
+ev = events_of(m, "C1")
+check(one(ev, "15", "masked C1")["confidence"] == "high", "masked: chr15 lost")
+check(all(int(e["end"]) <= 3000000 for e in ev if e["chrom"] == "22"), f"masked: chr22 past 3 Mb: {ev}")
+check(member(m, "C1")["chrx"] == "yes" and int(member(m, "C1")["n_sites"]) < int(member(t, "C1")["n_sites"]),
+      f"masked: sites {member(m, 'C1')}")
+print("ok    the roh panel as a mask drops the sites outside its covered segments")
+
+# --- duos --------------------------------------------------------------------------------------
+rows_no_f = [("F", "0", "0", "1", False)] + rows[1:]
+d = run("duo_mother", "FAM", rows_no_f, [("M", M), ("C1", C1), ("C2", C2)])
+ev = events_of(d, "C1")
+e = one(ev, "22", "duo mother C1")
+check((e["origin"], e["composition"], e["confidence"]) == ("paternal", "het", "high"), f"duo mother C1 chr22: {e}")
+e = one(ev, "15", "duo mother C1")
+check((e["origin"], e["composition"], e["extent"], e["confidence"]) == ("maternal", "iso", "whole_chromosome", "high"),
+      f"duo mother C1 chr15: {e}")
+e = one(ev, "3", "duo mother C1")
+check(e["interpretation"] == "deletion", f"duo mother C1 chr3: {e}")
+check(member(d, "C1")["mode"] == "duo" and member(d, "C1")["father_used"] == ".", f"duo mother C1: {member(d, 'C1')}")
+ev2 = events_of(d, "C2")
+check(all(x["confidence"] == "low" for x in ev2), f"duo mother C2 autozygous block not held low: {ev2}")
+print("ok    duo with the mother: paternal heterodisomy, maternal isodisomy, deletion; autozygosity held low")
+
+rows_no_m = [rows[0], ("M", "0", "0", "2", False)] + rows[2:]
+d = run("duo_father", "FAM", rows_no_m, [("F", F), ("C1", C1)])
+ev = events_of(d, "C1")
+e = one(ev, "15", "duo father C1")
+check((e["origin"], e["composition"], e["confidence"]) == ("maternal", "iso", "high"), f"duo father C1 chr15: {e}")
+e = one(ev, "22", "duo father C1")
+check((e["origin"], e["composition"], e["confidence"]) == ("paternal", "het", "high"), f"duo father C1 chr22: {e}")
+check(one(ev, "3", "duo father C1")["interpretation"] == "deletion", "duo father C1 chr3 not a deletion")
+print("ok    duo with the father: the same events, from the other side")
+
+# --- dummy father, non-father --------------------------------------------------------------------
+rows_dummy = [("DUMMY_C1_F", "0", "0", "1", False), rows[1], ("C1", "DUMMY_C1_F", "M", "2", True)]
+d = run("dummy", "FAM", rows_dummy, [("M", M), ("C1", C1)])
+check(member(d, "C1")["mode"] == "duo" and not [m for m in d["members"] if m["sample"].startswith("DUMMY_")],
+      f"dummy: {d['members']}")
+print("ok    a DUMMY_ father is missing, and not a member of the tables")
+
+U = founder(male=True)
+d = run("nonfather", "FAM", [("U", "0", "0", "1", True), rows[1], ("C1", "U", "M", "2", True)],
+        [("U", U), ("M", M), ("C1", C1)])
+m = member(d, "C1")
+check(m["mode"] == "duo" and m["father_used"] == "." and m["status"].startswith("parentage: father U"),
+      f"non-father: {m}")
+check(one(events_of(d, "C1"), "22", "non-father C1")["confidence"] == "high", "non-father: chr22 lost")
+print("ok    a father who is not the father is excluded, and the child redone as a duo")
+
+# --- solo, from the roh tables -------------------------------------------------------------------
+def solo_person(roh):
+    """A founder whose genotypes are homozygous over its ROH (chrom, first site, last site)."""
+    p = founder()
+    for c, a, b in roh:
+        for j in range(a, b):
+            p[c][1][j] = p[c][0][j]
+    return p
+
+
+S1 = solo_person([("15", 0, N_SITES)])
+S2 = solo_person([("2", 0, 1200), ("7", 2000, 3000)])
+S3 = solo_person([("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)])
+S4 = solo_person([("15", 0, N_SITES)])
+
+
+def roh_rows(sample, roh):
+    out = []
+    for c, a, b in roh:
+        s, e = positions(c)[a], positions(c)[b - 1]
+        out.append(f"{sample}\tchr{c}\t{s}\t{e}\t{(e - s) / 1e6:.3f}\t1\t{b - a}\t40\tlong\tEUR\t0\t0")
+    return out
+
+
+rohs = {"S1": [("15", 0, 2950), ("15", 3050, N_SITES)], "S2": [("2", 0, 1200), ("7", 2000, 3000)],
+        "S3": [("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)], "S4": [("15", 0, N_SITES)]}
+with open("solo.roh.tsv", "w") as fh:
+    fh.write("IID\tchrom\tstart\tend\tlength_mb\tlength_cm\tn_sites\tquality\troh_class\thotspot_group\t"
+             "hotspot_fraction\thotspot_fraction_pooled\n")
+    for s, r in rohs.items():
+        for line in roh_rows(s, r):
+            fh.write(line + "\n")
+with open("solo.froh.tsv", "w") as fh:
+    fh.write("IID\tregion\tfroh_1.5mb\tupd_candidate_chrom\tfather\tmother\tparents_kinship\n")
+    fh.write("S1\tEUR\t0.04\t15\t.\t.\tNA\nS2\tEUR\t0.01\t.\t.\t.\tNA\nS3\tEUR\t0.2\t.\t.\t.\tNA\n"
+             "S4\tEUR\t0.04\t15\tP1\tP2\t0.06\n")
+d = run("solo", "SOLO", [(s, "0", "0", "2", True) for s in ("S1", "S2", "S3", "S4")],
+        [("S1", S1), ("S2", S2), ("S3", S3), ("S4", S4)], roh=("solo.roh.tsv", "solo.froh.tsv"))
+e = one(events_of(d, "S1"), "15", "solo S1")
+check((e["origin"], e["extent"], e["confidence"], e["n_segments"]) == ("unknown", "whole_chromosome", "high", "2"),
+      f"solo S1: {e}")
+check("Prader-Willi if maternal" in e["imprinting"] and "Angelman if paternal" in e["imprinting"], e["imprinting"])
+check(float(e["lod"]) > 50, f"solo S1 lod {e['lod']}")
+ev = events_of(d, "S2")
+check(len(ev) == 1 and ev[0]["chrom"] == "2" and ev[0]["confidence"] == "medium" and ev[0]["terminal"] == "yes",
+      f"solo S2 (terminal chr2, short interstitial chr7): {ev}")
+check(not events_of(d, "S3"), f"solo S3 (consanguineous) has events: {events_of(d, 'S3')}")
+check(member(d, "S4")["status"].startswith("not_isolated"), f"solo S4: {member(d, 'S4')}")
+print("ok    solo: whole-chromosome and terminal ROH, none in a consanguineous background or with related parents")
+
+# --- parsing -----------------------------------------------------------------------------------
+lines = ["chr1\t100\t0.1\t0/1\t50\t30", "chr1\t200\t0.2\t0/1\t50\t30", "chr1\t200\t0.2\t1/1\t50\t30",
+         "chr1\t300\t.\t1/1\t10\t30", "chr1\t400\t0.3\t./.\t50\t30", "chrY\t500\t0.1\t0/1\t50\t30",
+         "chr2\t600\t0.5\t1|0\t50\t9"]
+chroms = upd.read_sites(iter(line + "\n" for line in lines), 1)
+check(list(chroms["1"].pos) == [100, 300, 400], f"positions {list(chroms['1'].pos)}")
+check(list(chroms["1"].g[0]) == [1, upd.MISSING, upd.MISSING], f"dosages {list(chroms['1'].g[0])}")
+check(chroms["1"].af[1] == 1 and "Y" not in chroms, "af or chrY")
+check(list(chroms["2"].g[0]) == [upd.MISSING], "DP 9 counted")
+print("ok    a position held twice is dropped; GQ, DP, missing calls and chrY")
+
+# --- cohort ------------------------------------------------------------------------------------
+os.makedirs("fam", exist_ok=True)
+fids = ["FA", "FB", "FC", "FD", "FE"]
+for fid in fids:
+    chrom, start, end = ("2", 5000000, 9000000) if fid == "FE" else ("1", 10000000 + fids.index(fid) * 100000,
+                                                                       20000000)
+    upd.write_tsv(f"fam/{fid}.upd_v1.events.tsv", upd.EVENT_COLUMNS, [
+        {"family_id": fid, "sample": f"{fid}_C", "mode": "trio", "event_id": f"{fid}_C:{chrom}:maternal",
+         "chrom": chrom, "start": start, "end": end, "length_mb": (end - start) / 1e6, "origin": "maternal",
+         "confidence": "high"}])
+    upd.write_tsv(f"fam/{fid}.upd_v1.segments.tsv", upd.SEGMENT_COLUMNS, [])
+    upd.write_tsv(f"fam/{fid}.upd_v1.members.tsv", upd.MEMBER_COLUMNS,
+                  [{"family_id": fid, "sample": f"{fid}_C", "mode": "trio", "status": "analysed"}])
+with open("cohort.inputs.tsv", "w") as fh:
+    fh.write("#inputs v1\n")
+    for fid in fids:
+        fh.write(f"{fid}\t{fid}_C\t0\t0\t2\tyes\t-\n")
+r = subprocess.run([sys.executable, script, "cohort", "--cohort", "CO", "--snapshot", "cohort.inputs.tsv",
+                    "--family-dir", "fam", "--label", "upd_v1", "--out-prefix", "CO.upd_v1"],
+                   capture_output=True, text=True)
+check(r.returncode == 0, f"cohort: {r.stderr}")
+ev = {e["family_id"]: e for e in upd.read_tsv("CO.upd_v1.events.tsv")[1]}
+check(all(ev[f]["recurrent"] == "yes" and ev[f]["recurrent_families"] == "3" for f in ("FA", "FB", "FC", "FD")),
+      f"recurrent: {ev}")
+check(ev["FE"]["recurrent"] == "no", "FE recurrent")
+os.remove("fam/FE.upd_v1.members.tsv")
+r = subprocess.run([sys.executable, script, "cohort", "--cohort", "CO", "--snapshot", "cohort.inputs.tsv",
+                    "--family-dir", "fam", "--label", "upd_v1", "--out-prefix", "CO.upd_v1"],
+                   capture_output=True, text=True)
+check(r.returncode != 0 and "FE" in r.stderr, f"a missing family table was not refused: {r.stderr}")
+print("ok    cohort: events of four families overlapping are recurrent; a missing family is refused")
+EOF

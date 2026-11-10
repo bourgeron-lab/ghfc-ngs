@@ -1,0 +1,1212 @@
+#!/usr/bin/env python3
+
+"""Uniparental disomy (UPD) segments of a family's members, from its norm.bcf.
+
+Two subcommands, one for each place the upd step runs them.
+
+family
+    Reads `bcftools query -f '%CHROM\\t%POS\\t%INFO/UPD_AF[\\t%GT\\t%GQ\\t%DP]\\n'` of the family's
+    biallelic SNVs on stdin (UPD_AF is the gnomAD frequency the task annotated), its sample
+    order from --samples, the family's inputs snapshot (written by the pipeline: its pedigree
+    rows, normalised, with which members are in the BCF and which have a coverage JSON), the
+    coverage JSONs, and the roh step's roh.tsv and froh.tsv when there are, and writes
+    <prefix>.segments.tsv, <prefix>.events.tsv and <prefix>.members.tsv.
+
+cohort
+    From every family's three tables, writes the cohort's: the family tables concatenated, and
+    on the events, how many other families have an overlapping event (recurrent).
+
+Members and modes. Every member in the BCF is analysed, in the best mode its family allows. A
+parent counts only when it is in the BCF: a parent written 0, a DUMMY_ parent or one without a
+gVCF is missing.
+    trio  both parents in the BCF: a hidden Markov model of the child's genotypes given its
+          parents', with UPDhmm's five states, N (one allele from each parent), iso_mat and
+          iso_pat (both alleles copies of one homolog of that parent), het_mat and het_pat (both
+          homologs of that parent: the child's genotype is the parent's), and three more states
+          of normal inheritance, where the parents share a haplotype:
+            auto     the two haplotypes the child got are one: the autozygosity of consanguinity
+                     and of chance ROH. Its genotypes are those of an isodisomy, but where the
+                     other parent lacks the child's allele
+            ibd_mat  the father's haplotype the child got is the mother's other one: the child's
+                     genotype is the mother's, as in het_mat, but where the parents are opposite
+                     homozygotes
+            ibd_pat  the same, the other way round
+          So an isodisomy or a heterodisomy is called on the Mendelian errors it explains, not
+          on a ROH or a run of genotypes identical to a parent's, which short haplotypes shared
+          by unrelated parents give all over the genome. No allele frequency is needed.
+    duo   one parent P in the BCF: the same five states, the missing parent Q transmitting the
+          ALT with its gnomAD frequency p. iso_Q (both alleles one draw at p) and het_Q (two
+          draws at p) rest on opposite homozygotes with P, which normal inheritance never gives.
+          iso_P is also what autozygosity looks like, and het_P what related parents can, so
+          they are only trusted when the rest of the genome is outbred (the isolation rule,
+          below), and held to the extents of solo mode.
+    solo  no parent in the BCF, founders included: isodisomy only, from the roh step's ROH
+          segments (bcftools roh with ancestry-matched frequencies). Heterodisomy cannot be seen
+          without a parent. A segment is a candidate when it is long and the rest of the genome
+          is outbred: on the roh step's upd_candidate_chrom (whole_chromosome), reaching an end
+          of the chromosome and at least SOLO_TERMINAL_MB long (terminal), or at least
+          SOLO_INTERSTITIAL_MB (interstitial). Terminal ROH rarely occurs without UPD, while an
+          interstitial one needs 15-20 Mb to stand out from chance and consanguinity (ACMG,
+          del Gaudio et al. 2020).
+A trio or duo in which a parent fails the parentage rule (below) is redone without that parent.
+
+Sites. A genotype counts at GQ >= 20 and DP >= 10, with alleles 0 and 1 only, and DP at most
+MAX_DP_FACTOR times the member's median (collapsed repeats). A position with more than one
+record, a multiallelic site split by bcftools norm, is dropped: -m2 -M2 does not remove them.
+With --mask, the roh step's panel sites (its bundle's roh/sites.tsv.gz), a site outside the
+panel's covered segments is dropped: runs of panel sites at most MASK_MAX_GAP apart, from the
+first to the last. The panel leaves out centromeres, heterochromatin, the MHC, the acrocentric
+arms and segmental duplications, where Mendelian errors cluster from mismapped reads and read as
+short UPDs (most of the false calls of two real families). A chromosome the panel does not hold
+(chrX) is not masked. A
+site enters a member's model when the members it uses are all called there and one of them
+carries the ALT; the likelihoods are conditioned on that, so the sites the BCF holds only
+because a relative is variant do not bias them. Autosomes, and chrX outside the PARs for a
+member with two X: karyotype XX from its coverage JSON, or with none, a female pedigree sex and
+an X heterozygosity of at least X_HET_TWO_X_MIN. On X the father is hemizygous (a heterozygous
+call of his counts as missing) and het_pat cannot occur.
+
+Emissions. A parent of genotype g transmits the ALT with probability g/2. Each state gives the
+child's genotype a distribution; an observed genotype is the true one with probability
+1 - GENOTYPE_ERROR, and either other one otherwise. The gnomAD frequency is clamped to
+[AF_MIN, AF_MAX], so that no single site can dominate, and a site absent from gnomAD gets AF_MIN.
+
+Segments. Viterbi per chromosome. Entering or leaving a UPD state, or changing its parent, costs
+SWITCH per site; going between the iso and het states of one parent, as a mixed UPD does at its
+crossovers, costs MIX_SWITCH; going between N and the shared-haplotype states costs
+AUTO_SWITCH. A segment is a run of one UPD state. With LR the likelihood of a
+site under the segment's state over N:
+    lod              sum of log10 LR over the segment's sites: the score
+    n_informative    sites where LR is at least 2-fold either way
+    n_supporting     sites favouring the state at least 2-fold
+    n_contradicting  sites favouring N at least 2-fold, such as a child het inside an isodisomy
+    n_strong         sites favouring the state at least 10-fold, which N explains only as an
+                     error: in a trio the Mendelian errors the state explains, in a duo the
+                     opposite homozygotes with the present parent. A UPD of the present parent
+                     in a duo has few: its evidence is many sites each about 2-fold (a child
+                     identical to its parent where the parent is heterozygous)
+    support_fraction n_supporting / (n_supporting + n_contradicting)
+    depth_ratio      the child's mean DP over the segment's sites, over its mean DP genome-wide
+A solo segment is scored at the child's non-reference SNVs inside it: a hom-alt site has
+probability 1 - SOLO_HET_IN_ROH in a ROH and p / (2 - p) otherwise, a het site SOLO_HET_IN_ROH
+and 2(1 - p) / (2 - p).
+
+Interpretation. A depth ratio at or below DELETION_DEPTH_MAX is a deletion: the child has one
+copy, which looks like an isodisomy of the other parent. Segments of one member, chromosome and
+parent of origin at medium confidence or more, and at most EVENT_GAP_MB apart, make one event:
+iso, het or mixed; whole_chromosome when it spans at least WHOLE_CHROMOSOME_SPAN of the
+chromosome's sites, segmental otherwise; terminal when it reaches either end. A low segment
+makes no event, and only the segments of events are written. Chromosomes 6, 7, 11, 14, 15 and 20 carry the imprinting disorder their parent of
+origin implies. Confidence:
+    high    lod >= HIGH_LOD, at least HIGH_MIN_MB long, depth ratio within DEPTH_NORMAL, and
+            n_strong >= HIGH_STRONG; for a UPD of the present parent in a duo, whose evidence is
+            weak site by site, n_supporting >= HIGH_SUPPORT instead
+    medium  lod >= MEDIUM_LOD, at least MEDIUM_MIN_MB long, and n_strong >= MEDIUM_STRONG (or
+            n_supporting >= MEDIUM_SUPPORT)
+    low     the rest
+    The support fraction is reported, not used: a UPD of the missing parent draws the child's
+    alleles from the population, so a share of the sites favour N by chance.
+    solo: whole_chromosome high, terminal medium, interstitial low; any of them low with a depth
+    outside DEPTH_NORMAL.
+An iso_P or het_P event of a duo is at most low when the member is not isolated, and at most
+what its extent would get in solo mode: short haplotypes shared by the parents make a child
+identical to the parent it has, which a duo cannot tell from a UPD.
+
+Isolation. The member's F_ROH at segments of at least ISOLATION_ROH_MB on the other autosomes,
+over their span, is below ISOLATION_MAX_FROH, and its parents, when the roh step measured them,
+are not related beyond the 4th degree (kinship <= PARENTS_KINSHIP_MAX). The roh step's segments
+are used when there are; a duo without them uses its own iso_P segments. These are the roh
+step's constants for upd_candidate_chrom.
+
+Parentage. A child and a parent are opposite homozygotes (0/0 against 1/1) at more than
+PARENTAGE_MAX_OPPOSITE of the autosomal sites where both are called and one carries the ALT,
+outside the child's UPD segments: about 0.1% for a parent and its child, 8% for unrelated people
+(sampleqc's PO_OPPOSITE_HOM_MAX). It is not that parent's child, or not the sample it is named
+after, which sampleqc's NOT_PARENT reports. That parent is dropped and the child redone.
+
+Cohort. An event is recurrent when events of RECURRENT_MIN_FAMILIES other families or more
+overlap it on the same chromosome, each by at least RECURRENT_OVERLAP of both: a region where the
+calls are artefacts more often than UPD.
+"""
+
+import argparse
+import bisect
+import glob
+import gzip
+import json
+import math
+import os
+import sys
+from array import array
+
+MIN_GQ = 20
+MIN_DP = 10
+MAX_DP_FACTOR = 2.5
+MASK_MAX_GAP = 300000
+AF_MIN = 0.001
+AF_MAX = 0.999
+AF_BINS = 1000
+GENOTYPE_ERROR = 0.002
+SWITCH = 1e-8
+MIX_SWITCH = 1e-4
+AUTO_SWITCH = 1e-4
+EVENT_GAP_MB = 5.0
+SOLO_HET_IN_ROH = 0.02
+SOLO_TERMINAL_MB = 5.0
+SOLO_INTERSTITIAL_MB = 15.0
+TERMINAL_SLACK_MB = 2.0
+ISOLATION_ROH_MB = 1.5
+ISOLATION_MAX_FROH = 0.01
+PARENTS_KINSHIP_MAX = 0.0221
+DELETION_DEPTH_MAX = 0.75
+DEPTH_NORMAL = (0.8, 1.25)
+WHOLE_CHROMOSOME_SPAN = 0.9
+HIGH_LOD = 20.0
+HIGH_STRONG = 20
+HIGH_SUPPORT = 50
+HIGH_MIN_MB = 2.0
+MEDIUM_LOD = 10.0
+MEDIUM_STRONG = 10
+MEDIUM_SUPPORT = 20
+MEDIUM_MIN_MB = 0.5
+PARENTAGE_MAX_OPPOSITE = 0.01
+X_HET_TWO_X_MIN = 0.1
+SEX_TOLERANCE = 0.25
+RECURRENT_MIN_FAMILIES = 3
+RECURRENT_OVERLAP = 0.5
+# GRCh38 pseudoautosomal regions, 1-based inclusive
+PARS = ((10001, 2781479), (155701383, 156030895))
+
+AUTOSOMES = [str(i) for i in range(1, 23)]
+STATES = ["N", "iso_mat", "het_mat", "iso_pat", "het_pat", "auto", "ibd_mat", "ibd_pat"]
+UPD_STATES = (1, 2, 3, 4)
+SHARED_STATES = (5, 6, 7)
+DUO_STATES = 5
+ORIGIN = {"iso_mat": "maternal", "het_mat": "maternal", "iso_pat": "paternal", "het_pat": "paternal"}
+SIBLING = {1: 2, 2: 1, 3: 4, 4: 3}
+MISSING = 3
+LN10 = math.log(10)
+
+IMPRINTING = {
+    "6": {"paternal": "transient neonatal diabetes (6q24)"},
+    "7": {"maternal": "Silver-Russell"},
+    "11": {"maternal": "Silver-Russell (11p15)", "paternal": "Beckwith-Wiedemann (11p15)"},
+    "14": {"maternal": "Temple", "paternal": "Kagami-Ogata"},
+    "15": {"maternal": "Prader-Willi", "paternal": "Angelman"},
+    "20": {"maternal": "Mulchandani-Bhoj-Conlin", "paternal": "pseudohypoparathyroidism 1B"},
+}
+
+SEGMENT_COLUMNS = ["family_id", "sample", "mode", "father", "mother", "chrom", "start", "end", "length_mb",
+                   "state", "origin", "source", "n_sites", "n_informative", "n_supporting", "n_contradicting",
+                   "n_strong", "support_fraction", "lod", "depth_ratio", "roh_fraction", "interpretation",
+                   "confidence", "event_id"]
+EVENT_COLUMNS = ["family_id", "sample", "mode", "event_id", "chrom", "start", "end", "length_mb", "origin",
+                 "composition", "extent", "terminal", "n_segments", "n_supporting", "n_strong", "lod",
+                 "depth_ratio", "interpretation", "imprinting", "confidence", "notes"]
+LOG2 = math.log10(2)
+MEMBER_COLUMNS = ["family_id", "sample", "father", "mother", "mode", "father_used", "mother_used", "chrx",
+                  "n_sites", "error_rate", "status", "n_events", "n_events_high"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------------------------
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fmt(value, digits=4):
+    if value is None:
+        return "."
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return "."
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def as_float(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
+
+
+def write_tsv(path, columns, rows):
+    with open(path, "w") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for row in rows:
+            fh.write("\t".join(fmt(row.get(c)) for c in columns) + "\n")
+
+
+def read_tsv(path):
+    with open(path) as fh:
+        header = fh.readline().rstrip("\n").lstrip("#").split("\t")
+        rows = []
+        for line in fh:
+            line = line.rstrip("\n")
+            if line:
+                rows.append(dict(zip(header, line.split("\t"))))
+    return header, rows
+
+
+def chrom_name(chrom):
+    return chrom[3:] if chrom.startswith("chr") else chrom
+
+
+def in_par(pos):
+    return any(a <= pos <= b for a, b in PARS)
+
+
+# ---------------------------------------------------------------------------------------------
+# Snapshot
+# ---------------------------------------------------------------------------------------------
+
+def read_snapshot(path):
+    """Members in pedigree order: sample -> dict(fid, father, mother, sex, sequenced, coverage).
+    Header lines start with '#'; parents are '0' when unknown, sex 1, 2 or 0."""
+    members = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) != 7:
+                die(f"{path}: snapshot row with {len(cols)} columns instead of 7: {line}")
+            fid, sample, father, mother, sex, sequenced, coverage = cols
+            members[sample] = {"fid": fid, "father": father, "mother": mother,
+                               "sex": {"1": "male", "2": "female"}.get(sex, "unknown"),
+                               "sequenced": sequenced == "yes", "coverage": coverage}
+    if not members:
+        die(f"{path} has no member")
+    return members
+
+
+def read_coverage(directory, sample, tag):
+    if not directory or tag in ("-", ""):
+        return None
+    path = os.path.join(directory, f"{sample}.{tag}.json")
+    if not os.path.exists(path):
+        die(f"{sample} has coverage {tag} in the snapshot, and no {path}")
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def karyotype(coverage):
+    """cnv_coverage's coverage sex, from its chrX and chrY ratios; None without them."""
+    if coverage is None or coverage.get("chrX_ratio") is None or coverage.get("chrY_ratio") is None:
+        return None
+    x, y = 2 * coverage["chrX_ratio"], 2 * coverage["chrY_ratio"]
+    nx, ny = int(round(x)), int(round(y))
+    if abs(x - nx) > SEX_TOLERANCE or abs(y - ny) > SEX_TOLERANCE or nx == 0:
+        return "ambiguous"
+    return "X0" if (nx, ny) == (1, 0) else "X" * nx + "Y" * ny
+
+
+# ---------------------------------------------------------------------------------------------
+# Sites
+# ---------------------------------------------------------------------------------------------
+
+class Chrom:
+    """The sites of one chromosome: positions, gnomAD frequency bins, and per sample a dosage
+    (0, 1, 2 or MISSING) and a depth."""
+
+    def __init__(self, name, n_samples):
+        self.name = name
+        self.pos = array("l")
+        self.af = array("H")
+        self.g = [bytearray() for _ in range(n_samples)]
+        self.dp = [array("H") for _ in range(n_samples)]
+
+    def __len__(self):
+        return len(self.pos)
+
+
+def af_bin(text):
+    p = as_float(text)
+    if p is None:
+        p = AF_MIN
+    p = min(max(p, AF_MIN), AF_MAX)
+    return int(round(p * AF_BINS))
+
+
+def parse_genotype(gt, gq, dp):
+    """(dosage, depth); dosage MISSING unless both alleles are 0 or 1 at GQ and DP high enough."""
+    depth = as_float(dp)
+    depth = 0 if depth is None else min(int(depth), 65535)
+    quality = as_float(gq)
+    if quality is None or quality < MIN_GQ or depth < MIN_DP or len(gt) != 3 or gt[1] not in "/|":
+        return MISSING, depth
+    a, b = gt[0], gt[2]
+    if a not in "01" or b not in "01":
+        return MISSING, depth
+    return (a == "1") + (b == "1"), depth
+
+
+def read_mask(path):
+    """chromosome -> sorted (starts, ends) of the panel's covered segments: runs of its sites at
+    most MASK_MAX_GAP apart."""
+    covered = {}
+    with gzip.open(path, "rt") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        if header[:2] != ["chrom", "pos"]:
+            die(f"{path} does not start with the columns chrom, pos")
+        last = {}
+        for line in fh:
+            chrom, pos = line.split("\t", 2)[:2]
+            chrom, pos = chrom_name(chrom), int(pos)
+            starts, ends = covered.setdefault(chrom, (array("l"), array("l")))
+            if chrom in last and pos - last[chrom] <= MASK_MAX_GAP:
+                ends[-1] = pos
+            else:
+                starts.append(pos)
+                ends.append(pos)
+            last[chrom] = pos
+    return covered
+
+
+def masked(mask, chrom, pos):
+    """Whether a site falls outside the mask's covered segments, on a chromosome it holds."""
+    if mask is None or chrom not in mask:
+        return False
+    starts, ends = mask[chrom]
+    i = bisect.bisect_right(starts, pos) - 1
+    return i < 0 or pos > ends[i]
+
+
+def read_sites(stream, n_samples, mask=None):
+    """chromosome name -> Chrom, for chr1-22 and X. Every record of a position held more than
+    once is dropped, and with a mask every site outside it."""
+    chroms = {}
+    wanted = set(AUTOSOMES) | {"X"}
+    previous, duplicated = None, False
+
+    def keep(record):
+        name, pos, af, genotypes = record
+        chrom = chroms.get(name)
+        if chrom is None:
+            chrom = chroms[name] = Chrom(name, n_samples)
+        chrom.pos.append(pos)
+        chrom.af.append(af)
+        for i, (d, depth) in enumerate(genotypes):
+            chrom.g[i].append(d)
+            chrom.dp[i].append(depth)
+
+    expected = 3 + 3 * n_samples
+    for line in stream:
+        fields = line.rstrip("\n").rstrip("\t").split("\t")
+        if len(fields) != expected:
+            die(f"a bcftools query line has {len(fields)} fields, not 3 and 3 for each of {n_samples} samples")
+        name = chrom_name(fields[0])
+        if name not in wanted:
+            continue
+        pos = int(fields[1])
+        if masked(mask, name, pos):
+            continue
+        if previous is not None and previous[0] == name and previous[1] == pos:
+            duplicated = True
+            continue
+        if previous is not None and not duplicated:
+            keep(previous)
+        genotypes = [parse_genotype(fields[3 + 3 * i], fields[4 + 3 * i], fields[5 + 3 * i])
+                     for i in range(n_samples)]
+        previous, duplicated = (name, pos, af_bin(fields[2]), genotypes), False
+    if previous is not None and not duplicated:
+        keep(previous)
+    return chroms
+
+
+def median_depths(chroms, n_samples):
+    """Each sample's median depth over its called autosomal sites, from a histogram."""
+    medians = []
+    for i in range(n_samples):
+        hist = {}
+        for name in AUTOSOMES:
+            chrom = chroms.get(name)
+            if chrom is None:
+                continue
+            g, dp = chrom.g[i], chrom.dp[i]
+            for j in range(len(chrom)):
+                if g[j] != MISSING:
+                    hist[dp[j]] = hist.get(dp[j], 0) + 1
+        total = sum(hist.values())
+        median, seen = None, 0
+        for depth in sorted(hist):
+            seen += hist[depth]
+            if 2 * seen >= total:
+                median = depth
+                break
+        medians.append(median)
+    return medians
+
+
+# ---------------------------------------------------------------------------------------------
+# Emissions
+# ---------------------------------------------------------------------------------------------
+
+def observe(true):
+    """Observed genotype distribution from the true one, with the genotyping error."""
+    return [(1 - GENOTYPE_ERROR) * t + GENOTYPE_ERROR * (1 - t) / 2 for t in true]
+
+
+def child_given(transmit_a, transmit_b):
+    """Distribution of the child's dosage from two independent transmitted alleles."""
+    return [(1 - transmit_a) * (1 - transmit_b),
+            transmit_a * (1 - transmit_b) + (1 - transmit_a) * transmit_b,
+            transmit_a * transmit_b]
+
+
+def iso(transmit):
+    return [1 - transmit, 0.0, transmit]
+
+
+def exact(g):
+    return [1.0 if c == g else 0.0 for c in range(3)]
+
+
+def shared_other(g, transmit_other):
+    """The haplotype the child got from one parent is the other parent's untransmitted one: the
+    child's genotype is the other parent's g, the first parent carrying that haplotype's allele."""
+    if (g == 0 and transmit_other == 1) or (g == 2 and transmit_other == 0):
+        return [0.0, 0.0, 0.0]
+    return exact(g)
+
+
+def autozygous(transmit_a, transmit_b):
+    """Two copies of a haplotype both parents carry: its allele is one both can transmit."""
+    ref, alt = (1 - transmit_a) * (1 - transmit_b), transmit_a * transmit_b
+    if ref + alt == 0:
+        return [0.0, 0.0, 0.0]
+    return [ref / (ref + alt), 0.0, alt / (ref + alt)]
+
+
+def conditioned(dist, c, condition):
+    """log P(child = c), conditioned on the child carrying the ALT when the parents in the model
+    do not (the site is only in the model then)."""
+    p = dist[c]
+    if condition:
+        p = p / (1 - dist[0])
+    return math.log(p) if p > 0 else float("-inf")
+
+
+def trio_table(on_x):
+    """code (9 father + 3 mother + child) -> log emission per state, the eight of STATES; None when
+    the site is not used."""
+    table = [None] * 27
+    for f in range(3):
+        for m in range(3):
+            for c in range(3):
+                if f == m == c == 0:
+                    continue
+                if on_x and f == 1:
+                    continue
+                tf, tm = f / 2, m / 2
+                dists = [child_given(tf, tm), iso(tm), exact(m), iso(tf), exact(f), autozygous(tf, tm),
+                         shared_other(m, tf), shared_other(f, tm)]
+                row = []
+                for k, dist in enumerate(dists):
+                    # The father has one X: no two homologs of his, and none he did not transmit
+                    if on_x and STATES[k] in ("het_pat", "ibd_pat"):
+                        row.append(float("-inf"))
+                        continue
+                    row.append(conditioned(observe(dist), c, f == 0 and m == 0))
+                table[9 * f + 3 * m + c] = tuple(row)
+    return table
+
+
+def duo_table(parent_is_father, on_x):
+    """code (af bin, 3 parent + child) -> log emission per state, the first five of STATES: none
+    of the shared-haplotype states, which a duo cannot tell from iso_P and het_P."""
+    table = [None] * ((AF_BINS + 1) * 9)
+    for b in range(1, AF_BINS):
+        p = b / AF_BINS
+        for g in range(3):
+            if on_x and parent_is_father and g == 1:
+                continue
+            t = g / 2
+            # P: the present parent, Q: the missing one
+            n, iso_p, het_p, iso_q, het_q = child_given(t, p), iso(t), exact(g), iso(p), child_given(p, p)
+            present, missing = (iso_p, het_p), (iso_q, het_q)
+            mat, pat = (missing, present) if parent_is_father else (present, missing)
+            dists = [n, mat[0], mat[1], pat[0], pat[1]]
+            for c in range(3):
+                if g == c == 0:
+                    continue
+                row = []
+                for k, dist in enumerate(dists):
+                    if on_x and STATES[k] == "het_pat":
+                        row.append(float("-inf"))
+                        continue
+                    row.append(conditioned(observe(dist), c, g == 0))
+                table[9 * b + 3 * g + c] = tuple(row)
+    return table
+
+
+def solo_table():
+    """(af bin, child dosage) -> log10 LR of ROH over Hardy-Weinberg, at a non-reference site."""
+    table = {}
+    for b in range(1, AF_BINS):
+        p = b / AF_BINS
+        table[(b, 2)] = math.log10((1 - SOLO_HET_IN_ROH) * (2 - p) / p)
+        table[(b, 1)] = math.log10(SOLO_HET_IN_ROH * (2 - p) / (2 * (1 - p)))
+    return table
+
+
+# ---------------------------------------------------------------------------------------------
+# HMM
+# ---------------------------------------------------------------------------------------------
+
+def transitions(k):
+    """Log transition matrix of the first k states of STATES."""
+    t = [[math.log(SWITCH)] * k for _ in range(k)]
+    for j in UPD_STATES:
+        t[j][SIBLING[j]] = math.log(MIX_SWITCH)
+    normal = [0] + [s for s in SHARED_STATES if s < k]
+    for a in normal:
+        for b in normal:
+            if a != b:
+                t[a][b] = math.log(AUTO_SWITCH)
+    for j in range(k):
+        t[j][j] = math.log(1 - sum(math.exp(x) for i, x in enumerate(t[j]) if i != j))
+    return t
+
+
+TRANSITIONS = {k: transitions(k) for k in (DUO_STATES, len(STATES))}
+
+
+def viterbi(codes, table):
+    """The most likely state at each site. Every transition is at least SWITCH, so a state's best
+    predecessor is the best state overall at SWITCH, or one of the few its transitions favour."""
+    n = len(codes)
+    if n == 0:
+        return []
+    k = len(table[codes[0]])
+    t = TRANSITIONS[k]
+    floor = math.log(SWITCH)
+    favoured = [[(j, t[j][s]) for j in range(k) if t[j][s] > floor] for s in range(k)]
+    start = [floor] * k
+    start[0] = 0.0
+    for s in SHARED_STATES:
+        if s < k:
+            start[s] = math.log(AUTO_SWITCH)
+    e = table[codes[0]]
+    v = [start[s] + e[s] for s in range(k)]
+    back = bytearray(n * k)
+    states = range(k)
+    for i in range(1, n):
+        e = table[codes[i]]
+        top, top_arg = v[0], 0
+        for j in states:
+            if v[j] > top:
+                top, top_arg = v[j], j
+        top += floor
+        nv = [0.0] * k
+        base = i * k
+        for s in states:
+            best, arg = top, top_arg
+            for j, x in favoured[s]:
+                x += v[j]
+                if x > best:
+                    best, arg = x, j
+            nv[s] = best + e[s]
+            back[base + s] = arg
+        v = nv
+    s = max(range(k), key=lambda j: v[j])
+    path = bytearray(n)
+    for i in range(n - 1, -1, -1):
+        path[i] = s
+        s = back[i * k + s]
+    return path
+
+
+# ---------------------------------------------------------------------------------------------
+# family
+# ---------------------------------------------------------------------------------------------
+
+class Member:
+    def __init__(self, sample, index, info):
+        self.sample, self.index, self.info = sample, index, info
+        self.father, self.mother = None, None
+        self.mode, self.status, self.chrx = "solo", "analysed", "no"
+        self.n_sites, self.errors = 0, 0
+        self.segments = []
+
+
+def depth_mean(chroms, i, cap):
+    total, n = 0, 0
+    for name in AUTOSOMES:
+        chrom = chroms.get(name)
+        if chrom is None:
+            continue
+        g, dp = chrom.g[i], chrom.dp[i]
+        for j in range(len(chrom)):
+            if g[j] != MISSING and dp[j] <= cap:
+                total += dp[j]
+                n += 1
+    return total / n if n else None
+
+
+def x_het_rate(chrom, i):
+    if chrom is None:
+        return None
+    het = hom = 0
+    for j in range(len(chrom)):
+        if in_par(chrom.pos[j]):
+            continue
+        d = chrom.g[i][j]
+        het += d == 1
+        hom += d == 2
+    return het / (het + hom) if het + hom else None
+
+
+def model_sites(chrom, member, used, caps):
+    """Indices and codes of the sites a member's model uses on a chromosome."""
+    child, cc = member.index, caps[member.index]
+    gc, dc = chrom.g[child], chrom.dp[child]
+    on_x = chrom.name == "X"
+    idx, codes = array("l"), array("H")
+    if len(used) == 2:
+        (fi, fc), (mi, mc) = used
+        gf, df, gm, dm = chrom.g[fi], chrom.dp[fi], chrom.g[mi], chrom.dp[mi]
+        for j in range(len(chrom)):
+            c, f, m = gc[j], gf[j], gm[j]
+            if c == MISSING or f == MISSING or m == MISSING or dc[j] > cc or df[j] > fc or dm[j] > mc:
+                continue
+            if c + f + m == 0 or (on_x and (f == 1 or in_par(chrom.pos[j]))):
+                continue
+            idx.append(j)
+            codes.append(9 * f + 3 * m + c)
+    else:
+        ((pi, pc),) = used
+        gp, dpp, af = chrom.g[pi], chrom.dp[pi], chrom.af
+        father_present = member.father is not None
+        for j in range(len(chrom)):
+            c, g = gc[j], gp[j]
+            if c == MISSING or g == MISSING or dc[j] > cc or dpp[j] > pc or c + g == 0:
+                continue
+            if on_x and ((father_present and g == 1) or in_par(chrom.pos[j])):
+                continue
+            idx.append(j)
+            codes.append(9 * af[j] + 3 * g + c)
+    return idx, codes
+
+
+def runs(path):
+    """(state, first, last) of each run of a UPD state in a Viterbi path."""
+    out, i, n = [], 0, len(path)
+    while i < n:
+        s = path[i]
+        j = i
+        while j + 1 < n and path[j + 1] == s:
+            j += 1
+        if s in UPD_STATES:
+            out.append((s, i, j))
+        i = j + 1
+    return out
+
+
+def score_run(chrom, member, idx, codes, table, state, a, b, mean_depth):
+    lod = 0.0
+    informative = supporting = contradicting = strong = 0
+    depth_total = 0
+    dp = chrom.dp[member.index]
+    for i in range(a, b + 1):
+        row = table[codes[i]]
+        lr = (row[state] - row[0]) / LN10
+        lod += lr
+        if lr >= LOG2:
+            supporting += 1
+            strong += lr >= 1
+        elif lr <= -LOG2:
+            contradicting += 1
+        depth_total += dp[idx[i]]
+    informative = supporting + contradicting
+    n = b - a + 1
+    name = STATES[state]
+    start, end = chrom.pos[idx[a]], chrom.pos[idx[b]]
+    # A UPD of the parent a duo has: its evidence is many sites, each weak
+    weak = member.mode == "duo" and (ORIGIN[name] == "paternal") == (member.father is not None)
+    return {"weak": weak, "chrom": chrom.name, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6,
+            "state": name.split("_")[0], "origin": ORIGIN[name], "source": "hmm", "n_sites": n,
+            "n_informative": informative, "n_supporting": supporting, "n_contradicting": contradicting,
+            "n_strong": strong,
+            "support_fraction": supporting / (supporting + contradicting) if supporting + contradicting else None,
+            "lod": lod, "depth_ratio": (depth_total / n) / mean_depth if mean_depth else None}
+
+
+def hmm_member(chroms, member, used, caps, mean_depth, tables):
+    """Viterbi segments of one member, over the chromosomes its model covers."""
+    member.segments, member.n_sites, member.errors = [], 0, 0
+    names = AUTOSOMES + (["X"] if member.chrx == "yes" else [])
+    for name in names:
+        chrom = chroms.get(name)
+        if chrom is None:
+            continue
+        table = tables(name == "X")
+        idx, codes = model_sites(chrom, member, used, caps)
+        path = viterbi(codes, table)
+        member.n_sites += len(codes)
+        for s, a, b in runs(path):
+            member.segments.append(score_run(chrom, member, idx, codes, table, s, a, b, mean_depth))
+        # Sites the normal state cannot explain, outside the segments: the genotyping error
+        for i, code in enumerate(codes):
+            if path[i] == 0 and table[code][0] < math.log(10 * GENOTYPE_ERROR):
+                member.errors += 1
+
+
+def classify(segment):
+    """(interpretation, confidence) of an HMM segment. A deletion is graded on its evidence as a
+    UPD is, its depth keeping it below high."""
+    kind = "isodisomy" if segment["state"] == "iso" else "heterodisomy"
+    if segment["depth_ratio"] is not None and segment["depth_ratio"] <= DELETION_DEPTH_MAX:
+        kind = "deletion"
+    lod, length = segment["lod"], segment["length_mb"]
+    depth_ok = segment["depth_ratio"] is None or DEPTH_NORMAL[0] <= segment["depth_ratio"] <= DEPTH_NORMAL[1]
+    if segment["weak"]:
+        high, medium = segment["n_supporting"] >= HIGH_SUPPORT, segment["n_supporting"] >= MEDIUM_SUPPORT
+    else:
+        high, medium = segment["n_strong"] >= HIGH_STRONG, segment["n_strong"] >= MEDIUM_STRONG
+    if lod >= HIGH_LOD and length >= HIGH_MIN_MB and depth_ok and high:
+        return kind, "high"
+    if lod >= MEDIUM_LOD and length >= MEDIUM_MIN_MB and medium:
+        return kind, "medium"
+    return kind, "low"
+
+
+RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def chrom_spans(chroms):
+    return {name: (c.pos[0], c.pos[-1]) for name, c in chroms.items() if len(c)}
+
+
+def rest_froh(segments, chrom, spans):
+    """F_ROH at segments of ISOLATION_ROH_MB or more on the autosomes other than chrom."""
+    span = sum(e - s + 1 for n, (s, e) in spans.items() if n in AUTOSOMES and n != chrom)
+    if not span:
+        return None
+    roh = sum(e - s + 1 for n, s, e in segments if n != chrom and n in AUTOSOMES and
+              (e - s + 1) >= ISOLATION_ROH_MB * 1e6)
+    return roh / span
+
+
+def read_roh(roh_path, froh_path):
+    """sample -> (segments [(chrom, start, end, n_sites, quality)], froh row)."""
+    if not roh_path or not froh_path:
+        return None
+    segs = {}
+    for row in read_tsv(roh_path)[1]:
+        segs.setdefault(row["IID"], []).append(
+            (chrom_name(row["chrom"]), int(row["start"]), int(row["end"]), row.get("n_sites"), row.get("quality")))
+    froh = {row["IID"]: row for row in read_tsv(froh_path)[1]}
+    return {s: (segs.get(s, []), froh[s]) for s in froh}
+
+
+def overlap(a0, a1, b0, b1):
+    return max(0, min(a1, b1) - max(a0, b0) + 1)
+
+
+def roh_fraction(segment, roh_segments):
+    if roh_segments is None:
+        return None
+    length = segment["end"] - segment["start"] + 1
+    covered = sum(overlap(segment["start"], segment["end"], s, e) for n, s, e, _, _ in roh_segments
+                  if n == segment["chrom"])
+    return covered / length
+
+
+def solo_member(chroms, member, roh, spans, mean_depth, cap, solo):
+    """Candidate isodisomies of a member with no parent in the BCF, from its ROH segments."""
+    member.segments = []
+    segs, froh = roh
+    simple = [(n, s, e) for n, s, e, _, _ in segs]
+    candidate_chrom = chrom_name(froh.get("upd_candidate_chrom", "."))
+    kinship = as_float(froh.get("parents_kinship"))
+    if kinship is not None and kinship > PARENTS_KINSHIP_MAX:
+        member.status = "not_isolated: parents' kinship {}".format(fmt(kinship))
+        return
+    slack = TERMINAL_SLACK_MB * 1e6
+    for name, start, end, _, quality in segs:
+        if name not in AUTOSOMES or name not in spans:
+            continue
+        length_mb = (end - start + 1) / 1e6
+        first, last = spans[name]
+        terminal = start <= first + slack or end >= last - slack
+        if name == candidate_chrom:
+            extent = "whole_chromosome"
+        elif terminal and length_mb >= SOLO_TERMINAL_MB:
+            extent = "terminal"
+        elif length_mb >= SOLO_INTERSTITIAL_MB:
+            extent = "interstitial"
+        else:
+            continue
+        rest = rest_froh(simple, name, spans)
+        if extent != "whole_chromosome" and (rest is None or rest >= ISOLATION_MAX_FROH):
+            continue
+        chrom = chroms[name]
+        g, dp, af = chrom.g[member.index], chrom.dp[member.index], chrom.af
+        lod, supporting, contradicting, strong, depth_total, n = 0.0, 0, 0, 0, 0, 0
+        for j in range(bisect.bisect_left(chrom.pos, start), bisect.bisect_right(chrom.pos, end)):
+            d = g[j]
+            if d == MISSING or d == 0 or dp[j] > cap:
+                continue
+            lr = solo[(af[j], d)]
+            lod += lr
+            if lr >= LOG2:
+                supporting += 1
+                strong += lr >= 1
+            elif lr <= -LOG2:
+                contradicting += 1
+            depth_total += dp[j]
+            n += 1
+        segment = {"chrom": name, "start": start, "end": end, "length_mb": length_mb, "state": "iso",
+                   "origin": "unknown", "source": "roh", "n_sites": n, "n_informative": supporting + contradicting,
+                   "n_supporting": supporting, "n_contradicting": contradicting, "n_strong": strong,
+                   "support_fraction": supporting / (supporting + contradicting) if supporting + contradicting
+                   else None, "lod": lod,
+                   "depth_ratio": (depth_total / n) / mean_depth if n and mean_depth else None,
+                   "roh_fraction": 1.0, "extent": extent, "rest_froh": rest, "roh_quality": quality}
+        member.segments.append(segment)
+
+
+def solo_confidence(segment):
+    if segment["depth_ratio"] is not None and segment["depth_ratio"] <= DELETION_DEPTH_MAX:
+        return "deletion", "low"
+    depth_ok = segment["depth_ratio"] is None or DEPTH_NORMAL[0] <= segment["depth_ratio"] <= DEPTH_NORMAL[1]
+    level = {"whole_chromosome": "high", "terminal": "medium", "interstitial": "low"}[segment["extent"]]
+    return "isodisomy", level if depth_ok else "low"
+
+
+def opposite_rate(chroms, child, parent, caps, segments):
+    """Opposite homozygotes of a child and a parent over the autosomal sites both are called at
+    and one of them carries the ALT, outside the child's segments."""
+    skip = {}
+    for s in segments:
+        skip.setdefault(s["chrom"], []).append((s["start"], s["end"]))
+    n = opposite = 0
+    for name in AUTOSOMES:
+        chrom = chroms.get(name)
+        if chrom is None:
+            continue
+        gc, dc, gp, dpp = chrom.g[child], chrom.dp[child], chrom.g[parent], chrom.dp[parent]
+        spans = skip.get(name, [])
+        for j in range(len(chrom)):
+            c, g = gc[j], gp[j]
+            if c == MISSING or g == MISSING or c + g == 0 or dc[j] > caps[child] or dpp[j] > caps[parent]:
+                continue
+            if spans and any(a <= chrom.pos[j] <= b for a, b in spans):
+                continue
+            n += 1
+            opposite += abs(c - g) == 2
+    return opposite / n if n else None
+
+
+def parentage_failures(chroms, member, index, caps):
+    """(parent role, its opposite homozygote rate) of the first parent the child is not the
+    child of, or None."""
+    for role in ("father", "mother"):
+        parent = getattr(member, role)
+        if parent is None:
+            continue
+        rate = opposite_rate(chroms, member.index, index[parent], caps, member.segments)
+        if rate is not None and rate > PARENTAGE_MAX_OPPOSITE:
+            return role, rate
+    return None
+
+
+def event_groups(member):
+    """(chrom, origin, segments) of each event of a member: its segments of one chromosome and
+    origin, at most EVENT_GAP_MB apart. An HMM segment below medium makes no event; every solo
+    segment is a candidate already."""
+    groups = {}
+    for s in member.segments:
+        if s["source"] == "hmm" and RANK[s["confidence"]] < RANK["medium"]:
+            continue
+        groups.setdefault((s["chrom"], s["origin"]), []).append(s)
+    order = {n: i for i, n in enumerate(AUTOSOMES + ["X"])}
+    out = []
+    for (chrom, origin), segs in sorted(groups.items(), key=lambda kv: (order[kv[0][0]], kv[0][1])):
+        segs.sort(key=lambda s: s["start"])
+        chain = [segs[0]]
+        for s in segs[1:]:
+            if s["start"] - max(c["end"] for c in chain) <= EVENT_GAP_MB * 1e6:
+                chain.append(s)
+            else:
+                out.append((chrom, origin, chain))
+                chain = [s]
+        out.append((chrom, origin, chain))
+    return out
+
+
+def collapse(fid, member, spans, isolation):
+    """Events of one member, from event_groups."""
+    events = []
+    for s in member.segments:
+        s["event_id"] = None
+    for chrom, origin, segs in event_groups(member):
+        event_id = f"{member.sample}:{chrom}:{origin}:{segs[0]['start']}"
+        for s in segs:
+            s["event_id"] = event_id
+        start, end = segs[0]["start"], max(s["end"] for s in segs)
+        first, last = spans[chrom]
+        slack = TERMINAL_SLACK_MB * 1e6
+        states = {s["state"] for s in segs}
+        sites = sum(s["n_sites"] for s in segs)
+        depth = sum(s["depth_ratio"] * s["n_sites"] for s in segs if s["depth_ratio"] is not None)
+        interpretations = {s["interpretation"] for s in segs}
+        confidence = max((s["confidence"] for s in segs), key=RANK.get)
+        notes = []
+        if member.mode == "solo":
+            extents = {s["extent"] for s in segs}
+            extent = "whole_chromosome" if "whole_chromosome" in extents else "segmental"
+            notes.append("from ROH ({}); rest F_ROH {}".format(
+                ", ".join(sorted(extents)), fmt(min(s["rest_froh"] for s in segs) if
+                                                 all(s["rest_froh"] is not None for s in segs) else None)))
+        else:
+            extent = "whole_chromosome" if (end - start + 1) >= WHOLE_CHROMOSOME_SPAN * (last - first + 1) \
+                else "segmental"
+            present = member.father if origin == "paternal" else member.mother
+            if member.mode == "duo" and present is not None:
+                rest = isolation(chrom)
+                if rest is None or rest >= ISOLATION_MAX_FROH:
+                    confidence = "low"
+                    notes.append("UPD of the parent in the duo, not isolated (rest F_ROH {}): "
+                                 "autozygosity or related parents look the same".format(fmt(rest)))
+                else:
+                    terminal = start <= first + slack or end >= last - slack
+                    length_mb = (end - start + 1) / 1e6
+                    cap = "high" if extent == "whole_chromosome" else \
+                        "medium" if terminal and length_mb >= SOLO_TERMINAL_MB else "low"
+                    if RANK[cap] < RANK[confidence]:
+                        confidence = cap
+                        notes.append("UPD of the parent in the duo: a ROH, or a haplotype the parents share, "
+                                     "looks the same; held to the solo extents ({})".format(
+                                         "terminal" if terminal else "interstitial"))
+        if interpretations == {"deletion"}:
+            interpretation = "deletion"
+        else:
+            interpretation = "UPD"
+        disorders = IMPRINTING.get(chrom, {})
+        if origin == "unknown":
+            imprinting = "; ".join(f"{d} if {o}" for o, d in sorted(disorders.items()))
+        else:
+            imprinting = disorders.get(origin)
+        events.append({
+            "family_id": fid, "sample": member.sample, "mode": member.mode, "event_id": event_id,
+            "chrom": chrom, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6, "origin": origin,
+            "composition": "mixed" if len(states) > 1 else states.pop(), "extent": extent,
+            "terminal": start <= first + slack or end >= last - slack, "n_segments": len(segs),
+            "n_supporting": sum(s["n_supporting"] for s in segs), "n_strong": sum(s["n_strong"] for s in segs),
+            "lod": sum(s["lod"] for s in segs),
+            "depth_ratio": depth / sites if sites else None, "interpretation": interpretation,
+            "imprinting": imprinting or None, "confidence": confidence, "notes": "; ".join(notes) or None})
+    return events
+
+
+def cmd_family(args):
+    members = read_snapshot(args.snapshot)
+    fids = {m["fid"] for m in members.values()}
+    if len(fids) != 1:
+        die(f"{args.snapshot} holds the families {', '.join(sorted(fids))}, not one")
+    fid = fids.pop()
+    order = [s for s in args.samples.split(",") if s]
+    index = {s: i for i, s in enumerate(order)}
+    for s in order:
+        if s not in members:
+            die(f"the BCF has the sample {s}, which is not a member of {fid} in the snapshot")
+    roh = read_roh(args.roh, args.froh)
+
+    chroms = read_sites(sys.stdin, len(order), read_mask(args.mask) if args.mask else None)
+    spans = chrom_spans(chroms)
+    medians = median_depths(chroms, len(order))
+    caps = [MAX_DP_FACTOR * m if m else 65535 for m in medians]
+    trio_tables = {False: trio_table(False), True: trio_table(True)}
+    duo_tables = {}
+    solo = solo_table()
+
+    rows_members, rows_segments, rows_events = [], [], []
+    for sample, info in members.items():
+        if not info["sequenced"]:
+            continue
+        member = Member(sample, index.get(sample), info)
+        row = {"family_id": fid, "sample": sample, "father": info["father"], "mother": info["mother"]}
+        if member.index is None:
+            member.status = "not_in_bcf"
+            rows_members.append(dict(row, mode=".", status=member.status, n_events=0, n_events_high=0))
+            continue
+        i = member.index
+        mean_depth = depth_mean(chroms, i, caps[i])
+        if mean_depth is None:
+            member.status = "no_sites"
+            rows_members.append(dict(row, mode=".", status=member.status, n_events=0, n_events_high=0))
+            continue
+
+        k = karyotype(read_coverage(args.coverage_dir, sample, info["coverage"]))
+        if k is not None:
+            member.chrx = "yes" if k == "XX" else "no"
+        else:
+            rate = x_het_rate(chroms.get("X"), i)
+            member.chrx = "yes" if info["sex"] == "female" and rate is not None and rate >= X_HET_TWO_X_MIN \
+                else "no"
+
+        member.father = info["father"] if info["father"] in index else None
+        member.mother = info["mother"] if info["mother"] in index else None
+        excluded = []
+        roh_member = roh.get(sample) if roh is not None else None
+        while member.father is not None or member.mother is not None:
+            used = [(index[p], caps[index[p]]) for p in (member.father, member.mother) if p is not None]
+            if len(used) == 2:
+                member.mode = "trio"
+                hmm_member(chroms, member, used, caps, mean_depth, lambda x: trio_tables[x])
+            else:
+                member.mode = "duo"
+                key = member.father is not None
+
+                def tables(x, key=key):
+                    if (key, x) not in duo_tables:
+                        duo_tables[(key, x)] = duo_table(key, x)
+                    return duo_tables[(key, x)]
+                hmm_member(chroms, member, used, caps, mean_depth, tables)
+            for s in member.segments:
+                s["interpretation"], s["confidence"] = classify(s)
+                s["roh_fraction"] = roh_fraction(s, roh_member[0] if roh_member else None)
+            failed = parentage_failures(chroms, member, index, caps)
+            if failed is None:
+                break
+            role, rate = failed
+            excluded.append("{} {} (opposite homozygotes {})".format(role, getattr(member, role), fmt(rate)))
+            setattr(member, role, None)
+            member.segments = []
+        if excluded:
+            member.status = "parentage: " + ", ".join(excluded) + " excluded"
+
+        if member.father is None and member.mother is None:
+            member.mode = "solo"
+            if roh_member is None:
+                member.status = (member.status + "; " if member.status != "analysed" else "") + \
+                    ("no_roh_tables" if roh is None else "not_in_roh_tables")
+            else:
+                solo_member(chroms, member, roh_member, spans, mean_depth, caps[i], solo)
+                for s in member.segments:
+                    s["interpretation"], s["confidence"] = solo_confidence(s)
+
+        def isolation(chrom, member=member, roh_member=roh_member):
+            if roh_member is not None:
+                kinship = as_float(roh_member[1].get("parents_kinship"))
+                if kinship is not None and kinship > PARENTS_KINSHIP_MAX:
+                    return None
+                return rest_froh([(n, s, e) for n, s, e, _, _ in roh_member[0]], chrom, spans)
+            present = "paternal" if member.father is not None else "maternal"
+            own = [(s["chrom"], s["start"], s["end"]) for s in member.segments
+                   if s["state"] == "iso" and s["origin"] == present]
+            return rest_froh(own, chrom, spans)
+
+        events = collapse(fid, member, spans, isolation)
+        for s in member.segments:
+            if s["event_id"] is None:
+                continue
+            rows_segments.append(dict(s, family_id=fid, sample=sample, mode=member.mode,
+                                      father=member.father, mother=member.mother))
+        rows_events += events
+        rows_members.append(dict(row, mode=member.mode, father_used=member.father or ".",
+                                 mother_used=member.mother or ".", chrx=member.chrx,
+                                 n_sites=member.n_sites if member.mode != "solo" else None,
+                                 error_rate=member.errors / member.n_sites if member.n_sites else None,
+                                 status=member.status, n_events=len(events),
+                                 n_events_high=sum(e["confidence"] == "high" for e in events)))
+
+    write_tsv(f"{args.out_prefix}.segments.tsv", SEGMENT_COLUMNS, rows_segments)
+    write_tsv(f"{args.out_prefix}.events.tsv", EVENT_COLUMNS, rows_events)
+    write_tsv(f"{args.out_prefix}.members.tsv", MEMBER_COLUMNS, rows_members)
+    high = [e for e in rows_events if e["confidence"] == "high"]
+    print(f"{fid}: {len(rows_members)} members, {len(rows_events)} events, {len(high)} high"
+          + "".join(f"\n  {e['sample']} {e['chrom']} {e['origin']} {e['composition']} {e['extent']} "
+                    f"{fmt(e['length_mb'], 1)} Mb lod {fmt(e['lod'], 1)}" for e in high), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------------------------
+# cohort
+# ---------------------------------------------------------------------------------------------
+
+def read_family_tables(directory, label, kind):
+    header, rows = None, []
+    for path in sorted(glob.glob(os.path.join(directory, f"*.{label}.{kind}.tsv"))):
+        h, r = read_tsv(path)
+        header = header or h
+        rows += r
+    return rows
+
+
+def cmd_cohort(args):
+    members = read_snapshot(args.snapshot)
+    expected = {m["fid"] for m in members.values()}
+    segments = read_family_tables(args.family_dir, args.label, "segments")
+    events = read_family_tables(args.family_dir, args.label, "events")
+    tabled = read_family_tables(args.family_dir, args.label, "members")
+    found = {r["family_id"] for r in tabled}
+    sequenced = {m["fid"] for m in members.values() if m["sequenced"]}
+    if found != sequenced:
+        absent = sorted(sequenced - found) or sorted(found - expected)
+        die("the family tables are not those of the cohort's families: {}".format(", ".join(absent[:20])))
+
+    by_chrom = {}
+    for e in events:
+        by_chrom.setdefault(e["chrom"], []).append(e)
+    for e in events:
+        s0, s1 = int(e["start"]), int(e["end"])
+        others = set()
+        for o in by_chrom[e["chrom"]]:
+            if o["family_id"] == e["family_id"]:
+                continue
+            o0, o1 = int(o["start"]), int(o["end"])
+            ov = overlap(s0, s1, o0, o1)
+            if ov >= RECURRENT_OVERLAP * (s1 - s0 + 1) and ov >= RECURRENT_OVERLAP * (o1 - o0 + 1):
+                others.add(o["family_id"])
+        e["recurrent_families"] = len(others)
+        e["recurrent"] = "yes" if len(others) >= RECURRENT_MIN_FAMILIES else "no"
+
+    write_tsv(f"{args.out_prefix}.segments.tsv", SEGMENT_COLUMNS, segments)
+    write_tsv(f"{args.out_prefix}.events.tsv", EVENT_COLUMNS + ["recurrent_families", "recurrent"], events)
+    write_tsv(f"{args.out_prefix}.members.tsv", MEMBER_COLUMNS, tabled)
+    high = sum(e["confidence"] == "high" and e["recurrent"] == "no" for e in events)
+    print(f"{args.cohort}: {len(found)} families, {len(tabled)} members, {len(events)} events, "
+          f"{high} high and not recurrent", file=sys.stderr)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("family", help="one family's UPD tables, from its BCF query on stdin")
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--samples", required=True, help="the BCF's samples, comma-separated, in its order")
+    p.add_argument("--coverage-dir")
+    p.add_argument("--roh", help="the roh step's roh.tsv of the family")
+    p.add_argument("--froh", help="the roh step's froh.tsv of the family")
+    p.add_argument("--mask", help="the roh panel's sites, roh/sites.tsv.gz of its bundle: sites outside are dropped")
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_family)
+
+    p = sub.add_parser("cohort", help="the cohort's UPD tables")
+    p.add_argument("--cohort", required=True)
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--family-dir", required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_cohort)
+
+    args = parser.parse_args(argv)
+    if getattr(args, "roh", None) and not getattr(args, "froh", None) or \
+            getattr(args, "froh", None) and not getattr(args, "roh", None):
+        parser.error("--roh and --froh go together")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

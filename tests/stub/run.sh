@@ -4,13 +4,13 @@
 #
 #   1. validation - parameter mistakes the run must refuse before doing anything, each with
 #      its message (-preview, so nothing is written even if a check stops working);
-#   2. fresh      - all 16 steps with -stub-run on the untouched cohort;
+#   2. fresh      - all 17 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
 #                   the pedigree;
 #   5. editpedigree - the same again, after FAM01's child loses its recorded father: every file
 #                   is in place, and only the steps that compare the pedigree they were built
-#                   from (sampleqc, and expansionhunter's tables) redo the family and the cohort;
+#                   from (sampleqc, upd, and expansionhunter's tables) redo the family and the cohort;
 #   6. adddummy   - the same again, after FAM02's singleton gets dummy parents and its dummy mother
 #                   dummy parents of her own (DUMMY_..., rows with no data): only FAM02's
 #                   pedigree-reading tables and the cohort's are redone, and nothing is planned
@@ -58,12 +58,13 @@ params() {
 
 valid_scenario=(
     'cohort_name: "STUB"'
-    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc"]'
+    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc", "upd"]'
     "ancestry_reference: \"${fixture}/refs/bundle\""
     'expansionhunter_catalog_name: "eh_stub"'
     'melt_label: "melt_stub"'
     'cnv_panel_version: "stub1"'
     'sampleqc_label: "sqc_stub"'
+    'upd_label: "upd_stub"'
     "cnv_panel_dir: \"${fixture}/refs/cnv_panel/v0\""
 )
 
@@ -106,6 +107,9 @@ expect_refusal sampleqc_bad_label "sampleqc_label 'sqc/stub' may only hold" "${v
     'sampleqc_label: "sqc/stub"'
 expect_refusal sampleqc_no_sites "the 'sampleqc' step cannot find somalier_sites" "${v[0]}" 'steps: ["sampleqc"]' \
     'sampleqc_label: "sqc_stub"' "somalier_sites: \"${fixture}/refs/absent.vcf.gz\""
+expect_refusal upd_bad_label "upd_label 'upd/stub' may only hold" "${v[0]}" 'steps: ["upd"]' 'upd_label: "upd/stub"'
+expect_refusal upd_no_gnomad_index "with a .csi or .tbi index" "${v[0]}" 'steps: ["upd"]' \
+    "gnomad_file: \"${fixture}/refs/ref.fa\""
 { cat "${fixture}/data/cohorts/STUB/STUB.pedigree.tsv"; printf 'FAM02\tBC003\t0\t0\t1\t2\n'; } \
     > "${fixture}/conflict.pedigree.tsv"
 expect_refusal pedigree_conflict "Pedigree file has two different rows for BC003" "${v[@]}" \
@@ -178,6 +182,8 @@ for merge in 'SNVS_COHORT:SNVS_COHORT_MERGE (STUB)' \
              'CNV_COVERAGE:CNV_COVERAGE_FIT (STUB)' \
              'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
              'SAMPLEQC:SAMPLEQC_FAMILY (FAM03)' \
+             'UPD:UPD_COHORT (STUB)' \
+             'UPD:UPD_FAMILY (FAM03)' \
              'DEEPVARIANT_FAMILY:GLNEXUS_FAMILY (FAM03)'; do
     if ! grep -qxF -- "${merge}" "${out}/addfamily.tasks.txt"; then
         echo "  FAIL  addfamily: ${merge} was not run"; fail=1
@@ -193,12 +199,13 @@ stub_pass editpedigree
 
 # Exactly the edited family and the cohort, as above regenerated lists do not prove it
 for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM01)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
+            'UPD:UPD_FAMILY (FAM01)' 'UPD:UPD_COHORT (STUB)' \
             'EXPANSIONHUNTER:EXPANSIONHUNTER_FAMILY (FAM01)' 'EXPANSIONHUNTER:EXPANSIONHUNTER_COHORT (STUB)'; do
     if ! grep -qxF -- "${task}" "${out}/editpedigree.tasks.txt"; then
         echo "  FAIL  editpedigree: ${task} was not run"; fail=1
     fi
 done
-if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_FAMILY \(FAM0[23]\)|EXPANSIONHUNTER_CALL' \
+if grep -E 'SAMPLEQC_FAMILY \(FAM0[23]\)|UPD_FAMILY \(FAM0[23]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_FAMILY \(FAM0[23]\)|EXPANSIONHUNTER_CALL' \
         "${out}/editpedigree.tasks.txt"; then
     echo "  FAIL  editpedigree: the unedited families, the extracts or the calls were redone"; fail=1
 fi
@@ -220,12 +227,13 @@ stub_pass adddummy
 
 # FAM02's pedigree-reading tables and the cohort's are redone, and nothing is done for a dummy
 for task in 'SAMPLEQC:SAMPLEQC_FAMILY (FAM02)' 'SAMPLEQC:SAMPLEQC_COHORT (STUB)' \
+            'UPD:UPD_FAMILY (FAM02)' 'UPD:UPD_COHORT (STUB)' \
             'EXPANSIONHUNTER:EXPANSIONHUNTER_FAMILY (FAM02)'; do
     if ! grep -qxF -- "${task}" "${out}/adddummy.tasks.txt"; then
         echo "  FAIL  adddummy: ${task} was not run"; fail=1
     fi
 done
-if grep -E 'DUMMY_|SAMPLEQC_FAMILY \(FAM0[13]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_CALL' "${out}/adddummy.tasks.txt"; then
+if grep -E 'DUMMY_|SAMPLEQC_FAMILY \(FAM0[13]\)|UPD_FAMILY \(FAM0[13]\)|SOMALIER_EXTRACT|EXPANSIONHUNTER_CALL' "${out}/adddummy.tasks.txt"; then
     echo "  FAIL  adddummy: a task for a dummy, an unedited family, an extract or a call"; fail=1
 fi
 if ! grep -qF 'Pedigree has 4 dummy member(s)' "${out}/adddummy.out"; then

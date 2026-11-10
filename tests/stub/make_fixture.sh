@@ -43,7 +43,7 @@ done
 touch "${data}/old_cram_38/BC003.cram" "${data}/old_cram_38/BC003.cram.crai"
 touch "${data}/old_cram_37/BC004.cram" "${data}/old_cram_37/BC004.cram.crai"
 
-for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz \
+for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz gnomad.vcf.gz.tbi \
          wisecondorx.100000.npz eh_thresholds.tsv \
          ancestry_catalog.tsv bundle/roh/sites.tsv.gz extract_me.tsv hg19ToHg38.over.chain.gz \
          annotation/gencode/gencode.stub.symbol.genes.bed.gz gnomad_sv.vcf.gz ndd_genes.tsv \
