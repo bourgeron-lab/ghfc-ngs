@@ -18,7 +18,8 @@ steps: [
     # "ancestry",
     # "cnv_coverage",
     # "sampleqc",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry
+    # "upd",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
@@ -179,6 +180,15 @@ cnv_panel_dir: "" # e.g. /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohort
 # A family is redone when its pedigree rows change, and the cohort when any family is.
 somalier_sites: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/somalier/sites.hg38.vcf.gz" # TODO: somalier's sites.hg38.vcf.gz (see its README); required by sampleqc
 sampleqc_label: "somalier_hg38" # Label baked into output file names; one per sites file
+
+# UPD (step "upd")
+# Uniparental disomy segments of every member, from the family norm.bcf: with both parents in it, one
+# (the missing parent's allele at its gnomAD frequency), or none (isodisomy only, from the roh step's
+# tables, read under ancestry_panel_name). Report-only: read families/.../upd/<FID>.<label>.events.tsv
+# and cohorts/<cohort>/upd/<cohort>.<label>.events.tsv. Needs gnomad_file. A family is redone when its
+# pedigree rows, its BCF or its roh tables change, and the cohort when any family is.
+upd_label: "upd_v1" # Label baked into output file names (default: upd_v1)
+upd_af_field: "AF_genomes" # gnomad_file INFO field for the missing parent's allele frequency (default: AF_genomes)
 
 # Resource limits
 max_memory: "460.GB"

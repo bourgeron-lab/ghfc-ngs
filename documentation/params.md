@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-72 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+74 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -61,8 +61,8 @@ program can see is in this table. A key that is not here is not read by anything
 | `ancestry_min_dp` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `ancestry_min_gq` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `ancestry_model` | `ancestry` | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
-| `ancestry_panel_name` 📄 | `ancestry`, `roh` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
-| `ancestry_reference` | `ancestry`, `roh` — **required** | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
+| `ancestry_panel_name` 📄 | `ancestry`, `roh` — **required**; `upd`, to find the roh tables | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
+| `ancestry_reference` | `ancestry`, `roh` — **required**; `upd`, for its mask | [Ancestry and PGS](#ancestry-and-polygenic-scores) |
 | `annotation_annotation_list` | `annotation` | [Annotation](#annotation) |
 | `annotation_annotation_path` | `annotation`, `wisecondorx`, `roh` | [Annotation](#annotation) |
 | `annotation_dnm_min_callrate` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
@@ -76,8 +76,8 @@ program can see is in this table. A key that is not here is not read by anything
 | `bin_size` ✗ | never — you want `bin` | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `bwa_mem2` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `clean_stale_families` | optional — a repair flag, not a run setting | [Core paths and identity](#core-paths-and-identity) |
-| `cnv_cov_bin` 📄 | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
-| `cnv_cov_mapq` 📄 | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_cov_bin` 📄 | `cnv_coverage`, `cnv_panel`; `sampleqc`, `upd`, to find the coverage JSONs | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
+| `cnv_cov_mapq` 📄 | `cnv_coverage`, `cnv_panel`; `sampleqc`, `upd`, to find the coverage JSONs | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
 | `cnv_cov_round` | `cnv_coverage`, `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
 | `cnv_panel_dir` | `cnv_coverage` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
 | `cnv_panel_max_fit_mad` | `cnv_panel` | [CNV coverage and control panel](#cnv-coverage-and-control-panel) |
@@ -95,7 +95,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `fastq_pattern` | `alignment` | [Input discovery](#input-discovery) |
 | `glnexus_bed` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `glnexus_config` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
-| `gnomad_file` | `annotation` | [Annotation](#annotation) |
+| `gnomad_file` | `annotation`; `upd` — **required** | [Annotation](#annotation) |
 | `gnomad_filter_field` | `annotation` | [Annotation](#annotation) |
 | `gnomad_filter_threshold` | `annotation` | [Annotation](#annotation) |
 | `liftover_chain` | `extractor`, GRCh37 inputs | [Extractor](#extractor) |
@@ -136,6 +136,8 @@ program can see is in this table. A key that is not here is not read by anything
 | `slurm_partition` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `somalier_sites` | `sampleqc` — **required** | [Sample QC](#sample-qc) |
 | `steps` | always — **required** | [`steps`](#steps-the-key-that-decides-everything-else) |
+| `upd_af_field` | `upd` | [UPD](#upd) |
+| `upd_label` 📄 | `upd` | [UPD](#upd) |
 | `vaf_bedgraph` | always — decides what counts as a called sample | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `vep_config` | `annotation` | [Annotation](#annotation) |
 | `vep_config_name` 📄 | `annotation` and everything downstream | [Annotation](#annotation) |
@@ -205,7 +207,7 @@ steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "
 
 Required, and must be non-empty. A list is the form to use; a comma-separated string
 (`steps: "alignment,wombat"`) is accepted and split, which is also what makes `--steps` work on
-the command line. Every entry must be one of these sixteen:
+the command line. Every entry must be one of these seventeen:
 
 | Step | Produces |
 |---|---|
@@ -225,6 +227,7 @@ the command line. Every entry must be one of these sixteen:
 | `cnv_coverage` | Normalised coverage per sample on a fixed bin grid, as a bigWig for genetics-viz, and with `cnv_panel_dir` the cohort's fit against a control panel |
 | `cnv_panel` | A versioned control panel, per-bin median and MAD of the controls' normalised coverage, built once from a dedicated controls cohort |
 | `sampleqc` | Relatedness (IBS0, IBS2, KING kinship) against the pedigree within each family and between families, sex and sex-chromosome karyotype, and Mendelian errors, as per-family and cohort tables of flags |
+| `upd` | Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy, mixed, or a deletion that looks like one), parent of origin and a score, from the family BCF with both parents, one, or none (isodisomy only, from the `roh` tables), per family and per cohort |
 
 ### The rule that catches people out
 
@@ -238,7 +241,7 @@ missing prerequisite is only an error when something in *this* run would consume
 - `alignment` and `deepvariant_sample` are checked unconditionally — if any individual needs
   them and they are not listed, the run fails.
 - `deepvariant_family` is only demanded when one of `deepvariant_family`, `annotation`,
-  `wombat`, `wombat_cohort`, `snvs_cohort` or `extractor` is listed.
+  `wombat`, `wombat_cohort`, `snvs_cohort`, `extractor` or `upd` is listed.
 - `annotation` is only demanded when one of `annotation`, `wombat`, `wombat_cohort` or
   `snvs_cohort` is listed.
 - `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due, which it
@@ -254,6 +257,9 @@ missing prerequisite is only an error when something in *this* run would consume
   file yet: a panel is only ever built from every sample of the cohort.
 - `sampleqc` demands nothing either: it reads the CRAMs, and uses the cnv_coverage JSONs and
   the family `norm.bcf` when they exist or are made in the run, without them otherwise.
+- `upd` demands `deepvariant_family`, as above. It uses the cnv_coverage JSONs and the `roh`
+  tables when they exist or are made in the run, and does without them otherwise: a member
+  with no parent in the family BCF is then reported as skipped, not an error.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -281,7 +287,7 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: --data parameter is required` | `data` unset or empty |
 | `ERROR: cohort_name parameter is required` | `cohort_name` unset or empty |
 | `ERROR: --steps parameter is required` | `steps` missing or `[]` |
-| `ERROR: Invalid steps specified: ...` | a value outside the sixteen above; the message names the offending entries |
+| `ERROR: Invalid steps specified: ...` | a value outside the seventeen above; the message names the offending entries |
 | `ERROR: the 'ancestry' step requires ...` | `ancestry` listed without its three required keys |
 | `ERROR: the 'roh' step requires ...` | `roh` listed without `ancestry_reference` and `ancestry_panel_name` |
 | `ERROR: the 'expansionhunter' step requires ...` | `expansionhunter` listed without `expansionhunter_catalog`, `expansionhunter_catalog_name` or `ref` |
@@ -295,6 +301,11 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: the 'sampleqc' step requires ...` | `sampleqc` listed without `somalier_sites`, `sampleqc_label` or `ref` |
 | `ERROR: the 'sampleqc' step cannot find ...` | the sites VCF, the reference or its `.fai` does not exist |
 | `ERROR: sampleqc_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: the 'upd' step requires ...` | `upd` listed without `upd_label`, `upd_af_field` or `gnomad_file` |
+| `ERROR: upd_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: upd_af_field '...' is not an INFO field name` | a field name with a character other than letters, digits and `_` |
+| `ERROR: the 'upd' step cannot find gnomad_file ...` | the gnomAD file, or its `.csi` or `.tbi` index, does not exist |
+| `ERROR: ... has no INFO/<field> (upd_af_field)`, in a `UPD_FAMILY` task | `upd_af_field` names a field the gnomAD file does not have |
 | `ERROR: the 'cnv_panel' step requires cnv_panel_version to be set` | `cnv_panel` listed without `cnv_panel_version` |
 | `ERROR: cnv_panel_version '...' may only hold ...` / `... is written without its v` | a version that cannot be a directory name, or `v1` where `1` was meant |
 | `ERROR: the CNV panel directory ... exists but is incomplete` | a partial `cnv_panel/v<version>/`, from a build that died or a hand edit: it is never overwritten |
@@ -308,7 +319,7 @@ they should be set.
 
 ## Key reference
 
-62 keys are read by the code. In the tables below, **no default** means the key is `null` when
+74 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -640,6 +651,35 @@ pedigree, and the next run redoes the families that changed.
 - **Mendelian errors** are counted from the family's `norm.bcf` when it has a parent and child: biallelic autosomal SNVs, genotypes of GQ ≥ 20 and DP ≥ 10.
 - **What reruns.** The label is the cache for the extracts. The family and cohort tables are also checked against `inputs.tsv`, the snapshot of what they were built from: the family's pedigree rows (without the phenotype), which members have an extract and a coverage JSON, and whether the BCF was read. A family is redone when its snapshot changes, so a corrected parent or sex reruns it even though every file is in place. The cohort is redone when any family is, or when a family is added or removed. A member with no CRAM is left out, with a warning.
 
+### UPD
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `upd_label` 📄 | string | `"upd_v1"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family. |
+| `upd_af_field` | string | `"AF_genomes"` | The INFO field of `gnomad_file` giving the frequency of the missing parent's allele, in a duo, and of the homozygosity score, in solo mode. The lab's `gnomad_v4.1_allChroms.bcf` has `AF_genomes` and no plain `AF`. A field the file lacks fails the family's task. Changing it redoes every family and the cohort. |
+
+Also read: `gnomad_file` (**required**), `ancestry_reference` (the mask), `ancestry_panel_name`
+(the roh tables), `cnv_cov_bin` and `cnv_cov_mapq` (the coverage JSONs). The step is report-only.
+It runs in the sample QC image.
+
+- **Per family:** `families/{S1}/{S2}/<FID>/upd/<FID>.<label>.{segments,events,members,inputs}.tsv`.
+  - `segments.tsv`: one row per segment of an event, a run of one UPD state, with the member, the mode and the parents used, `chrom`, `start`, `end`, `length_mb`, `state` (`iso` or `het`), `origin` (`maternal`, `paternal` or `unknown`), `source` (`hmm` or `roh`), the score columns below, `depth_ratio`, `roh_fraction` (the share of the segment in the member's ROH, when the roh tables are read), `interpretation` (`isodisomy`, `heterodisomy` or `deletion`), `confidence` and `event_id`.
+  - `events.tsv`: one row per member, chromosome and parent of origin, its segments collapsed: `composition` (`iso`, `het` or `mixed`), `extent` (`whole_chromosome` or `segmental`), `terminal`, the summed score, `interpretation` (`UPD` or `deletion`), `imprinting` (the disorder the chromosome and origin imply, for chromosomes 6, 7, 11, 14, 15 and 20), `confidence` and `notes`.
+  - `members.tsv`: one row per member in the BCF: its mode, the parents used, whether chrX was read, the sites, the error rate (sites normal inheritance does not explain, outside the segments), its `status` and its number of events.
+- **Per cohort:** `cohorts/<cohort_name>/upd/<cohort_name>.<label>.{segments,events,members,inputs}.tsv`: the family tables concatenated. The events table adds `recurrent_families` and `recurrent`: an event overlapped, by at least half of both, by events of three other families or more is `recurrent`, most likely an artefact region.
+- **Modes.** A parent counts only when it is in the family BCF: a parent written `0`, a `DUMMY_` parent or one without a gVCF is missing.
+  - **trio**, both parents in the BCF: a hidden Markov model of the child's genotype given its parents', with the states N (one allele from each parent), `iso_mat`, `iso_pat` (two copies of one homolog of that parent), `het_mat`, `het_pat` (both homologs of that parent), and three of normal inheritance with a haplotype the parents share: `auto` (the child got the same haplotype from both: autozygosity), `ibd_mat` and `ibd_pat` (the haplotype the child got from one parent is the other parent's untransmitted one, so the child's genotype is that parent's). An isodisomy or heterodisomy is therefore called on the Mendelian errors it explains, not on a ROH or a run of genotypes identical to a parent's, which short haplotypes shared by unrelated parents give all over the genome.
+  - **duo**, one parent in the BCF: the five UPDhmm states, the missing parent transmitting the ALT at its gnomAD frequency. A UPD of the missing parent rests on opposite homozygotes with the present one. A UPD of the present parent looks like autozygosity, related parents or a shared haplotype, so it is `low` unless the member is isolated (below), and it is held to the extents of solo mode: `high` only over the whole chromosome, `medium` for a terminal one of 5 Mb or more.
+  - **solo**, no parent in the BCF, founders included: the `roh` step's segments, as isodisomy of unknown origin, of a member whose rest of the genome is outbred (isolated): `whole_chromosome` on the roh step's `upd_candidate_chrom` (`high`), `terminal` from 5 Mb (`medium`), `interstitial` from 15 Mb (`low`). Heterodisomy cannot be seen without a parent. Without roh tables the member's status is `no_roh_tables`.
+- **Sites.** Biallelic SNVs, genotypes of GQ ≥ 20 and DP ≥ 10 and at most 2.5 times the member's median DP; a position held by several records (a split multiallelic site) is dropped. When `ancestry_reference` has its roh/ tier, a site outside the roh panel's covered segments (runs of panel sites at most 300 kb apart) is dropped: the panel leaves out the centromeres, heterochromatin, the MHC, the acrocentric arms and segmental duplications, where mismapped reads give clusters of Mendelian errors that read as short UPDs. Without it the run warns. chrX, which the panel does not hold, is not masked. Autosomes, and chrX outside the PARs for a member with two X: karyotype XX from its coverage JSON, or with none, a female pedigree sex and an X heterozygosity of 0.1 or more. The father is hemizygous on X.
+- **Score.** For each site, LR is the likelihood of the segment's state over normal inheritance. `lod` is the sum of log10 LR. `n_supporting` and `n_contradicting` count the sites favouring the state or normal inheritance at least 2-fold, `n_strong` those favouring the state at least 10-fold, which normal inheritance explains only as an error: in a trio, the Mendelian errors the state explains. `support_fraction` is reported, not used.
+- **Confidence.** `high`: `lod` ≥ 20, at least 2 Mb, a depth ratio of 0.8-1.25, and `n_strong` ≥ 20 (`n_supporting` ≥ 50 for a UPD of the present parent of a duo, whose sites are each weak). `medium`: `lod` ≥ 10, at least 0.5 Mb, and `n_strong` ≥ 10 (or `n_supporting` ≥ 20). `low` otherwise. A depth ratio of 0.75 or less is a `deletion`: one copy, which looks like an isodisomy of the other parent.
+- **Events.** Segments of one member, chromosome and parent of origin, each `medium` or `high` and at most 5 Mb apart, make an event, whose confidence is its best segment's (capped for a duo as above). A `low` segment makes no event and is not written.
+- **Isolated** means F_ROH, at segments of 1.5 Mb or more on the other autosomes, below 1%, and parents not related beyond the 4th degree (kinship ≤ 0.0221) when the roh step measured them: the roh step's own rule for `upd_candidate_chrom`.
+- **Parentage.** A child and a parent with opposite homozygotes at more than 1% of the sites outside the child's segments are not parent and child (`sampleqc`'s `NOT_PARENT`): that parent is dropped and the child redone, with the reason in its `status`.
+- **Gaps.** Mosaic UPD, which only shows as skewed allele fractions, is not seen. Small events and repeat-rich regions give false calls, which `recurrent` and the thresholds are for. Exome data are sparse for heterodisomies under 10 Mb.
+- **What reruns.** The label is the cache. The family and cohort tables are also checked against `inputs.tsv`: the family's pedigree rows, which members are in the BCF and have a coverage JSON, which roh tables are read, and the gnomAD file and field. A family is also redone when its BCF, its roh tables or a member's coverage JSON is made in the run. The cohort is redone when any family is, or when a family is added or removed.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -782,8 +822,9 @@ made with the old catalog, and mixes in new ones made with the new catalog. **`m
 does the same for the MELT calls. **`cnv_cov_bin`** and **`cnv_cov_mapq`** make the tag
 `cov_b<bin>q<mapq>` of every CNV coverage file, and **`cnv_panel_version`** the directory of a
 panel, which is built once and never rebuilt under the same version. **`sampleqc_label`** does
-the same for the somalier extracts. The sample QC tables are the one exception to the rule:
-they are also rebuilt when the pedigree they were built from changes, see [Sample QC](#sample-qc).
+the same for the somalier extracts, and **`upd_label`** for the UPD tables. The sample QC and
+UPD tables are the exception to the rule: they are also rebuilt when the pedigree or the
+settings they were built from change, see [Sample QC](#sample-qc) and [UPD](#upd).
 
 ### Three different directories
 

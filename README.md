@@ -328,7 +328,7 @@ The pipeline operates at the **family level** and automatically determines what 
 
 ### Pipeline Steps
 
-The pipeline supports sixteen main steps that must be explicitly listed in the `steps` parameter:
+The pipeline supports seventeen main steps that must be explicitly listed in the `steps` parameter:
 
 **Available Steps:**
 
@@ -348,6 +348,7 @@ The pipeline supports sixteen main steps that must be explicitly listed in the `
 - **`cnv_coverage`**: Normalised coverage of each sample's CRAM on a fixed bin grid, as a bigWig for [genetics-viz](https://github.com/bourgeron-lab/genetics-viz) to show CNVs and SVs, with a JSON of its autosomal depth and sex-chromosome ratios. With `cnv_panel_dir`, also fits every sample of the cohort against a control panel.
 - **`cnv_panel`**: Builds a versioned control panel - per-bin median and MAD of the controls' normalised coverage, for the autosomes, XX and XY - from every sample of a dedicated controls cohort.
 - **`sampleqc`**: Sample and family QC with [somalier](https://github.com/brentp/somalier). Extracts each sample's allele counts at somalier's sites from its CRAM, checks every pair of a family against the relationship its pedigree gives them, infers every member's sex and karyotype, counts the Mendelian errors of each trio, then relates every sample of the cohort to find relatives, duplicates and swaps across families. Report-only: it flags, and blocks nothing.
+- **`upd`**: Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy, mixed, or a deletion that looks like one), parent of origin and a likelihood score with its supporting sites, from the family `norm.bcf`: an HMM of the child's genotypes given both parents (trio), or one parent and the gnomAD frequency of the missing one's allele (duo), and for a member with no parent in the BCF, the `roh` step's ROH segments (isodisomy only). Report-only.
 
 **Step Dependencies:**
 
@@ -366,6 +367,7 @@ The pipeline supports sixteen main steps that must be explicitly listed in the `
 - `cnv_coverage` requires CRAM files, and treats a sample with none as `expansionhunter` does
 - `cnv_panel` requires every sample's coverage files (needs `cnv_coverage` in `steps` if any is missing)
 - `sampleqc` requires CRAM files, and treats a sample with none as `expansionhunter` does. It reads the `cnv_coverage` JSONs and the family `norm.bcf` when they exist or are made in the run, and does without them otherwise
+- `upd` requires normalized family BCF files (needs `deepvariant_family` in `steps` if they are missing) and `gnomad_file`. It reads the `cnv_coverage` JSONs and the `roh` tables when they exist or are made in the run; without roh tables, a member with no parent in its family's BCF gets no isodisomy calls. Its mask is the roh panel of `ancestry_reference`, without which it warns
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -678,6 +680,29 @@ modules/sampleqc/scripts/sampleqc_classify_test
 
 **Outputs:** Per sample: the `.somalier` extract. Per family: the samples, pairs and flags tables and the inputs snapshot. Per cohort: the same tables, somalier's HTML and the snapshot.
 
+#### UPD Workflow
+
+Uniparental disomy segments, per family and then per cohort. sampleqc's `UPD_CANDIDATE` and roh's `upd_candidate_chrom` say that a parent and child, or a chromosome, look uniparental; this step gives the segments, their type, parent of origin and score:
+1. **Family** - The family's biallelic SNVs (autosomes, and chrX for members with two X) get their gnomAD frequency, the `upd_af_field` of `gnomad_file`, and stream into `upd_segments family`, which drops those outside the roh panel's covered segments (`ancestry_reference`'s roh/ tier: no centromeres, MHC or segmental duplications, where mismapped reads read as short UPDs). Each member is analysed in the best mode its family allows: a parent counts only when it is in the BCF, so a parent written `0`, a `DUMMY_` parent or one without a gVCF is missing
+   - **Trio**: a hidden Markov model of the child's genotype given its parents', with normal inheritance, the isodisomy and heterodisomy of each parent, and three states of normal inheritance where the parents share a haplotype: autozygosity, and the child's haplotype from one parent being the other parent's untransmitted one. So neither a ROH nor a run of genotypes identical to a parent's is called a UPD unless the Mendelian errors say so. No allele frequency is needed
+   - **Duo**: UPDhmm's five states, the missing parent transmitting the ALT at its gnomAD frequency. A UPD of the missing parent rests on opposite homozygotes with the present one; one of the present parent looks like autozygosity or a shared haplotype, and is trusted only over a whole chromosome (or, `medium`, a terminal 5 Mb) when the rest of the genome is outbred
+   - **Solo** (no parent in the BCF, founders included): the `roh` step's segments of a member whose rest of the genome is outbred - the whole chromosome of `upd_candidate_chrom`, terminal ROH from 5 Mb, interstitial ones from 15 Mb - scored at the member's SNVs. Isodisomy only, of unknown origin
+
+   Each segment gets a LOD against normal inheritance and its supporting, contradicting and strong sites (in a trio, the Mendelian errors it explains), a depth ratio (a deletion of one copy looks like an isodisomy of the other parent), and a confidence. A child whose opposite homozygotes with a parent exceed 1% outside its segments is not that parent's child: the parent is dropped and the child redone. Segments of medium confidence or more, of one member, chromosome and parent of origin and at most 5 Mb apart, make an event: whole or segmental, iso, het or mixed, with the imprinting disorder of chromosomes 6, 7, 11, 14, 15 and 20
+
+   On real data, the trio of a son with a known paternal isodisomy 15 gives that one event, whole-chromosome and `high` (about 31,000 Mendelian errors), and so do both of its duos and the son alone; a normal quad gives no `high` event
+2. **Cohort** - The family tables in one, an event overlapped by events of three other families marked `recurrent`, most likely an artefact region
+
+**What reruns.** As for the sample QC: each family's tables are written beside `inputs.tsv`, a snapshot of its pedigree rows, which members are in the BCF and have a coverage JSON, which roh tables are read, the gnomAD file and field, and the mask. A family is redone when its snapshot differs, or when its BCF, its roh tables or a member's coverage JSON is made in the run.
+
+The script ships with a self-contained test on simulated families, which needs only `python3`:
+
+```bash
+modules/upd/scripts/upd_segments_test
+```
+
+**Outputs:** Per family: the segments, events and members tables and the inputs snapshot. Per cohort: the same tables and the snapshot.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -749,6 +774,8 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Sample QC extract (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/qc/somalier/${barcode}.${sampleqc_label}.somalier` (non-empty)
 - **Sample QC tables (family)**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${sampleqc_label}.{samples,pairs,flags}.tsv`, and `${FID}.${sampleqc_label}.inputs.tsv` identical to the snapshot the run builds from the pedigree
 - **Sample QC tables (cohort)**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${sampleqc_label}.{samples.tsv,pairs.tsv,flags.tsv,html}`, and its `inputs.tsv` identical to the cohort's snapshot
+- **UPD tables (family)**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${upd_label}.{segments,events,members}.tsv` (non-empty), and `${FID}.${upd_label}.inputs.tsv` identical to the snapshot the run builds; and the family's BCF, roh tables and coverage JSONs not made in the run
+- **UPD tables (cohort)**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${upd_label}.{segments,events,members}.tsv`, and its `inputs.tsv` identical to the cohort's snapshot
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -844,6 +871,11 @@ data/
 │               │   ├── FID001.somalier_hg38.pairs.tsv       # IBS0, IBS2, kinship: expected vs observed
 │               │   ├── FID001.somalier_hg38.flags.tsv       # One row per flag, with its evidence
 │               │   └── FID001.somalier_hg38.inputs.tsv      # The pedigree snapshot they were built from
+│               ├── upd/
+│               │   ├── FID001.upd_v1.segments.tsv           # UPD segments: coordinates, state, origin, score
+│               │   ├── FID001.upd_v1.events.tsv             # Segments per member, chromosome and origin
+│               │   ├── FID001.upd_v1.members.tsv            # Each member's mode (trio, duo, solo) and status
+│               │   └── FID001.upd_v1.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -927,6 +959,10 @@ data/
 │           ├── COHORT_NAME.somalier_hg38.{samples,pairs,flags}.tsv   # Families + cross-family pairs
 │           ├── COHORT_NAME.somalier_hg38.html                 # somalier's interactive relatedness plot
 │           └── COHORT_NAME.somalier_hg38.inputs.tsv
+│       └── upd/
+│           ├── COHORT_NAME.upd_v1.{segments,members}.tsv      # The family tables in one
+│           ├── COHORT_NAME.upd_v1.events.tsv                  # ... with the events other families share
+│           └── COHORT_NAME.upd_v1.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
@@ -1133,6 +1169,16 @@ Paths use `${L}` as shorthand for `${sampleqc_label}`. Missing values are `.`.
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.{samples,pairs,flags}.tsv` - the family tables concatenated, the pairs of different families related at the third degree or closer added to `pairs.tsv` (but those of a sample with CHARR of 0.05 or more), and the flags at `level` `cohort` (`CRYPTIC_RELATED`, `DUPLICATE_OR_MZ`, `SAMPLE_SWAP_CANDIDATE`, `RELATEDNESS_UNRELIABLE`) added to `flags.tsv` and to each sample's `flags`
 - **Cohort HTML**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.html` - somalier's interactive plot of every pair; past 200,000 pairs, the unrelated ones are subsampled
 
+### UPD Outputs
+
+Paths use `${U}` as shorthand for `${upd_label}`. Missing values are `.`. Columns, modes and thresholds are in [documentation/params.md](documentation/params.md#upd).
+
+- **Family segments**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.segments.tsv` - one row per segment of an event: `family_id sample mode father mother chrom start end length_mb state origin source n_sites n_informative n_supporting n_contradicting n_strong support_fraction lod depth_ratio roh_fraction interpretation confidence event_id`. `father` and `mother` are the parents used; `state` is `iso` or `het`, `origin` `maternal`, `paternal` or `unknown` (solo), `source` `hmm` or `roh`, `interpretation` `isodisomy`, `heterodisomy` or `deletion`, `confidence` `high`, `medium` or `low`
+- **Family events**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.events.tsv` - one row per member, chromosome and parent of origin: `family_id sample mode event_id chrom start end length_mb origin composition extent terminal n_segments n_supporting n_strong lod depth_ratio interpretation imprinting confidence notes`, `composition` `iso`, `het` or `mixed`, `extent` `whole_chromosome` or `segmental`, `interpretation` `UPD` or `deletion`
+- **Family members**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${U}.members.tsv` - one row per member in the BCF: `family_id sample father mother mode father_used mother_used chrx n_sites error_rate status n_events n_events_high`, `status` `analysed`, or why not (`parentage: ...`, `no_roh_tables`, `not_in_roh_tables`, `not_isolated: ...`, `not_in_bcf`)
+- **Inputs snapshot**: `${FID}.${U}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex in_bcf coverage_tag` per member
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${U}.{segments,events,members}.tsv` - the family tables concatenated; `events.tsv` adds `recurrent_families recurrent`
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -1213,7 +1259,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
 ```
 
 ### Custom Configuration
@@ -1253,6 +1299,7 @@ The pipeline uses the following containers by default:
 - **SAMtools**: `biocontainers/samtools:1.19.2--h50ea8bc_1`
 - **MELT**: `fcliquet/melt-deps:1.0.0` (OpenJDK 11, samtools, bowtie2, bcftools; MELT itself is staged from `melt_dir`, see `containers/melt/Dockerfile`)
 - **Sample QC**: `fcliquet/sampleqc:1.0.0` (somalier 0.3.5, bcftools 1.24, python3; see `containers/sampleqc/Dockerfile`)
+- **UPD**: `fcliquet/sampleqc:1.0.0`, for its bcftools 1.24 and python3
 
 ### Container Profiles
 
@@ -1357,7 +1404,7 @@ tests/ci_local.sh
 | Repository hygiene | scripts keep their exec bit, no large files or run artefacts | `tests/checks/repo_hygiene.sh` |
 | Script tests | every `*_test` next to a script; those under `scripts/` also on Python 3.6, the cluster's | `tests/run_script_tests.sh` |
 | `lib/` tests | unit tests of `lib/*.groovy`, on Nextflow 24.10.5 and 25.10.4 | `tests/lib/run.sh` |
-| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 16 steps run with `-stub-run`, a second run schedules nothing but the extractor, an added family redoes every cohort file, and an edited pedigree redoes that family's sample QC | `tests/stub/run.sh` |
+| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 17 steps run with `-stub-run`, a second run schedules nothing but the extractor, an added family redoes every cohort file, and an edited pedigree redoes that family's sample QC and UPD tables | `tests/stub/run.sh` |
 | Docker build | each `containers/*/Dockerfile` still builds, when one changes; nothing is pushed | |
 
 The stub runs compare the tasks they ran with

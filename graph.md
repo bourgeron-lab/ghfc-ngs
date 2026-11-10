@@ -163,6 +163,15 @@ flowchart TB
         sqc_sample --> sqc_cohort_relate
     end
 
+    subgraph upd [**UPD**]
+        direction TB
+        upd_family_call["gnomAD AF + upd_segments family (trio/duo HMM, solo from ROH)"]
+        upd_family["families/**{FID}**/upd/**{FID}**.**{label}**.{segments,events,members,inputs}.tsv"]:::of
+        upd_concat["concatenate family tables + recurrent events"]
+        upd_cohort["cohorts/**{cohort}**/upd/**{cohort}**.**{label}**.{segments,events,members,inputs}.tsv"]:::oc
+        upd_family_call --> upd_family --> upd_concat --> upd_cohort
+    end
+
     subgraph wisecondorx [**WisecondorX**]
         direction TB
         wcx_call["WisecondorX call"]
@@ -177,6 +186,9 @@ flowchart TB
     alignment ==> sampleqc
     cnv_sample -.-> sqc_family_relate
     glnexus_vcf -.-> sqc_family_relate
+    glnexus_vcf ==> upd_family_call
+    cnv_sample -.-> upd_family_call
+    roh_family -.-> upd_family_call
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus
