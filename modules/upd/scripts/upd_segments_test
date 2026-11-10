@@ -23,7 +23,9 @@
 #     on the roh step's upd_candidate_chrom is one low interstitial event, not a whole chromosome;
 #     two separate long ROH on one chromosome are one medium event (a mixed UPD's pattern); a
 #     ROH at half the depth is a deletion, set aside; an interstitial ROH on chr15 is medium and
-#     carries 15q11-q13 even where it does not reach it;
+#     carries 15q11-q13 even where it does not reach it; ROH lengths are of covered genome, so
+#     two ROH flanking a masked gap are not an interstitial one; a ROH full of hets is low; an
+#     interstitial ROH of 12 Mb is an event on an imprinted chromosome only;
 #   - a duo writes no UPD of its present parent below the solo extents, deletions apart;
 #   - a position held twice (a split multiallelic site) is dropped, and with the roh panel as a
 #     mask, so is a site outside its covered segments;
@@ -353,6 +355,13 @@ S7 = founder()
 S7["14"] = ([None if 1000 <= j < 1900 else a for j, a in enumerate(S7["14"][0])], list(S7["14"][1]),
             [0.5 if 1000 <= j < 1900 else 1.0 for j in range(N_SITES)])
 S8 = solo_person([("15", 1000, 4600)])
+S9 = solo_person([("10", 1000, 2000), ("10", 4000, 5000)])
+S10 = solo_person([("17", 0, 1200)])
+for j in range(0, 1200):
+    if random.random() < 0.15:
+        S10["17"][1][j] = 1 - S10["17"][0][j]
+S11 = solo_person([("14", 1000, 3400)])
+S12 = solo_person([("9", 1000, 3400)])
 
 
 def roh_rows(sample, roh):
@@ -366,7 +375,8 @@ def roh_rows(sample, roh):
 rohs = {"S1": [("15", 0, 2950), ("15", 3050, N_SITES)], "S2": [("2", 0, 1200), ("7", 2000, 3000)],
         "S3": [("4", 0, 4000), ("9", 500, 4500), ("12", 1000, 5000)], "S4": [("15", 0, N_SITES)],
         "S5": [("5", 1000, 5000), ("5", 5400, 5500)], "S6": [("13", 500, 1700), ("13", 3500, 4700)],
-        "S7": [("14", 1000, 1900)], "S8": [("15", 1000, 4600)]}
+        "S7": [("14", 1000, 1900)], "S8": [("15", 1000, 4600)], "S9": [("10", 1000, 2000), ("10", 4000, 5000)],
+        "S10": [("17", 0, 1200)], "S11": [("14", 1000, 3400)], "S12": [("9", 1000, 3400)]}
 with open("solo.roh.tsv", "w") as fh:
     fh.write("IID\tchrom\tstart\tend\tlength_mb\tlength_cm\tn_sites\tquality\troh_class\thotspot_group\t"
              "hotspot_fraction\thotspot_fraction_pooled\n")
@@ -377,10 +387,20 @@ with open("solo.froh.tsv", "w") as fh:
     fh.write("IID\tregion\tfroh_1.5mb\tupd_candidate_chrom\tfather\tmother\tparents_kinship\n")
     fh.write("S1\tEUR\t0.04\t15\t.\t.\tNA\nS2\tEUR\t0.01\t.\t.\t.\tNA\nS3\tEUR\t0.2\t.\t.\t.\tNA\n"
              "S4\tEUR\t0.04\t15\tP1\tP2\t0.06\nS5\tEUR\t0.03\t5\t.\t.\tNA\n"
-             "S6\tEUR\t0.02\t13\t.\t.\tNA\nS7\tEUR\t0.0\t.\t.\t.\tNA\nS8\tEUR\t0.02\t15\t.\t.\tNA\n")
-d = run("solo", "SOLO", [(s, "0", "0", "2", True) for s in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")],
-        [("S1", S1), ("S2", S2), ("S3", S3), ("S4", S4), ("S5", S5), ("S6", S6), ("S7", S7), ("S8", S8)],
-        roh=("solo.roh.tsv", "solo.froh.tsv"))
+             "S6\tEUR\t0.02\t13\t.\t.\tNA\nS7\tEUR\t0.0\t.\t.\t.\tNA\nS8\tEUR\t0.02\t15\t.\t.\tNA\n"
+             "S9\tEUR\t0.0\t.\t.\t.\tNA\nS10\tEUR\t0.0\t.\t.\t.\tNA\nS11\tEUR\t0.0\t.\t.\t.\tNA\n"
+             "S12\tEUR\t0.0\t.\t.\t.\tNA\n")
+# A mask with no site on chr10 between 10.15 and 20.05 Mb, where S9's two ROH stop and start
+with gzip.open("solo_mask.tsv.gz", "wt") as fh:
+    fh.write("chrom\tpos\tref\talt\n")
+    for c in CHROMS[:-1]:
+        for pos in positions(c)[::20]:
+            if c != "10" or not 10150000 <= pos <= 20050000:
+                fh.write(f"{c}\t{pos}\tA\tG\n")
+d = run("solo", "SOLO", [(s, "0", "0", "2", True) for s in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12")],
+        [("S1", S1), ("S2", S2), ("S3", S3), ("S4", S4), ("S5", S5), ("S6", S6), ("S7", S7), ("S8", S8),
+         ("S9", S9), ("S10", S10), ("S11", S11), ("S12", S12)],
+        roh=("solo.roh.tsv", "solo.froh.tsv"), extra=["--mask", "solo_mask.tsv.gz"])
 e = one(events_of(d, "S1"), "15", "solo S1")
 check((e["origin"], e["extent"], e["confidence"], e["n_segments"]) == ("unknown", "whole_chromosome", "high", "2"),
       f"solo S1: {e}")
@@ -403,9 +423,18 @@ ev = events_of(d, "S8")
 check(len(ev) == 1 and (ev[0]["chrom"], ev[0]["confidence"]) == ("15", "medium")
       and ev[0]["imprinting"] == "Prader-Willi if maternal or Angelman if paternal (15q11-q13, if the UPD reaches it)",
       f"solo S8 (an interstitial ROH on chr15, short of 15q11-q13): {ev}")
+check(not events_of(d, "S9"), f"solo S9 (two ROH flanking a masked gap, 10 Mb covered) has events: {events_of(d, 'S9')}")
+ev = events_of(d, "S10")
+check(len(ev) == 1 and ev[0]["confidence"] == "low" and "support fraction" in ev[0]["notes"],
+      f"solo S10 (a terminal ROH with hets): {ev}")
+ev = events_of(d, "S11")
+check(len(ev) == 1 and (ev[0]["chrom"], ev[0]["confidence"]) == ("14", "medium") and "Temple if maternal" in ev[0]["imprinting"],
+      f"solo S11 (a 12 Mb interstitial ROH on chr14): {ev}")
+check(not events_of(d, "S12"), f"solo S12 (a 12 Mb interstitial ROH on chr9) has events: {events_of(d, 'S12')}")
 print("ok    solo: whole-chromosome and terminal ROH, none in a consanguineous background or with related parents;"
       " a long interstitial ROH on upd_candidate_chrom stays an interstitial, low; two long ROH on one chromosome"
-      " are one medium event; a ROH at half the depth is set aside; an interstitial ROH on chr15 is medium")
+      " are one medium event; a ROH at half the depth is set aside; an interstitial ROH on chr15 is medium;"
+      " lengths are of covered genome; a ROH full of hets is low; 12 Mb interstitial counts on an imprinted chromosome")
 
 # --- parsing -----------------------------------------------------------------------------------
 lines = ["chr1\t100\t0.1\t0/1\t50\t30", "chr1\t200\t0.2\t0/1\t50\t30", "chr1\t200\t0.2\t1/1\t50\t30",

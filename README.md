@@ -686,7 +686,7 @@ Uniparental disomy segments, per family and then per cohort. sampleqc's `UPD_CAN
 1. **Family** - The family's biallelic SNVs (autosomes, and chrX for members with two X) get their gnomAD frequency, the `upd_af_field` of `gnomad_file`, and stream into `upd_segments family`, which drops those outside the roh panel's covered segments (`ancestry_reference`'s roh/ tier: no centromeres, MHC or segmental duplications, where mismapped reads read as short UPDs). Each member is analysed in the best mode its family allows: a parent counts only when it is in the BCF, so a parent written `0`, a `DUMMY_` parent or one without a gVCF is missing
    - **Trio**: a hidden Markov model of the child's genotype given its parents', with normal inheritance, the isodisomy and heterodisomy of each parent, and three states of normal inheritance where the parents share a haplotype: autozygosity, and the child's haplotype from one parent being the other parent's untransmitted one. So neither a ROH nor a run of genotypes identical to a parent's is called a UPD unless the Mendelian errors say so. No allele frequency is needed
    - **Duo**: UPDhmm's five states, the missing parent transmitting the ALT at its gnomAD frequency. A UPD of the missing parent rests on opposite homozygotes with the present one; one of the present parent looks like autozygosity or a shared haplotype, so it is written only over a whole chromosome (`high`), a terminal 5 Mb (`medium`) or an interstitial 15 Mb (`low`), and when the rest of the genome is outbred
-   - **Solo** (no parent in the BCF, founders included): runs of the `roh` step's segments, scored at the member's SNVs. A run at half the depth is a deletion and is set aside. The others, in a member whose rest of the genome is outbred, are graded by their extent: a whole chromosome (`high`), several long runs on one chromosome, a mixed UPD's pattern (`medium`), terminal from 5 Mb (`medium`), interstitial from 15 Mb (`low`; `medium` on a chromosome with an imprinted region, where a ROH may be the isodisomic part of a whole-chromosome heterodisomy, and the event carries the chromosome's imprinting). Isodisomy only, of unknown origin. roh's `upd_candidate_chrom` is noted: one long interstitial ROH makes it
+   - **Solo** (no parent in the BCF, founders included): runs of the `roh` step's segments, scored at the member's SNVs. A run at half the depth is a deletion and is set aside. The others, in a member whose rest of the genome is outbred, are graded by their extent: a whole chromosome (`high`), several long runs on one chromosome, a mixed UPD's pattern (`medium`), terminal from 5 Mb (`medium`), interstitial from 15 Mb (`low`; from 10 Mb and `medium` on a chromosome with an imprinted region, where a ROH may be the isodisomic part of a whole-chromosome heterodisomy, and the event carries the chromosome's imprinting). Lengths are of covered genome, a masked centromere not counting, and `medium` or `high` needs a support fraction of 0.9. Isodisomy only, of unknown origin. roh's `upd_candidate_chrom` is noted: one long interstitial ROH makes it
 
    Each segment, cut where its sites are more than 300 kb apart, gets a LOD against normal inheritance and its supporting, contradicting and strong sites (in a trio, the Mendelian errors it explains), a depth ratio (a deletion of one copy looks like an isodisomy of the other parent: it is set aside, the CNV callers' business), and a confidence, which in a trio needs a support fraction of 0.9. A child whose opposite homozygotes with a parent exceed 1% outside its segments is not that parent's child: the parent is dropped and the child redone. Segments of medium confidence or more, of one member, chromosome and parent of origin and at most 5 Mb of covered genome apart, make an event: whole or segmental, iso, het or mixed, with the imprinting disorder of each imprinted region it spans (6q24, 7p12/q21/q32, 11p15.5, 14q32, 15q11-q13, 20q13). An event two siblings share is an artefact and is held `low`, unless they are MZ twins
 
@@ -872,10 +872,10 @@ data/
 │               │   ├── FID001.somalier_hg38.flags.tsv       # One row per flag, with its evidence
 │               │   └── FID001.somalier_hg38.inputs.tsv      # The pedigree snapshot they were built from
 │               ├── upd/
-│               │   ├── FID001.upd_v3.segments.tsv           # UPD segments: coordinates, state, origin, score
-│               │   ├── FID001.upd_v3.events.tsv             # Segments per member, chromosome and origin
-│               │   ├── FID001.upd_v3.members.tsv            # Each member's mode (trio, duo, solo) and status
-│               │   └── FID001.upd_v3.inputs.tsv             # The snapshot they were built from
+│               │   ├── FID001.upd_v4.segments.tsv           # UPD segments: coordinates, state, origin, score
+│               │   ├── FID001.upd_v4.events.tsv             # Segments per member, chromosome and origin
+│               │   ├── FID001.upd_v4.members.tsv            # Each member's mode (trio, duo, solo) and status
+│               │   └── FID001.upd_v4.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -960,9 +960,9 @@ data/
 │           ├── COHORT_NAME.somalier_hg38.html                 # somalier's interactive relatedness plot
 │           └── COHORT_NAME.somalier_hg38.inputs.tsv
 │       └── upd/
-│           ├── COHORT_NAME.upd_v3.{segments,members}.tsv      # The family tables in one
-│           ├── COHORT_NAME.upd_v3.events.tsv                  # ... with the events other families share
-│           └── COHORT_NAME.upd_v3.inputs.tsv
+│           ├── COHORT_NAME.upd_v4.{segments,members}.tsv      # The family tables in one
+│           ├── COHORT_NAME.upd_v4.events.tsv                  # ... with the events other families share
+│           └── COHORT_NAME.upd_v4.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
