@@ -100,7 +100,7 @@ workflow UPD {
         // Concat, then a single collect, so the cohort waits for this run's own families.
         // Never publish cohort tables built from part of the cohort.
         cohort_input = new_family_tables
-            .map { fid, seg, events, members, _inputs -> tuple(fid, [seg, events, members]) }
+            .map { fid, seg, events, members, _windows, _inputs -> tuple(fid, [seg, events, members]) }
             .concat(channel.fromList((all_families - upd.need_family).collect { fid ->
                 tuple(fid, updFamilyTables(fid)) }))
             .toList()
