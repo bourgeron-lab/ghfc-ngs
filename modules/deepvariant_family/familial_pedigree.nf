@@ -83,9 +83,11 @@ process FAMILIAL_PEDIGREE {
   """
 
   stub:
+  // The family's real rows, as the script writes them: the plan compares this file with the
+  // cohort pedigree, and a placeholder would be written again on every run. Must be non-empty,
+  // or it would later be mistaken for a completed one.
   """
-  # Must be non-empty: publishDir copies this into the data tree, where an empty
-  # pedigree would later be mistaken for a completed one
-  printf '%s\\tSTUB_SAMPLE\\t0\\t0\\t0\\t-9\\n' "${fid}" > ${fid}.pedigree.tsv
+  if [ "\$(head -n 1 ${pedigree_file} | awk '{print \$1}')" = "FID" ]; then head -n 1 ${pedigree_file} > ${fid}.pedigree.tsv; else : > ${fid}.pedigree.tsv; fi
+  awk -F'\\t' '\$1 == "${fid}" && !seen[\$2]++' ${pedigree_file} >> ${fid}.pedigree.tsv
   """
 }

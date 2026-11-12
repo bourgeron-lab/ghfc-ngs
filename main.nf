@@ -810,8 +810,12 @@ workflow {
     family_vcfs_output = Channel.empty()
     normalized_bcfs_output = Channel.empty()
     family_pedigrees_output = Channel.empty()
-    if (analysis_plan.deepvariant_family.needed.size() > 0 && 'deepvariant_family' in RunContext.steps) {
-        log.info "Running family calling, normalization, and pedigree extraction for ${analysis_plan.deepvariant_family.needed.size()} families..."
+    // Families whose pedigree file is out of date and are not called again in this run: only their
+    // pedigree file is written again
+    def outdated_pedigrees = analysis_plan.family_pedigree.outdated.keySet() as List
+    def pedigree_rewrites = outdated_pedigrees.findAll { !(it in analysis_plan.deepvariant_family.needed) }
+    if ((analysis_plan.deepvariant_family.needed.size() > 0 || pedigree_rewrites) && 'deepvariant_family' in RunContext.steps) {
+        log.info "Running family calling, normalization, and pedigree extraction for ${analysis_plan.deepvariant_family.needed.size()} families, and rewriting ${pedigree_rewrites.size()} out-of-date family pedigrees..."
         
         // Group gVCF files by family
         family_gvcfs = all_available_gvcfs
@@ -827,7 +831,7 @@ workflow {
                 [fid, barcodes, gvcfs, tbis]
             }
         
-        DEEPVARIANT_FAMILY(family_gvcfs, pedigree_file)
+        DEEPVARIANT_FAMILY(family_gvcfs, pedigree_file, outdated_pedigrees, pedigree_rewrites)
         family_vcfs_output = DEEPVARIANT_FAMILY.out.family_vcfs
         normalized_bcfs_output = DEEPVARIANT_FAMILY.out.normalized_bcfs
         family_pedigrees_output = DEEPVARIANT_FAMILY.out.family_pedigrees
@@ -877,15 +881,6 @@ workflow {
                 fid in analysis_plan.wombat.needed 
             }
         
-        // Get all available family pedigrees (existing + newly created)
-        all_available_family_pedigrees_wombat = channels.existing_family_pedigrees.mix(family_pedigrees_output ?: Channel.empty())
-
-        // Filter for families that need Wombat
-        wombat_pedigrees = all_available_family_pedigrees_wombat
-            .filter { fid, pedigree ->
-                fid in analysis_plan.wombat.needed
-            }
-
         // Get all available normalized BCFs (existing + newly created)
         all_available_normalized_bcfs_wombat = channels.existing_normalized_bcfs.mix(normalized_bcfs_output ?: Channel.empty())
 
@@ -895,7 +890,9 @@ workflow {
                 fid in analysis_plan.wombat.needed
             }
 
-        WOMBAT(wombat_bcfs, wombat_pedigrees, wombat_normalized_bcfs, analysis_plan.wombat.need_bcf2parquet)
+        // Each family's pedigree comes from the plan, not from its {FID}.pedigree.tsv: the cohort's
+        // rows of the family, and the snapshot that records them beside each table
+        WOMBAT(wombat_bcfs, analysis_plan.wombat.inputs, wombat_normalized_bcfs, analysis_plan.wombat.need_bcf2parquet)
         wombat_output = WOMBAT.out.wombat_outputs
     }
     
@@ -1461,7 +1458,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         snvs_cohort: [needed: planBucket(), existing: planBucket(), need_bcf_merge: false],
         wombat_cohort: [needed: planBucket(), existing: planBucket(), need_merges: [:]],
         wisecondorx: [needed: planBucket(), existing: planBucket(), need_npz: planBucket(), need_predict: planBucket(), need_family_merge: [:], need_family_annotate: [:], need_cohort_merge: false],
-        wombat: [needed: planBucket(), existing: planBucket(), need_bcf2parquet: [:]],
+        // inputs: family -> [pedigree: the pedigree pywombat is given, snapshot: the inputs snapshot
+        // written beside each table] (lib/FamilyPedigree.groovy). edited: families whose tables
+        // all exist but were built from other pedigree rows, so are built again.
+        wombat: [needed: planBucket(), existing: planBucket(), need_bcf2parquet: [:], inputs: [:], edited: planBucket()],
         extractor: [tsv_count: 0, families: [] as Set, samples: [] as Set],
         ancestry: [needed: planBucket(), existing: planBucket(), need_extract: planBucket(), need_family_merge: [:], need_family_score: [:], need_cohort_merge: false],
         // from_ancestry: families whose panel or labels the ancestry step rebuilds in this run, so
@@ -1503,10 +1503,19 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
               cohort_edited: false, coverage_members: [:], coverage_from_run: planBucket(),
               roh_families: planBucket(), roh_from_run: planBucket(), snapshots: [:], cohort_snapshot: null,
               mask: null, stale_skipped: planBucket()],
-        pedigree_drift: [:]
+        pedigree_drift: [:],
+        // The families' own {FID}.pedigree.tsv (lib/FamilyPedigree.groovy). on_disk: family -> the
+        // rows its file holds, null when it cannot be read. outdated: family -> what differs from
+        // the cohort pedigree, for every family whose file exists and does not hold its rows;
+        // the deepvariant_family step writes those files again.
+        family_pedigree: [on_disk: [:], outdated: [:]]
     ]
 
     def members_by_family = membersByFamily(family_members)
+
+    // Every family's rows in the cohort pedigree, normalised and sorted (lib/FamilyPedigree.groovy):
+    // what each family's own pedigree file and the wombat step's inputs are held against
+    def cohort_family_rows = FamilyPedigree.rowsByFamily(new File(RunContext.state.pedigree_file.toString()).readLines())
 
     // The drift check, the deepvariant_sample check and the CRAM-less check below each ask
     // whether a sample's gVCF exists. On network storage every one of those is a round trip,
@@ -1538,6 +1547,20 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         def pedigree_ok = new File(pedigree_path).length() > 0
         if (new File(pedigree_path).exists() && !pedigree_ok && !quiet) {
             log.warn "Family ${fid} has an empty pedigree at ${pedigree_path} - it will be regenerated"
+        }
+
+        // The file is only written when it is missing, so it keeps the rows it was first written
+        // with: an edit of the cohort pedigree since, or another cohort listing the family with
+        // other rows, leaves it out of date. Such a file is written again (DEEPVARIANT_FAMILY).
+        if (pedigree_ok) {
+            def on_disk = FamilyPedigree.onDisk(pedigree_path, fid)
+            plan.family_pedigree.on_disk[fid] = on_disk
+            def expected = cohort_family_rows[fid] ?: []
+            if (on_disk != expected) {
+                plan.family_pedigree.outdated[fid] = on_disk == null
+                    ? ['the file cannot be read as this family\'s pedigree']
+                    : FamilyPedigree.describe(on_disk, expected)
+            }
         }
 
         if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() && pedigree_ok) {
@@ -2278,33 +2301,48 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
-    // Check existing Wombat files
+    // Check existing Wombat files. A table is done when it exists and was built from the family's
+    // rows in this cohort's pedigree, as its inputs snapshot (wombat/inputs/<table>.inputs.tsv)
+    // records: an edit of a parent or a sex that keeps every member rebuilds it. A table from
+    // before the snapshots has none; it is taken as built from the family's pedigree file, which
+    // is what wombat read then, so it is done when that file holds the cohort's rows.
     families.each { fid ->
         def fam_dir = Sharding.getFamilyDir(params.data, fid)
         // Check if BCF2PARQUET output exists
         def bcf2parquet_output_path = "${fam_dir}/wombat/${fid}.rare.${params.vep_config_name}.annotated.parquet"
         def bcf2parquet_exists = new File(bcf2parquet_output_path).exists()
 
+        def rows = cohort_family_rows[fid] ?: []
+        def snapshot = InputsSnapshot.render([step: 'wombat', family: fid.toString()], FamilyPedigree.withoutPhenotype(rows))
+        plan.wombat.inputs[fid] = [pedigree: FamilyPedigree.wombatPedigree(rows), snapshot: snapshot]
+        def on_disk = plan.family_pedigree.on_disk[fid]
+        def legacy_same = on_disk != null && FamilyPedigree.withoutPhenotype(on_disk) == FamilyPedigree.withoutPhenotype(rows)
+
         // Check if PYWOMBAT outputs exist (need to check for all configs if defined)
+        def pywombat_exist = false
         def pywombat_complete = false
         if (params.wombat_config_list && !params.wombat_config_list.isEmpty() && bcf2parquet_exists) {
-            // Check if all PYWOMBAT outputs exist
-            pywombat_complete = params.wombat_config_list.every { config_file ->
+            def tables = params.wombat_config_list.collect { config_file ->
                 def config_name = config_file.replaceAll(/\.ya?ml$/, '')
-                def pywombat_output_path = "${fam_dir}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv"
-                new File(pywombat_output_path).exists()
+                def prefix = "${fid}.rare.${params.vep_config_name}.annotated.${config_name}"
+                def inputs_path = "${fam_dir}/wombat/inputs/${prefix}.inputs.tsv"
+                [exists: new File("${fam_dir}/wombat/${prefix}.tsv").exists(),
+                 same: new File(inputs_path).exists() ? InputsSnapshot.matches(inputs_path, snapshot) : legacy_same]
             }
+            pywombat_exist = tables.every { it.exists }
+            pywombat_complete = tables.every { it.exists && it.same }
         }
 
         // Track BCF2PARQUET status
         plan.wombat.need_bcf2parquet[fid] = !bcf2parquet_exists
-        
+
         // Determine if family needs Wombat processing
         if (fid in plan.annotation.existing || fid in plan.annotation.needed) {
             if (pywombat_complete) {
                 plan.wombat.existing.add(fid)
             } else {
                 plan.wombat.needed.add(fid)
+                if (pywombat_exist && !(fid in plan.annotation.needed)) plan.wombat.edited.add(fid)
             }
         }
     }
@@ -2348,7 +2386,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     DEEPVARIANT_SAMPLE: ${analysis_plan.deepvariant_sample.existing.size()} individuals done and ${analysis_plan.deepvariant_sample.needed.size()} to do
     DEEPVARIANT_FAMILY: ${analysis_plan.deepvariant_family.existing.size()} families done and ${analysis_plan.deepvariant_family.needed.size()} to do
     ANNOTATION: ${analysis_plan.annotation.existing.size()} families done and ${analysis_plan.annotation.needed.size()} to do
-    WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do
+    WOMBAT: ${analysis_plan.wombat.existing.size()} families done and ${analysis_plan.wombat.needed.size()} to do (${analysis_plan.wombat.edited.size()} for an edited pedigree)
     WOMBAT_COHORT: ${'wombat_cohort' in RunContext.steps ? "cohort wombat merges due: ${analysis_plan.wombat_cohort.need_merges.count { _k, v -> v == true }}" : 'Skipped (step not requested)'}
     == Common Variants ==
     SNVS_COHORT: ${'snvs_cohort' in RunContext.steps ? "common variants cohort bcf merge: ${analysis_plan.snvs_cohort.need_bcf_merge ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
@@ -2429,6 +2467,20 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.sampleqc.edited) {
         log.info "Families whose sample QC is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.sampleqc.edited.take(50).join(', ')}${analysis_plan.sampleqc.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.wombat.edited) {
+        log.info "Families whose wombat tables are redone for an edited pedigree: ${analysis_plan.wombat.edited.take(50).join(', ')}${analysis_plan.wombat.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.family_pedigree.outdated) {
+        // The family's own pedigree file holds other rows than the cohort pedigree. Rewritten by
+        // the deepvariant_family step; wombat no longer reads it, so its tables are right either way.
+        def outdated = analysis_plan.family_pedigree.outdated
+        def rewritten = 'deepvariant_family' in RunContext.steps
+        def shown = outdated.take(50).collect { fid, changes -> "    ${fid}: ${changes.take(6).join('; ')}${changes.size() > 6 ? '; ...' : ''}" }
+        def message = "${outdated.size()} ${outdated.size() == 1 ? 'family has a pedigree file' : 'families have a pedigree file'} ({FID}.pedigree.tsv) that ${outdated.size() == 1 ? 'does' : 'do'} not hold ${outdated.size() == 1 ? 'its' : 'their'} rows in ${params.cohort_name}'s pedigree (an edit since it was written, or another cohort listing the family with other rows)" +
+            (rewritten ? ", and ${outdated.size() == 1 ? 'it is' : 'they are'} written again:" : ". The deepvariant_family step is not requested, so ${outdated.size() == 1 ? 'it is' : 'they are'} left as ${outdated.size() == 1 ? 'it is' : 'they are'}:") +
+            "\n${shown.join('\n')}${outdated.size() > 50 ? '\n    and others' : ''}"
+        if (rewritten) log.info message else log.warn message
     }
     if (analysis_plan.upd.edited) {
         log.info "Families whose UPD analysis is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.upd.edited.take(50).join(', ')}${analysis_plan.upd.edited.size() > 50 ? ' and others' : ''}"

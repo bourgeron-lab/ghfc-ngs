@@ -421,7 +421,11 @@ PyWombat-based variant filtering and prioritization:
 
 Supports multiple configuration files for different filtering strategies (e.g., rare high-impact variants, de novo mutations, loss-of-function variants).
 
-**Outputs:** TSV.gz file (BCF converted), filtered TSV files (one per config)
+**The pedigree.** pywombat is given the family's rows in the cohort pedigree of the run, with a header, unknown parents as `0` and the sex as `1`, `2` or `0` (so a pedigree writing `1.0` reaches it as `1`). It does not read the family's `${FID}.pedigree.tsv`.
+
+**What reruns.** Each table is written beside `wombat/inputs/<table>.inputs.tsv`, a snapshot of the family's pedigree rows, normalised and without the phenotype (`lib/FamilyPedigree.groovy`). A family whose snapshot for the run differs is redone, so correcting a father, a mother or a sex reruns its tables, though every file is in place, and the cohort tables are merged again. A table from before the snapshots has none; it is taken as built from the family's `${FID}.pedigree.tsv`, and redone if that file does not hold the cohort's rows. A family listed by two cohorts with different rows is redone by each cohort's run in turn.
+
+**Outputs:** TSV.gz file (BCF converted), filtered TSV files (one per config), each with its inputs snapshot
 
 #### Wombat Cohort Workflow
 
@@ -745,12 +749,12 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Individual gVCF files**: `${data}/samples/{S1}/{S2}/${barcode}/deepvariant/${barcode}.g.vcf.gz` (and `.tbi`)
 - **VAF bedgraph files**: `${data}/samples/{S1}/{S2}/${barcode}/sequences/${barcode}.vaf.bedgraph.gz` (and `.tbi`)
 - **Normalized family BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.norm.bcf` (and `.csi`)
-- **Family pedigree files**: `${data}/families/{S1}/{S2}/${FID}/${FID}.pedigree.tsv`
+- **Family pedigree files**: `${data}/families/{S1}/{S2}/${FID}/${FID}.pedigree.tsv`, holding the family's rows in the cohort pedigree. One that holds other rows - the pedigree was edited since, or another cohort lists the family with other rows - is written again by the `deepvariant_family` step, and the run summary lists it with what changed
 - **Rare variant VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.vcf.gz` (and `.tbi`)
 - **Common variant BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.common.bcf` and `${FID}.common_gt.bcf` (with `.csi`)
 - **VEP annotated VCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.vcf.gz` (and `.tbi`)
 - **Fully annotated BCF files**: `${data}/families/{S1}/{S2}/${FID}/vcfs/${FID}.rare.${vep_config_name}.annotated.bcf` (and `.csi`)
-- **Wombat TSV files**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
+- **Wombat TSV files**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`, and `wombat/inputs/${FID}.rare.${vep_config_name}.annotated.${config_name}.inputs.tsv` identical to the snapshot the run builds from the pedigree (or, with no snapshot, a `${FID}.pedigree.tsv` holding the family's rows)
 - **WisecondorX NPZ files**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}.${wisecondorx_binsize}.npz`
 - **WisecondorX aberrations**: `${data}/samples/{S1}/{S2}/${barcode}/svs/wisecondorx/${barcode}_aberrations.chr.bed`
 - **Cohort BCF files**: `${data}/cohorts/${cohort_name}/vcfs/${cohort_name}.common_gt.bcf` (and `.csi`)
@@ -892,7 +896,9 @@ data/
 │               ├── wombat/
 │               │   ├── FID001.rare.ensembl_vep_115.annotated.tsv.gz                        # BCF to TSV
 │               │   ├── FID001.rare.ensembl_vep_115.annotated.de_novo_mutations.tsv         # Wombat filtered
-│               │   └── FID001.rare.ensembl_vep_115.annotated.rare_variants_high_impact.tsv
+│               │   ├── FID001.rare.ensembl_vep_115.annotated.rare_variants_high_impact.tsv
+│               │   └── inputs/
+│               │       └── FID001.rare.ensembl_vep_115.annotated.de_novo_mutations.inputs.tsv  # The pedigree snapshot it was built from
 │               ├── svs/
 │               │   └── wisecondorx/
 │               │       ├── FID001_aberrations.bed           # Family merged
@@ -1048,6 +1054,7 @@ All sample and family output paths include two shard levels (`{S1}/{S2}`) comput
 - **BCF to TSV conversion**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.tsv.gz`
 - **PyWombat filtered results**: `${data}/families/{S1}/{S2}/${FID}/wombat/${FID}.rare.${vep_config_name}.annotated.${config_name}.tsv`
   - One file per configuration in `wombat_config_list`
+- **PyWombat inputs snapshots**: `${data}/families/{S1}/{S2}/${FID}/wombat/inputs/${FID}.rare.${vep_config_name}.annotated.${config_name}.inputs.tsv`, the pedigree rows each table was built from
 
 ### Wombat Cohort Outputs
 

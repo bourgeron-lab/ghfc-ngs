@@ -76,6 +76,7 @@ class StaleFamily {
         paths << "${fam_dir}/wombat/${fid}.rare.${vepConfigName}.annotated.parquet".toString()
         configNames(wombatConfigNames).each { cfg ->
             paths << "${fam_dir}/wombat/${fid}.rare.${vepConfigName}.annotated.${cfg}.tsv".toString()
+            paths << "${fam_dir}/wombat/inputs/${fid}.rare.${vepConfigName}.annotated.${cfg}.inputs.tsv".toString()
         }
 
         // wisecondorx - membership-dependent like the rest, but only when the step is in play

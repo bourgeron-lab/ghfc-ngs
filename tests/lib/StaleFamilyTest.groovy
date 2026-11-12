@@ -7,6 +7,7 @@ Check.that('family outputs are the joint call, annotation and wombat files, unde
     assert paths.every { it.startsWith('/d/families/1/M/FAM1/') }
     assert '/d/families/1/M/FAM1/vcfs/FAM1.norm.bcf' in paths
     assert '/d/families/1/M/FAM1/FAM1.pedigree.tsv' in paths
+    assert '/d/families/1/M/FAM1/wombat/inputs/FAM1.rare.vep115.annotated.dnm.inputs.tsv' in paths
     assert '/d/families/1/M/FAM1/vcfs/FAM1.rare.vep115.annotated.bcf' in paths
     assert '/d/families/1/M/FAM1/wombat/FAM1.rare.vep115.annotated.dnm.tsv' in paths
     assert '/d/families/1/M/FAM1/wombat/FAM1.rare.vep115.annotated.rare.tsv' in paths
