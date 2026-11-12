@@ -65,7 +65,10 @@ what the pedigree records - siblings whose parents are not in it, consanguineous
 and is reported as information. Siblings who share one recorded parent, with the other
 missing for either, may be full or half siblings. The exception is a pair observed first
 degree although both have both parents recorded and the pedigree does not make them
-first-degree relatives: that is a contradiction.
+first-degree relatives: that is a contradiction. Full siblings observed at the second degree
+are HALF_SIB_NOT_FULL unless each is confirmed the child of both recorded parents, observed
+parent-offspring with each and no flag: then they cannot be half siblings, and the low
+kinship is chance inheritance or the parents' consanguinity.
 
 Twins and UPD. Two siblings of the same sex observed as one person are MZ_TWIN_CANDIDATE;
 any other duplicate is DUPLICATE_OR_MZ. A recorded parent and child whose opposite
@@ -795,16 +798,30 @@ def cmd_family(args):
             # gVCFs, do not: one of the two is not the sample it is named after
             flag = ("MENDELIAN_INCONSISTENT", "medium", "opposite homozygotes at {} of {} sites in the family "
                     "BCF, against {} from the CRAMs".format(fmt(rate, 4), n, describe(pair)))
+        pairs.append((pair, flag))
+    expected_pairs = len(qc) * (len(qc) - 1) // 2
+    if len(pairs) != expected_pairs:
+        die(f"somalier's pairs.tsv has {len(pairs)} pairs, {fid} has {expected_pairs}")
+
+    # Siblings who are each confirmed the child of both their recorded parents are full
+    # siblings, whatever their kinship: one read at the second degree has inherited less
+    # alike than most, by chance, and children of related parents read lower still, their
+    # long runs of homozygosity holding few of the hets KING-robust counts.
+    confirmed = {frozenset((p["sample_a"], p["sample_b"])) for p, flag in pairs
+                 if p["expected_relationship"] == "parent-offspring" and flag is None and
+                 p["observed_relationship"] == "parent-offspring"}
+    for i, (pair, flag) in enumerate(pairs):
+        if flag is not None and flag[0] == "HALF_SIB_NOT_FULL" and all(
+                frozenset((child, parent)) in confirmed
+                for child in (pair["sample_a"], pair["sample_b"]) for parent in pedigree.parents[child]):
+            flag = None
         if pair["observed_relationship"] == "low_confidence":
             pair["status"] = "low_confidence"
         else:
             pair["status"] = "ok" if flag is None else "mismatch"
         if flag is not None:
-            flags.append(flag_row("family", fid, a, b, flag))
-        pairs.append(pair)
-    expected_pairs = len(qc) * (len(qc) - 1) // 2
-    if len(pairs) != expected_pairs:
-        die(f"somalier's pairs.tsv has {len(pairs)} pairs, {fid} has {expected_pairs}")
+            flags.append(flag_row("family", fid, pair["sample_a"], pair["sample_b"], flag))
+        pairs[i] = pair
     pairs.sort(key=lambda p: (order[p["sample_a"]], order[p["sample_b"]]))
 
     # A member related to none of the relatives it should be is the likeliest swap. With a

@@ -11,7 +11,8 @@
 #         depth, with no JSON) and a father with no sex in the pedigree; mendelian counts on
 #         the trio from a bcftools query stream, and a stream with no pair in it read to the end
 #   FAM2  grandparents, half-sibs recorded as such but observed full (FULL_SIB_NOT_HALF),
-#         spouses related at the third degree (CONSANGUINITY), a pair with too few sites to
+#         spouses related at the third degree (CONSANGUINITY), a full sib observed at the
+#         second degree but confirmed by both parents (no flag), a pair with too few sites to
 #         classify, and a CRAM-less member left out
 #   FAM3  a trio whose child is related to neither parent (NOT_PARENT twice, and
 #         SAMPLE_UNRELATED_TO_FAMILY)
@@ -108,7 +109,7 @@ snapshot() {
 snapshot fam1/inputs.tsv "FAM1 DAD 0 0 0 yes -" "FAM1 MUM 0 0 2 yes -" "FAM1 KID1 DAD MUM 1 yes ${TAG}" \
     "FAM1 KID2 DAD MUM 2 yes ${TAG}" "FAM1 NPK DAD MUM 2 yes ${TAG}"
 snapshot fam2/inputs.tsv "FAM2 GF 0 0 1 yes -" "FAM2 GM 0 0 2 yes -" "FAM2 H1 GF GM 1 yes -" \
-    "FAM2 H2 GF OTHER 1 yes -" "FAM2 LOW GF GM 2 yes -" "FAM2 NOCRAM GF GM 2 no -"
+    "FAM2 H2 GF OTHER 1 yes -" "FAM2 LOW GF GM 2 yes -" "FAM2 NOCRAM GF GM 2 no -" "FAM2 FS GF GM 1 yes -"
 snapshot fam3/inputs.tsv "FAM3 A 0 0 1 yes -" "FAM3 B 0 0 2 yes -" "FAM3 C A B 1 yes -"
 snapshot fam4/inputs.tsv "FAM4 X 0 0 1 yes -"
 snapshot fam5/inputs.tsv "FAM5 U_F 0 0 1 yes -" "FAM5 U_M 0 0 2 yes -" "FAM5 U_C U_F U_M 1 yes -" \
@@ -166,11 +167,16 @@ for s, x, y in [("KID1", 1.0, 0.5), ("KID2", 0.5, 0.5), ("NPK", 1.0, 0.0)]:
 
 write("fam2/samples.tsv", SAMPLE_HEADER, [
     sample("FAM2", "GF", x=1, y=1, xhet=0), sample("FAM2", "GM"), sample("FAM2", "H1", x=1, y=1, xhet=0),
-    sample("FAM2", "H2", x=1, y=1, xhet=0), sample("FAM2", "LOW", called=3000)])
+    sample("FAM2", "H2", x=1, y=1, xhet=0), sample("FAM2", "LOW", called=3000),
+    sample("FAM2", "FS", x=1, y=1, xhet=0)])
 write("fam2/pairs.tsv", PAIR_HEADER, [
     pair("GF", "GM", "third"), pair("GF", "H1", "po"), pair("GF", "H2", "po"), pair("GM", "H1", "po"),
     pair("GM", "H2", "unrel"), pair("H1", "H2", "fs"), pair("GF", "LOW", "po", n=1000),
-    pair("GM", "LOW", "po", n=1000), pair("H1", "LOW", "fs", n=1000), pair("H2", "LOW", "fs", n=1000)])
+    pair("GM", "LOW", "po", n=1000), pair("H1", "LOW", "fs", n=1000), pair("H2", "LOW", "fs", n=1000),
+    # FS: GF and GM's child by both, but H1's full sib only at the second degree, as children
+    # of related parents can read
+    pair("GF", "FS", "po"), pair("GM", "FS", "po"), pair("H1", "FS", "second"), pair("H2", "FS", "second"),
+    pair("LOW", "FS", "fs", n=1000)])
 
 write("fam3/samples.tsv", SAMPLE_HEADER, [
     sample("FAM3", "A", x=1, y=1, xhet=0), sample("FAM3", "B"), sample("FAM3", "C", x=1, y=1, xhet=0)])
@@ -341,7 +347,7 @@ assert "CHARR 0.080" in unreliable["evidence"] and "its 1 pairs" in unreliable["
 samples = {r["sample"]: r for r in table(f"COH.{L}.samples.tsv")}
 assert set(samples) == {"DAD", "MUM", "KID1", "KID2", "NPK", "GF", "GM", "H1", "H2", "LOW", "A", "B", "C", "X",
                         "U_F", "U_M", "U_C", "T1", "T2", "MO", "S1", "S2", "Z1", "Z2", "Q1", "Q2",
-                        "W1", "W2", "AUNT"}
+                        "W1", "W2", "AUNT", "FS"}
 assert "NOCRAM" not in samples
 k = {s: (r["karyotype"], r["inferred_sex"], r["sex_evidence"]) for s, r in samples.items()}
 assert k["KID1"] == ("XXY", "male", "coverage") and k["KID2"] == ("XY", "male", "coverage"), k
@@ -357,9 +363,13 @@ c = {s: (samples[s]["contamination_charr"], samples[s]["charr_sites"], samples[s
 assert c == {"NPK": ("0.0800", "800", "0.0800"), "DAD": ("0.0000", "800", "0.0100"), "H1": (".", "0", "0.0100")}, c
 
 pairs = {(r["sample_a"], r["sample_b"]): r for r in table(f"COH.{L}.pairs.tsv")}
-# 10 + 10 + 3 + 10 + 21 + 3 within families, and three related pairs across them; the unrelated
+# 10 + 15 + 3 + 10 + 21 + 3 within families, and three related pairs across them; the unrelated
 # and low-confidence ones across families are left out, and so is the contaminated NPK's
-assert len(pairs) == 60, len(pairs)
+assert len(pairs) == 65, len(pairs)
+# FAM2: full sibs at the second degree, each confirmed by both parents, are not half-sibs
+p = pairs[("H1", "FS")]
+assert p["expected_relationship"] == "full-sibs" and p["observed_relationship"] == "second-degree", p
+assert p["status"] == "ok", p
 # FAM7: the twins are siblings through their dummy parents, and their aunt a second-degree
 # relative through the dummy grandparents; no dummy has a pair
 p = pairs[("W1", "W2")]
