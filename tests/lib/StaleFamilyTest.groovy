@@ -63,6 +63,51 @@ Check.that('a family cannot be re-called without both deepvariant steps') {
     }
     assert !StaleFamily.recovery([], [] as Set, [] as Set, [:], null).recoverable
 }
+Check.that('a family that needs no new gVCF needs only deepvariant_family') {
+    // Its missing members all have a gVCF, or it only holds a sample it should not
+    def r = StaleFamily.recovery([], [] as Set, [] as Set, [:], ['deepvariant_family'])
+    assert r.recoverable && r.needs_alignment == []
+    assert !StaleFamily.recovery([], [] as Set, [] as Set, [:], ['deepvariant_sample']).recoverable
+}
+
+def gvcfs = { Collection have -> { String barcode -> barcode in have } }
+
+Check.that('a call that holds every member, and nothing else, has not drifted') {
+    assert StaleFamily.drift(['KID', 'DAD', 'MUM'], ['MUM', 'KID', 'DAD'], gvcfs([])) == null
+    assert StaleFamily.drift(['KID'], null, gvcfs(['KID'])) == null
+    assert StaleFamily.drift([], [], gvcfs([])) == null
+}
+Check.that('a member added with no gVCF is missing, and needs calling') {
+    def d = StaleFamily.drift(['KID', 'DAD', 'SIB'], ['KID', 'DAD'], gvcfs(['KID', 'DAD']))
+    assert d == [members: 3, missing: ['SIB'], without_gvcf: ['SIB'], extra: []]
+}
+Check.that('a member added who already had a gVCF is missing, and needs no calling') {
+    def d = StaleFamily.drift(['KID', 'DAD', 'SIB'], ['KID', 'DAD'], gvcfs(['KID', 'DAD', 'SIB']))
+    assert d.missing == ['SIB'] && d.without_gvcf == [] && d.extra == []
+}
+Check.that('a member removed from the family is extra') {
+    def d = StaleFamily.drift(['KID', 'DAD'], ['KID', 'DAD', 'OLD'], gvcfs(['KID', 'DAD', 'OLD']))
+    assert d == [members: 2, missing: [], without_gvcf: [], extra: ['OLD']]
+}
+Check.that('a member replaced by another sample is both') {
+    def d = StaleFamily.drift(['KID', 'NEW', 'MUM'], ['KID', 'OLD', 'MUM'], gvcfs(['KID', 'NEW', 'OLD', 'MUM']))
+    assert d.missing == ['NEW'] && d.extra == ['OLD'] && d.without_gvcf == []
+}
+Check.that('a member in the call whose gVCF has gone since has not drifted') {
+    assert StaleFamily.drift(['KID', 'DAD'], ['KID', 'DAD'], gvcfs(['KID'])) == null
+}
+Check.that('an unreadable header falls back to the members with no gVCF') {
+    def d = StaleFamily.drift(['KID', 'SIB', 'DAD'], null, gvcfs(['KID']))
+    assert d == [members: 3, missing: ['DAD', 'SIB'], without_gvcf: ['DAD', 'SIB'], extra: []]
+}
+Check.that('the summary line names each kind of drift') {
+    assert StaleFamily.describe([members: 3, missing: ['SIB'], without_gvcf: ['SIB'], extra: []]) ==
+        '1 of 3 members have no gVCF (SIB)'
+    assert StaleFamily.describe([members: 3, missing: ['NEW'], without_gvcf: [], extra: ['OLD']]) ==
+        'the call lacks NEW, which has a gVCF; the call holds OLD, no longer in this family in the pedigree'
+    assert StaleFamily.describe([members: 4, missing: ['A', 'B'], without_gvcf: ['B'], extra: []]) ==
+        '1 of 4 members have no gVCF (B); the call lacks A, which has a gVCF'
+}
 Check.that('config names drop their YAML suffix and empties') {
     assert StaleFamily.configNames(['a.yaml', 'b.yml', 'c', null, '']) == ['a', 'b', 'c']
     assert StaleFamily.configNames(null) == []

@@ -1443,7 +1443,9 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // what lets the run report on samples that nothing would otherwise look at.
         alignment: [needed: planBucket(), existing: planBucket(), need_bedgraph: planBucket(), no_cram: planBucket(), no_cram_with_gvcf: planBucket()],
         deepvariant_sample: [needed: planBucket(), existing: planBucket()],
-        deepvariant_family: [needed: planBucket(), existing: planBucket()],
+        // bcf_samples: the samples each called family's norm.bcf holds, read from its header.
+        // unreadable: the called families whose header could not be read.
+        deepvariant_family: [needed: planBucket(), existing: planBucket(), bcf_samples: [:], unreadable: planBucket()],
         annotation: [needed: planBucket(), existing: planBucket()],
         snvs_cohort: [needed: planBucket(), existing: planBucket(), need_bcf_merge: false],
         wombat_cohort: [needed: planBucket(), existing: planBucket(), need_merges: [:]],
@@ -1489,7 +1491,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         upd: [need_family: planBucket(), family_existing: planBucket(), edited: planBucket(), need_cohort: false,
               cohort_edited: false, coverage_members: [:], coverage_from_run: planBucket(),
               roh_families: planBucket(), roh_from_run: planBucket(), snapshots: [:], cohort_snapshot: null,
-              mask: null],
+              mask: null, stale_skipped: planBucket()],
         pedigree_drift: [:]
     ]
 
@@ -1530,19 +1532,26 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         if (new File(norm_bcf_path).exists() && new File(norm_csi_path).exists() && pedigree_ok) {
             plan.deepvariant_family.existing.add(fid)
 
-            // The family has been called, but the pedigree may have gained members since.
-            // A member with no gVCF cannot possibly be in the joint call, so the family's
-            // outputs are stale - and nothing will fix that on its own, because the very
-            // existence of norm.bcf is what stops the missing members being scheduled.
+            // The family has been called, but the pedigree may have changed since: a member
+            // added, removed, moved to another family or replaced by another sample. Any of
+            // them leaves the family's outputs stale - and nothing will fix that on its own,
+            // because the very existence of norm.bcf is what stops the family being re-called.
             //
-            // Membership is inferred from which members have a gVCF rather than read from
-            // the BCF: bcftools is not on the launching node's PATH, and the family's own
-            // {FID}.pedigree.tsv is no help because it is rewritten from the current
-            // pedigree and so already lists the members the call is missing.
+            // The call's samples are read from the BCF's header, in Groovy, since bcftools is
+            // not on the launching node's PATH. The family's own {FID}.pedigree.tsv is no help:
+            // it is rewritten from the current pedigree whenever it is missing. A header that
+            // cannot be read falls back to inferring the members from which have a gVCF, which
+            // only sees a member added with no gVCF, and is reported in the summary.
             def members = members_by_family[fid] ?: []
-            def without_gvcf = members.findAll { barcode -> !hasGvcf(gvcf_exists, barcode) }.sort()
-            if (without_gvcf) {
-                plan.pedigree_drift[fid] = [members: members.size(), missing: without_gvcf]
+            def in_bcf = BcfHeader.samples(norm_bcf_path)
+            if (in_bcf == null) {
+                plan.deepvariant_family.unreadable.add(fid)
+            } else {
+                plan.deepvariant_family.bcf_samples[fid] = in_bcf
+            }
+            def drift = StaleFamily.drift(members, in_bcf, { barcode -> hasGvcf(gvcf_exists, barcode) })
+            if (drift) {
+                plan.pedigree_drift[fid] = drift
             }
         } else {
             plan.deepvariant_family.needed.add(fid)
@@ -2179,11 +2188,24 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 return
             }
             def rows = rows_by_family[fid] ?: []
-            // The members the BCF holds: a dummy never, and a member only with a gVCF, on disk or
-            // made in this run, as deepvariant_family's own drift check reads it
+            // The members the BCF holds: those its header names when it is on disk and not
+            // remade in this run, else a member only with a gVCF, on disk or made in this run.
+            // A dummy never.
+            def header_samples = bcf_from_run ? null : plan.deepvariant_family.bcf_samples[fid] as Set
+            if (header_samples != null) {
+                def listed = rows.collect { row -> row[1] } as Set
+                if (header_samples.any { sample -> !(sample in listed) }) {
+                    // A call holding a sample the pedigree no longer puts in the family is stale
+                    // (STALE FAMILY OUTPUTS), and UPD_FAMILY refuses a BCF sample its snapshot
+                    // does not list: left out until the family is re-called
+                    upd.stale_skipped.add(fid)
+                    return
+                }
+            }
             def in_bcf = rows.collect { row -> row[1] }.findAll { barcode ->
-                !DummyMember.isDummy(barcode) &&
-                    (hasGvcf(gvcf_exists, barcode) || barcode in plan.deepvariant_sample.needed)
+                !DummyMember.isDummy(barcode) && (header_samples != null
+                    ? barcode in header_samples
+                    : (hasGvcf(gvcf_exists, barcode) || barcode in plan.deepvariant_sample.needed))
             } as LinkedHashSet
             if (!in_bcf) {
                 return
@@ -2400,6 +2422,10 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     if (analysis_plan.upd.edited) {
         log.info "Families whose UPD analysis is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.upd.edited.take(50).join(', ')}${analysis_plan.upd.edited.size() > 50 ? ' and others' : ''}"
     }
+    if (analysis_plan.upd.stale_skipped) {
+        def skipped = analysis_plan.upd.stale_skipped
+        log.warn "UPD leaves out ${skipped.size()} ${skipped.size() == 1 ? 'family whose joint call holds' : 'families whose joint calls hold'} samples the pedigree no longer puts in ${skipped.size() == 1 ? 'it' : 'them'}, until ${skipped.size() == 1 ? 'it is' : 'they are'} re-called - see STALE FAMILY OUTPUTS: ${skipped.take(50).join(', ')}${skipped.size() > 50 ? ' and others' : ''}"
+    }
     if ('upd' in RunContext.steps && analysis_plan.upd.snapshots && !params.ancestry_panel_name) {
         // Not an error: trios and duos need no ROH, and solo members are reported as skipped
         log.warn "ancestry_panel_name is not set, so the UPD analysis reads no roh tables: members with no parent in their family's BCF get no isodisomy calls"
@@ -2415,6 +2441,11 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
         def stale = analysis_plan.cnv_panel.stale_controls
         log.warn "CNV panel v${params.cnv_panel_version} is complete and is not rebuilt, but ${stale.size()} samples with coverage are not among its controls: ${stale.take(50).join(', ')}${stale.size() > 50 ? ' and others' : ''}. Set a new cnv_panel_version to build a panel with them"
     }
+    // A stub run's BCFs are empty files, so they never have a header to read
+    if (analysis_plan.deepvariant_family.unreadable && !workflow.stubRun) {
+        def unreadable = analysis_plan.deepvariant_family.unreadable
+        log.warn "The norm.bcf of ${unreadable.size()} called ${unreadable.size() == 1 ? 'family has' : 'families have'} no readable BCF header, so which samples ${unreadable.size() == 1 ? 'its call holds was' : 'their calls hold was'} only inferred from the members' gVCFs: ${unreadable.take(50).join(', ')}${unreadable.size() > 50 ? ' and others' : ''}. Check them with bcftools query -l"
+    }
     if (analysis_plan.pedigree_drift) {
         def n_drift = analysis_plan.pedigree_drift.size()
         def drift_noun = n_drift == 1 ? "FAMILY" : "FAMILIES"
@@ -2427,7 +2458,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
         def would_clean = (clean_report?.rehearsal ? clean_report.families_cleaned : []).collect { it.family_id } as Set
 
         def drift_lines = analysis_plan.pedigree_drift.collect { fid, drift ->
-            def line = "${fid}: ${drift.missing.size()} of ${drift.members} members have no gVCF (${drift.missing.join(', ')})"
+            def line = "${fid}: ${StaleFamily.describe(drift)}"
             if (skip_reasons[fid]) return "${line}\n        not cleaned: ${skip_reasons[fid]}"
             if (fid in would_clean) return "${line}\n        would be cleaned by this flag"
             return line
@@ -2444,24 +2475,25 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     or remove the members that have no data from the pedigree, if they were never sequenced."""
             : """Then either
       - run again with --clean-stale-families, which deletes each family's norm.bcf and the
-        annotation and wombat outputs built from it so the family is re-called in full. It
-        only touches families whose missing members can actually be re-called from data on
-        disk and from the steps you asked for, and reports the rest. Add --dry-run first to
-        see exactly what it would remove; or
+        annotation and wombat outputs built from it so the family is re-called in full, from
+        the members the pedigree lists now. It only touches families whose members can
+        actually be called from data on disk and from the steps you asked for, and reports
+        the rest. Add --dry-run first to see exactly what it would remove; or
       - remove the members that have no data from the pedigree, if they were never sequenced.
 
-    Ancestry outputs need no action: a member with no gVCF has no panel genotypes either, so
-    the family's ancestry merge and scores are already re-scheduled on their own."""
+    Ancestry outputs need no action: they are built from each member's gVCF rather than from
+    the joint call, and a member with no gVCF has its family's ancestry re-scheduled already."""
 
-        log.warn "STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun.toLowerCase()} with already-called outputs that cannot contain every member the pedigree lists - details below"
+        log.warn "STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun.toLowerCase()} whose joint call does not hold the members the pedigree lists - details below"
         log.info """
     ========================================================================================
                     STALE FAMILY OUTPUTS: ${n_drift} ${drift_noun}
     ========================================================================================
-    These families have already been called, but the pedigree lists members that have no
-    gVCF - so the existing family outputs cannot contain them. This does not self-heal: the
-    presence of the family's norm.bcf is exactly what stops the missing members from being
-    scheduled for alignment or variant calling.
+    These families have already been called, but their joint call does not hold the members
+    the pedigree lists now: it lacks some, or holds samples the pedigree has since removed
+    from the family or replaced. Every output built from it is stale. This does not
+    self-heal: the presence of the family's norm.bcf is exactly what stops the family from
+    being re-called, and its missing members from being scheduled for alignment or calling.
 
     ${drift_lines.join('\n    ')}
 
@@ -2559,14 +2591,14 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
     def data_root = new File(params.data as String).canonicalPath
 
     analysis_plan.pedigree_drift.each { fid, drift ->
-        def verdict = StaleFamily.recovery(drift.missing,
+        def verdict = StaleFamily.recovery(drift.without_gvcf,
                                            analysis_plan.alignment.existing as Set,
                                            resolved_inputs.resolvable as Set,
                                            resolved_inputs.index_missing ?: [:],
                                            RunContext.steps)
         if (!verdict.recoverable) {
             report.families_skipped.add([family_id: fid, members: drift.members,
-                                         missing: drift.missing,
+                                         missing: drift.missing, extra: drift.extra,
                                          reason: verdict.reasons.join('; ')])
             return
         }
@@ -2576,7 +2608,7 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
                                               wombat_configs, with_wisecondorx)
         def deleted = []
         def failed = [:]
-        log.info "Family ${fid}: ${verb} the outputs of a joint call that is missing ${drift.missing.join(', ')}"
+        log.info "Family ${fid}: ${verb} the outputs of a joint call that no longer matches the pedigree: ${StaleFamily.describe(drift)}"
         paths.each { path -> deleteWithinData(path, data_root, rehearsal, deleted, failed) }
 
         // The norm.bcf is what makes the family look done. If it survived, the family was not
@@ -2588,7 +2620,7 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
             log.warn "Family ${fid} was NOT cleaned: its norm.bcf could not be removed (${why}) - the family still looks complete and the other files removed from it are now missing"
             report.errors.add("${fid}: norm.bcf could not be removed (${why})".toString())
             report.families_skipped.add([family_id: fid, members: drift.members,
-                                         missing: drift.missing,
+                                         missing: drift.missing, extra: drift.extra,
                                          reason: "norm.bcf could not be removed: ${why}".toString()])
             return
         }
@@ -2598,7 +2630,8 @@ def cleanStaleFamilies(analysis_plan, resolved_inputs, family_members) {
             report.errors.add("${fid}: ${path}: ${why}".toString())
         }
         report.families_cleaned.add([family_id: fid, members: drift.members,
-                                     missing: drift.missing, files_deleted: deleted.size()])
+                                     missing: drift.missing, extra: drift.extra,
+                                     files_deleted: deleted.size()])
     }
 
     // The cohort merges keep data from call sets that no longer exist. The plan merges them

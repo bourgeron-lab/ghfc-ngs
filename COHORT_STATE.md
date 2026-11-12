@@ -314,10 +314,11 @@ requested, or the run died before it could run.
 {
   "rehearsal": false,
   "families_cleaned": [
-    { "family_id": "FID001", "members": 4, "missing": ["C0ABC"], "files_deleted": 17 }
+    { "family_id": "FID001", "members": 4, "missing": ["C0ABC"], "extra": [], "files_deleted": 17 },
+    { "family_id": "FID003", "members": 3, "missing": ["C0NEW"], "extra": ["C0OLD"], "files_deleted": 17 }
   ],
   "families_skipped": [
-    { "family_id": "FID002", "members": 3, "missing": ["C0XYZ"],
+    { "family_id": "FID002", "members": 3, "missing": ["C0XYZ"], "extra": [],
       "reason": "no input data on disk for C0XYZ" }
   ],
   "cohort_outputs_deleted": ["EAGER.common_gt.bcf", "EAGER.common_gt.bcf.csi"],
@@ -326,6 +327,10 @@ requested, or the run died before it could run.
 }
 ```
 
+- **`missing` and `extra`** compare the family's joint call with the pedigree: `missing` is the
+  members the call lacks, `extra` the samples it holds that the pedigree no longer puts in the
+  family (removed, moved or replaced). Both are read from the `norm.bcf` header; if it cannot
+  be read, `missing` is the members with no gVCF and `extra` is empty.
 - **`families_skipped` is the interesting half.** Each entry carries the reason the clean
   refused: no input data, an unindexed CRAM, or a step missing from `steps`. Fix that and run
   again with the same flag.
