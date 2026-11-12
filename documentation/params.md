@@ -356,10 +356,19 @@ The list of samples is **not** in the parameters file — it comes from the pedi
 
 #### `clean_stale_families`: repairing a drifted cohort
 
-A family whose pedigree gains a member who was never called has *stale* outputs: the joint call
-on disk cannot contain that member, and the run reports this as `STALE FAMILY OUTPUTS`. It does
-not fix itself — the presence of the family's `norm.bcf` is exactly what stops the missing
-member being scheduled for anything.
+A family whose joint call no longer matches the pedigree has *stale* outputs, and the run reports
+it as `STALE FAMILY OUTPUTS`. Each run reads the samples of every called family's `norm.bcf` from
+its header and compares them with the family's members in the pedigree, so it sees every kind of
+edit made after the call:
+
+- a member added who was never called (no gVCF);
+- a member added who already had a gVCF, called alone or in another family;
+- a member removed from the family, moved to another, or replaced by another sample.
+
+It does not fix itself — the presence of the family's `norm.bcf` is exactly what stops the
+family being re-called. Until it is, the `upd` step leaves out a family whose call holds a sample
+the pedigree no longer puts in it, rather than stop the run on it. A `norm.bcf` whose header
+cannot be read is reported, and its family is checked only for members with no gVCF.
 
 `clean_stale_families` deletes those families' derived outputs so they are re-called in full:
 the `norm.bcf` and its index, the family pedigree, every annotation output, and the wombat
@@ -377,9 +386,10 @@ ghfc-ngs MY_COHORT --clean-stale-families             # then actually do it
 ```
 
 **It refuses families it cannot rebuild.** For each drifted family it checks that every missing
-member can reach a gVCF — the member already has a CRAM, or an alignment input resolves for it
-in `fastq_pattern` / `old_cram_37` / `old_cram_38` — *and* that `steps` contains the steps that
-would do the work. A family failing either check is left completely untouched and reported with
+member with no gVCF can reach one — the member already has a CRAM, or an alignment input
+resolves for it in `fastq_pattern` / `old_cram_37` / `old_cram_38` — *and* that `steps` contains
+the steps that would do the work. A family whose missing members all have a gVCF, or that only
+holds samples it should not, needs `deepvariant_family` alone. A family failing either check is left completely untouched and reported with
 the reason. This is the point of the flag: deleting a call set that cannot be rebuilt would
 leave the cohort worse off than the warning it replaces.
 

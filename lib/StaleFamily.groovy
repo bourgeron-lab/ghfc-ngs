@@ -127,6 +127,54 @@ class StaleFamily {
     }
 
     /**
+     * How a called family's joint call differs from its pedigree, or null when it does not.
+     *
+     * inBcf is the samples the family's norm.bcf holds (BcfHeader), or null when its header could
+     * not be read. Then the call's members are inferred, as they were before the header was read,
+     * from which members have a gVCF: that sees a member added with no gVCF, and nothing else.
+     *
+     *  - missing: the members the call lacks, sorted;
+     *  - without_gvcf: those of them that have no gVCF, so need calling before the family can be;
+     *  - extra: the samples the call holds that the pedigree no longer puts in this family -
+     *    removed from it, moved to another, or replaced by another sample.
+     *
+     * A dummy member is never in a call, and is not among the members given here.
+     */
+    static Map drift(Collection members, Collection inBcf, Closure<Boolean> hasGvcf) {
+        def member_list = (members ?: []) as List
+        def missing = inBcf == null
+            ? member_list.findAll { barcode -> !hasGvcf(barcode) }
+            : member_list.findAll { barcode -> !(barcode in inBcf) }
+        def member_set = member_list as Set
+        def extra = inBcf == null ? [] : inBcf.findAll { sample -> !(sample in member_set) }
+        if (!missing && !extra) {
+            return null
+        }
+        missing = missing.sort()
+        return [members     : member_list.size(),
+                missing     : missing,
+                without_gvcf: missing.findAll { barcode -> !hasGvcf(barcode) },
+                extra       : extra.sort()]
+    }
+
+    /** One line saying how a family's call differs from its pedigree, for the run's summary. */
+    static String describe(Map drift) {
+        def parts = []
+        def without_gvcf = drift.without_gvcf ?: []
+        def with_gvcf = (drift.missing ?: []).findAll { barcode -> !(barcode in without_gvcf) }
+        if (without_gvcf) {
+            parts << "${without_gvcf.size()} of ${drift.members} members have no gVCF (${without_gvcf.join(', ')})".toString()
+        }
+        if (with_gvcf) {
+            parts << "the call lacks ${with_gvcf.join(', ')}, which ${with_gvcf.size() == 1 ? 'has' : 'have'} a gVCF".toString()
+        }
+        if (drift.extra) {
+            parts << "the call holds ${drift.extra.join(', ')}, no longer in this family in the pedigree".toString()
+        }
+        return parts.join('; ')
+    }
+
+    /**
      * Can this family's missing members actually be re-called?
      *
      * Deleting a family's outputs when the answer is no leaves the cohort strictly worse off
@@ -137,6 +185,9 @@ class StaleFamily {
      * one that already has a CRAM only needs variant calling, one without needs an alignment
      * input to resolve. The steps half asks whether this run was even asked to do that work -
      * a family the requested steps cannot rebuild is a guaranteed own-goal.
+     *
+     * missing is the members with no gVCF (drift's without_gvcf). A member the call lacks that
+     * has a gVCF, and a sample the call should not hold, need only the family re-called.
      *
      * Returns [recoverable: boolean, reasons: List<String>, needs_alignment: List<String>].
      */
@@ -166,7 +217,7 @@ class StaleFamily {
         if (!requested.contains('deepvariant_family')) {
             reasons << "the deepvariant_family step was not requested, so the family could not be re-called".toString()
         }
-        if (!requested.contains('deepvariant_sample')) {
+        if (missing && !requested.contains('deepvariant_sample')) {
             reasons << "the deepvariant_sample step was not requested, so the missing members could not be called".toString()
         }
         if (needs_alignment && !requested.contains('alignment')) {
