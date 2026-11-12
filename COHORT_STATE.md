@@ -90,6 +90,7 @@ across many cohorts into one list without losing track of which is which.
     "alignment", "deepvariant_sample", "deepvariant_family",
     "annotation", "snvs_cohort", "wisecondorx", "wombat", "wombat_cohort"
   ],
+  "exclude_nodes": ["maestro-1096", "maestro-1082"],
   "completion_measured": "after",
   "outputs_may_be_incomplete": false,
   "completion": {
@@ -149,6 +150,7 @@ across many cohorts into one list without losing track of which is which.
 | `launch.slurm_job_id` | string | **not run inside Slurm** | The job running Nextflow itself, for `--submit` runs. `squeue -j` on it is the liveness check a `running` record otherwise lacks. |
 | `launch.host` | string | rarely | The machine Nextflow ran on. |
 | `steps_requested` | array | — | `params.steps` for this run. **Needed to interpret `completion`** — a step that was not requested was not measured. |
+| `exclude_nodes` | array of strings | — | The Slurm nodes this run's tasks were kept off (`--exclude-nodes`, `params.exclude_nodes`), in the order given; `[]` when none were. **Absent from records written before it existed**: read a missing key as "not recorded", not as `[]`. On a record refused for an invalid value (`reason` starting `invalid exclude_nodes`) it holds the value as given, invalid names included. |
 | `completion_measured` | string | — | `after` = the tree was re-scanned once the run finished. `before` = the numbers are from the start of the run (every `failed`-at-validation record, and every `running` record). |
 | `outputs_may_be_incomplete` | bool | — | `true` on a failed run. Nextflow cancels in-flight `publishDir` copies when a run aborts, so outputs this run produced may not have landed before the counts were taken. |
 | `completion` | object | **no plan was built** | Per-step progress. See below. |
@@ -427,6 +429,7 @@ overwritten by each run. It is not written by `-preview` or `-stub-run`.
   "launch_dir": "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/runs/EAGER",
   "slurm_job_id": "23792765",
   "host": "maestro-1116",
+  "exclude_nodes": [],
   "status": "running",
   "updated_at": "2026-10-01T14:44:05+02:00",
   "totals": { "pending": 0, "submitted": 0, "running": 6, "succeeded": 40, "cached": 0,
@@ -464,6 +467,9 @@ It has two clocks, for two questions:
 A process's `total` is **not** how many tasks the process will have in the end. Nextflow only counts
 the tasks it has created so far, and a process's total grows as upstream processes emit. For a
 percentage of the cohort, use `completion`.
+
+`exclude_nodes` is the run's, as in a state file record: `[]` when no node was excluded, and absent
+from files written before it existed.
 
 `status` is `running` until the completion handler writes `success` or `failed`. A run killed
 without that chance (SIGKILL, a lost node) leaves `running` behind, with an `updated_at` that stops

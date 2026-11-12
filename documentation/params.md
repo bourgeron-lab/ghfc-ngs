@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-74 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+75 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -87,6 +87,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `data` | always — **required** | [Core paths and identity](#core-paths-and-identity) |
 | `deepvariant_threads` | `deepvariant_sample` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `enable_conda` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
+| `exclude_nodes` | always, by every task's Slurm options | [Containers and resources](#containers-and-resources) |
 | `expansionhunter_catalog` | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
 | `expansionhunter_catalog_name` 📄 | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
 | `expansionhunter_reviewer` | `expansionhunter` | [ExpansionHunter](#expansionhunter) |
@@ -319,7 +320,7 @@ they should be set.
 
 ## Key reference
 
-74 keys are read by the code. In the tables below, **no default** means the key is `null` when
+75 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -703,11 +704,33 @@ It runs in the sample QC image.
 | `max_memory` | memory string | `'460.GB'` | Per-process memory ceiling. |
 | `max_cpus` | integer | `95` | Per-process CPU ceiling. |
 | `max_time` | duration string | `'240.h'` | Per-process wall-clock ceiling. |
+| `exclude_nodes` | comma-separated string, or list | `''` | Slurm nodes no task may run on. Empty excludes none. See below. |
 
 A task asking for more than a ceiling — by default, through `resources`, or after a retry has
 added memory — is clamped down to it, not failed: the ceilings are every process's
 `resourceLimits`. A `resources` value above a ceiling is also warned about when the run starts,
 and a ceiling that does not parse stops it there.
+
+#### `exclude_nodes`: keeping a run off bad nodes
+
+Every task is submitted with `--exclude=<exclude_nodes>` when it is set, and with no `--exclude` at
+all when it is empty, the default. It is a choice for one run, like `clean_stale_families`, so give
+it on the command line rather than in a parameters file:
+
+```bash
+ghfc-ngs MY_COHORT --submit --exclude-nodes maestro-1096,maestro-1082
+```
+
+The wrapper also keeps a `--submit` head job off those nodes, and passes the list to Nextflow as
+`--exclude_nodes` (the spelling `nextflow run` itself needs). A parameters file may give a string
+or a YAML list. Node names may hold letters, digits, `.`, `_` and `-` only, and are separated by
+commas without spaces; anything else, a Slurm hostlist such as `maestro-[1082,1096]` included,
+stops the run before any task is submitted. The run's state record lists the nodes as
+`exclude_nodes` (see [COHORT_STATE.md](../COHORT_STATE.md)). `-resume` does not carry them over:
+give them again.
+
+Until this key existed, four nodes (`maestro-1096,maestro-1082,maestro-1098,maestro-1090`) were
+excluded from every run, written into `nextflow.config`. Now none are unless asked.
 
 ### `resources`: per-cohort cpus, memory and time
 

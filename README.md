@@ -1360,6 +1360,22 @@ process {
 > place these are configured.
 > See [documentation/params.md](documentation/params.md#keys-that-look-live-but-are-inert).
 
+### Excluding nodes
+
+Which nodes a run's tasks must avoid is chosen per run, with `--exclude-nodes` (comma-separated,
+no spaces); none are excluded by default:
+
+```bash
+ghfc-ngs CANDY_mpx --submit --exclude-nodes maestro-1096,maestro-1082
+```
+
+Every task then gets `--exclude=maestro-1096,maestro-1082`, and so does the `--submit` head job.
+Without the option no `--exclude` is passed at all. **This changed:** `nextflow.config` used to
+exclude `maestro-1096,maestro-1082,maestro-1098,maestro-1090` from every run; give them explicitly
+if they are still bad. Calling `nextflow run` directly, the parameter is `--exclude_nodes`. The
+nodes a run excluded are recorded as `exclude_nodes` in its record of `.ghfc-ngs.state.json`. See
+[`exclude_nodes` in documentation/params.md](documentation/params.md#exclude_nodes-keeping-a-run-off-bad-nodes).
+
 ### Queue Management
 
 ```groovy

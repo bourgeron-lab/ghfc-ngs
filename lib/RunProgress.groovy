@@ -47,7 +47,8 @@ class RunProgress {
 
     /**
      * @param opts.dir           the cohort directory
-     * @param opts.header        run_id, cohort_name, started_at, slurm_job_id, launch_dir, host
+     * @param opts.header        run_id, run_name, cohort_name, started_at, launch_dir, slurm_job_id,
+     *                         host, exclude_nodes
      * @param opts.rescan        returns a completion block, as CohortState records hold
      * @param opts.processes     returns the per-process records; defaults to Nextflow's
      * @param opts.warn          called with a message when a write or a re-scan fails
