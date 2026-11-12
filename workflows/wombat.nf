@@ -18,7 +18,8 @@ workflow WOMBAT {
 
     take:
     annotated_bcfs     // channel: [fid, bcf, csi]
-    family_pedigrees   // channel: [fid, pedigree_file]
+    wombat_inputs      // map: [fid: [pedigree: text, snapshot: text]] - the pedigree pywombat is given
+                       // and the inputs snapshot written beside each table (lib/FamilyPedigree.groovy)
     normalized_bcfs    // channel: [fid, bcf, csi]
     need_bcf2parquet   // map: [fid: boolean] - whether BCF2PARQUET is needed for each family
 
@@ -58,36 +59,37 @@ workflow WOMBAT {
         // Fully qualified: the strict syntax parser refuses Groovy imports
         def yaml_parser = new org.yaml.snakeyaml.Yaml()
 
-        // Create input channel for PyWombat by combining Parquet files with pedigrees and wombat configs
+        // Create input channel for PyWombat by combining Parquet files with the normalized BCFs and
+        // wombat configs; each family's pedigree and snapshot are text from the plan.
         // For each Parquet file, create entries for each wombat config
         all_wombat_input = all_parquet_files
-            .combine(family_pedigrees, by: 0)  // Combine by fid to get pedigree
             .combine(normalized_bcfs, by: 0)   // Combine by fid to get normalized BCF
-            .map { fid, parquet, pedigree, norm_bcf, norm_csi ->
+            .map { fid, parquet, norm_bcf, norm_csi ->
+                def inputs = wombat_inputs[fid]
                 // Create a list of tuples, one for each wombat config
                 params.wombat_config_list.collect { config_file ->
                     def config_name = config_file.replaceAll(/\.ya?ml$/, '')
                     def config_path = file("${params.wombat_config_path}/${config_file}")
                     def config_content = yaml_parser.load(config_path.text)
                     def is_external = config_content?.mnv?.annotate == 'external'
-                    tuple(fid, parquet, pedigree, config_path, config_name, params.vep_config_name, norm_bcf, norm_csi, is_external)
+                    tuple(fid, parquet, inputs.pedigree, config_path, config_name, params.vep_config_name, norm_bcf, norm_csi, inputs.snapshot, is_external)
                 }
             }
             .flatMap()  // Flatten the list of tuples into individual tuples
             .branch {
-                external: it[8] == true
+                external: it[9] == true
                 standard: true
             }
 
         // Standard path: existing PYWOMBAT process (strip the is_external flag)
         pywombat_input = all_wombat_input.standard
-            .map { it[0..7] }  // Remove is_external flag
+            .map { it[0..8] }  // Remove is_external flag
 
         PYWOMBAT(pywombat_input)
 
-        // External MNV annotation path: 3-step pipeline
+        // External MNV annotation path: 3-step pipeline (the snapshot is written by the last one)
         pywombat_filter_input = all_wombat_input.external
-            .map { it[0..7] }  // Remove is_external flag
+            .map { it[0..7] }  // Remove the snapshot and the is_external flag
 
         PYWOMBAT_FILTER(pywombat_filter_input)
 
@@ -106,13 +108,13 @@ workflow WOMBAT {
             }
             .join(VEP_MNV_ANNOTATION.out, by: [0, 1, 2])  // Join by fid, wombat_config_name, vep_config_name
             .map { fid, wombat_config_name, vep_config_name, filtered_tsv, vep_annotations ->
-                tuple(fid, wombat_config_name, vep_config_name, filtered_tsv, vep_annotations)
+                tuple(fid, wombat_config_name, vep_config_name, filtered_tsv, vep_annotations, wombat_inputs[fid].snapshot)
             }
 
         WOMBAT_MERGE_ANNOTATIONS(merge_input)
 
         // Combine outputs from both paths (both emit [fid, wombat_config_name, tsv])
-        wombat_outputs_channel = PYWOMBAT.out.mix(WOMBAT_MERGE_ANNOTATIONS.out)
+        wombat_outputs_channel = PYWOMBAT.out.table.mix(WOMBAT_MERGE_ANNOTATIONS.out.table)
     }
 
     emit:

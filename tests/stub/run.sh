@@ -12,11 +12,12 @@
 #                   the pedigree;
 #   5. editpedigree - the same again, after FAM01's child loses its recorded father: every file
 #                   is in place, and only the steps that compare the pedigree they were built
-#                   from (sampleqc, upd, and expansionhunter's tables) redo the family and the cohort;
+#                   from (sampleqc, upd, wombat, and expansionhunter's tables) redo the family and
+#                   the cohort, and the family's own pedigree file is written again;
 #   6. adddummy   - the same again, after FAM02's singleton gets dummy parents and its dummy mother
 #                   dummy parents of her own (DUMMY_..., rows with no data): only FAM02's
-#                   pedigree-reading tables and the cohort's are redone, and nothing is planned
-#                   for a dummy.
+#                   pedigree-reading tables and pedigree file, and the cohort's tables, are
+#                   redone, and nothing is planned for a dummy.
 #
 # A pass fails on any FAILED task, and when the tasks it ran - name and tag, sorted - differ from
 # expected/<pass>.tasks.txt. The rerun is the planner's own test: anything it schedules is

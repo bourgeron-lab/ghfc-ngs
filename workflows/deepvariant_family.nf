@@ -14,8 +14,11 @@ include { FAMILIAL_PEDIGREE } from '../modules/deepvariant_family/familial_pedig
 workflow DEEPVARIANT_FAMILY {
 
     take:
-    family_gvcfs    // channel: [fid, [barcodes], [gvcfs], [tbis]]
-    pedigree_file   // path: cohort pedigree file
+    family_gvcfs        // channel: [fid, [barcodes], [gvcfs], [tbis]]
+    pedigree_file       // path: cohort pedigree file
+    outdated_pedigrees  // list: families whose {FID}.pedigree.tsv does not hold their cohort rows,
+                        // taken as missing so that it is written again
+    pedigree_rewrites   // list: those of them not in family_gvcfs, whose pedigree alone is written
 
     main:
 
@@ -28,8 +31,9 @@ workflow DEEPVARIANT_FAMILY {
             def pedigree = file("${fam_dir}/${fid}.pedigree.tsv")
             
             def has_norm_bcf = norm_bcf.exists() && norm_csi.exists()
-            // An empty pedigree must not count as present, or it is passed through unchanged forever
-            def has_pedigree = pedigree.exists() && pedigree.size() > 0
+            // An empty pedigree must not count as present, or it is passed through unchanged forever;
+            // nor an out-of-date one, which would be
+            def has_pedigree = pedigree.exists() && pedigree.size() > 0 && !(fid in outdated_pedigrees)
             
             [fid: fid, barcodes: barcodes, gvcfs: gvcfs, tbis: tbis,
              norm_bcf: norm_bcf, norm_csi: norm_csi, pedigree: pedigree,
@@ -68,14 +72,20 @@ workflow DEEPVARIANT_FAMILY {
         .map { fid, _vcf, _tbi ->
             // Check if pedigree already exists for this family
             def pedigree = file("${Sharding.getFamilyDir(params.data, fid)}/${fid}.pedigree.tsv")
-            [fid, pedigree.exists() && pedigree.size() > 0]
+            [fid, pedigree.exists() && pedigree.size() > 0 && !(fid in outdated_pedigrees)]
         }
         .filter { _fid, has_pedigree -> !has_pedigree }
         .map { fid, _has_pedigree ->
             [fid, pedigree_file, params.cohort_name]
         }
     
-    all_families_needing_pedigree = families_needing_pedigree_from_glnexus.mix(families_need_pedigree_only)
+    // Called families whose pedigree file is out of date, and that are not called again here
+    families_pedigree_rewrite = Channel.fromList(pedigree_rewrites)
+        .map { fid -> [fid, pedigree_file, params.cohort_name] }
+
+    all_families_needing_pedigree = families_needing_pedigree_from_glnexus
+        .mix(families_need_pedigree_only)
+        .mix(families_pedigree_rewrite)
     FAMILIAL_PEDIGREE(all_families_needing_pedigree)
 
     // Combine newly created outputs with existing ones
