@@ -72,6 +72,12 @@ OPTIONS:
                                 (default 2), \$GHFC_NGS_HEAD_MEM (16G), JVM heap
                                 \$GHFC_NGS_HEAD_HEAP (12g). The pipeline is pulled here,
                                 and the job runs that checkout.
+    --exclude-nodes LIST        Slurm nodes to keep the run off, comma-separated, no
+                                spaces: maestro-1096,maestro-1082. Applies to every task,
+                                and with --submit to the head job too. Default: none.
+                                Recorded as exclude_nodes in the cohort's
+                                .ghfc-ngs.state.json; it is not carried over by --resume,
+                                so give it again.
     --here                      Launch from the current directory, not \$GHFC_NGS_RUNS/COHORT
 
 ENVIRONMENT:
@@ -99,6 +105,9 @@ EXAMPLES:
     # Run a cohort as a Slurm job, then resume its last run the same way
     $PROG_NAME CANDY_mpx --submit
     $PROG_NAME CANDY_mpx --submit --resume
+
+    # Keep a run, and its head job, off two misbehaving nodes
+    $PROG_NAME CANDY_mpx --submit --exclude-nodes maestro-1096,maestro-1082
 
     # Stop a submitted run cleanly: Nextflow cancels its own tasks on SIGTERM
     scancel --signal=TERM --batch --name=ghfc-ngs.GHFC-GRCh38.CANDY_mpx
@@ -182,6 +191,7 @@ REF=""
 REF_NAME=""
 STEPS=""
 CLEAN_STALE=""
+EXCLUDE_NODES=""
 MIGRATE=""
 DRY_RUN=""
 STUB_RUN=""
@@ -277,6 +287,21 @@ while [[ $# -gt 0 ]]; do
             # so the flag has to be handed over in the spelling nextflow.config declares
             CLEAN_STALE="--clean_stale_families"
             shift
+            ;;
+        --exclude-nodes|--exclude_nodes|--exclude-nodes=*|--exclude_nodes=*)
+            if [[ "$1" == *=* ]]; then
+                EXCLUDE_NODES="${1#*=}"
+                shift
+            else
+                [[ $# -ge 2 ]] || die "$1 requires a LIST argument, e.g. maestro-1096,maestro-1082."
+                EXCLUDE_NODES="$2"
+                shift 2
+            fi
+            # The same rule as main.nf's, checked here too so that a bad list stops before
+            # sbatch. Empty is allowed: it excludes none, as leaving the option out does.
+            if [[ -n "$EXCLUDE_NODES" && ! "$EXCLUDE_NODES" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]]; then
+                die "--exclude-nodes: '$EXCLUDE_NODES' is not a comma-separated list of node names, e.g. maestro-1096,maestro-1082 (no spaces)"
+            fi
             ;;
         --migrate)
             MIGRATE="migrate.nf"
@@ -420,12 +445,13 @@ if [[ -n "$SUBMIT" ]]; then
     } > "$JOB_SCRIPT"
     mkdir -p "$LAUNCH_DIR"
     JOB_ID="$(sbatch --parsable \
-        -p ghfc --qos=ghfc -c "$HEAD_CPUS" --mem="$HEAD_MEM" \
+        -p ghfc --qos=ghfc ${EXCLUDE_NODES:+"--exclude=$EXCLUDE_NODES"} -c "$HEAD_CPUS" --mem="$HEAD_MEM" \
         -J "$JOB_NAME" --comment="$JOB_TAG" \
         -D "$LAUNCH_DIR" -o "$LAUNCH_DIR/ghfc-ngs.%j.log" \
         "$JOB_SCRIPT")" || die "sbatch failed"
     echo "Submitted $JOB_NAME as Slurm job $JOB_ID"
     echo "  launch dir : $LAUNCH_DIR"
+    [[ -z "$EXCLUDE_NODES" ]] || echo "  excluded   : $EXCLUDE_NODES"
     echo "  console    : $LAUNCH_DIR/ghfc-ngs.$JOB_ID.log"
     echo "  stop       : scancel --signal=TERM --batch $JOB_ID"
     exit 0
@@ -479,6 +505,8 @@ CMD="$CMD -profile $PROFILE"
 [[ -n "$REF_NAME" ]] && CMD="$CMD $REF_NAME"
 [[ -n "$STEPS" ]] && CMD="$CMD $STEPS"
 [[ -n "$CLEAN_STALE" ]] && CMD="$CMD $CLEAN_STALE"
+# The spelling nextflow.config declares, as for --clean_stale_families
+[[ -n "$EXCLUDE_NODES" ]] && CMD="$CMD --exclude_nodes $EXCLUDE_NODES"
 [[ -n "$RESUME" ]] && CMD="$CMD $RESUME"
 [[ -n "$DRY_RUN" ]] && CMD="$CMD $DRY_RUN"
 [[ -n "$STUB_RUN" ]] && CMD="$CMD $STUB_RUN"

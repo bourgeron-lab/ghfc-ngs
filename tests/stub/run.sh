@@ -4,6 +4,8 @@
 #
 #   1. validation - parameter mistakes the run must refuse before doing anything, each with
 #      its message (-preview, so nothing is written even if a check stops working);
+#      then the Slurm options of a task under the slurm profile, with and without exclude_nodes,
+#      read from what a fake sbatch is given;
 #   2. fresh      - all 17 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
@@ -115,6 +117,49 @@ expect_refusal upd_no_gnomad_index "with a .csi or .tbi index" "${v[0]}" 'steps:
 expect_refusal pedigree_conflict "Pedigree file has two different rows for BC003" "${v[@]}" \
     "pedigree: \"${fixture}/conflict.pedigree.tsv\""
 expect_refusal resources_typo "no process is called PYWOMBATT" "${v[@]}" 'resources: {PYWOMBATT: {cpus: 2}}'
+expect_refusal exclude_nodes_space "invalid exclude_nodes: 'bad node' is not a node name" "${v[@]}" \
+    'exclude_nodes: "maestro-1096,bad node"'
+expect_refusal exclude_nodes_bare "invalid exclude_nodes: it was given with no value" "${v[@]}" 'exclude_nodes: true'
+
+# --- cluster options ------------------------------------------------------------------------
+
+# The clusterOptions every task is submitted with, under the slurm profile: a fake sbatch records
+# the #SBATCH lines of the first task and refuses it, which ends the run there. Nothing is
+# published, so the fixture is still untouched for the stub runs below.
+mkdir -p "${out}/bin" "${out}/cluster"
+cat > "${out}/bin/sbatch" << 'SBATCH'
+#!/usr/bin/env bash
+for a in "$@"; do [[ -f "${a}" ]] && grep '^#SBATCH' "${a}" >> "${SBATCH_LOG:?}"; done
+echo "sbatch: refused by the test" >&2
+exit 1
+SBATCH
+chmod +x "${out}/bin/sbatch"
+
+# name | the --exclude= expected, empty for none | params lines | nextflow arguments...
+expect_cluster_options() {
+    local name=$1 exclude=$2 line=$3; shift 3
+    local file log="${out}/cluster_${name}.out" sbatch="${out}/cluster_${name}.sbatch" options
+    file=$(params "cluster_${name}" "${valid_scenario[@]}" "${line}")
+    (cd "${out}/cluster" && PATH="${out}/bin:${PATH}" SBATCH_LOG="${sbatch}" "${nextflow}" run "${root}/main.nf" \
+        -stub-run -profile slurm -params-file "${file}" -c "${here}/slurm.config" "$@" > "${log}" 2>&1) || true
+    options=$(grep -h '^#SBATCH -p ' "${sbatch}" 2>/dev/null || true)
+    if [[ -z "${options}" ]]; then
+        echo "  FAIL  cluster options ${name}: no task reached sbatch (see ${log})"; fail=1
+    elif [[ "${options}" != *" --comment=ghfc-ngs:data/STUB "* ]]; then
+        echo "  FAIL  cluster options ${name}: no --comment=ghfc-ngs:data/STUB in: ${options}"; fail=1
+    elif [[ -z "${exclude}" && "${options}" == *--exclude* ]]; then
+        echo "  FAIL  cluster options ${name}: an --exclude with none asked for: ${options}"; fail=1
+    elif [[ -n "${exclude}" && "${options}" != *" --exclude=${exclude} "* ]]; then
+        echo "  FAIL  cluster options ${name}: no --exclude=${exclude} in: ${options}"; fail=1
+    else
+        echo "  ok    cluster options ${name}: ${options#\#SBATCH }"
+    fi
+}
+
+echo "=== cluster options"
+expect_cluster_options none "" ''
+expect_cluster_options command_line "maestro-1096,maestro-1082" '' --exclude_nodes maestro-1096,maestro-1082
+expect_cluster_options yaml_list "maestro-1096,maestro-1082" 'exclude_nodes: ["maestro-1096", "maestro-1082"]'
 
 # --- 2. and 3. stub runs ------------------------------------------------------------------
 

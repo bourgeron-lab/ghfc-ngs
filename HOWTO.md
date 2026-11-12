@@ -154,13 +154,16 @@ withName: 'MAKE_EXAMPLES' {
 
 If there is a minimal version or a broking change identified in a different version, it is a good idea to indicate it as an issue in the github.
 
-The slurm parameters (such as the partition or the qos) are also defined in this config file.
+The slurm parameters (such as the partition or the qos) are also defined in this config file,
+in `process.ext.slurm_options`, which every task's `clusterOptions` starts from before adding its
+priority (`--nice`).
+
+Nodes to keep a run off are not: they are chosen per run, with `--exclude-nodes` (none by
+default; the config used to exclude `maestro-1096,maestro-1082,maestro-1098,maestro-1090` from
+every run):
 
 ```bash
-slurm {
-        process.executor = 'slurm'
-        process.clusterOptions = '-p ghfc --qos=ghfc'
-    }
+ghfc-ngs CANDY_mpx --submit --exclude-nodes maestro-1096,maestro-1082
 ```
 
 ### 2. Workflow parameter file (*params.yml*)

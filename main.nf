@@ -239,7 +239,8 @@ def startRunProgress(plan) {
                 started_at:   isoTimestamp(workflow.start),
                 launch_dir:   launch.dir,
                 slurm_job_id: launch.slurm_job_id,
-                host:         launch.host
+                host:         launch.host,
+                exclude_nodes: ExcludeNodes.parse(params.exclude_nodes)
             ],
             // The pedigree the run started with, not a re-read one: an edit made mid-run must
             // not move the denominator under a run that is still working to the old one
@@ -290,6 +291,8 @@ def buildStateRecord(Map opts) {
         launch: launchInfo(),
         params_effective_sha256: effectiveParamsSha(),
         steps_requested: RunContext.steps,
+        // The Slurm nodes its tasks were kept off, [] for none
+        exclude_nodes: ExcludeNodes.parse(params.exclude_nodes),
         completion_measured: opts.measured,
         outputs_may_be_incomplete: opts.incomplete ? true : false,
         completion: buildCompletionBlock(plan, n_families, n_individuals),
@@ -415,6 +418,14 @@ def validateParams() {
     if (invalid_steps) {
         recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
         exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
+    }
+
+    // Read by every task's clusterOptions (process.ext.slurm_options in nextflow.config), where a
+    // malformed value would only surface as sbatch refusing the first task
+    def exclude_nodes_error = ExcludeNodes.check(params.exclude_nodes)
+    if (exclude_nodes_error) {
+        recordFailedRun("invalid exclude_nodes: ${exclude_nodes_error}")
+        exit 1, "ERROR: invalid exclude_nodes: ${exclude_nodes_error}"
     }
 
     // snvs_cohort used to merge the wombat tables too. A parameters file written then still lists
