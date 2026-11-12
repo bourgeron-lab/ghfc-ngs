@@ -636,7 +636,7 @@ pedigree, and the next run redoes the families that changed.
   | Flag | Severity | Raised when |
   |---|---|---|
   | `NOT_PARENT` | high | a recorded parent and child are not parent-offspring; the evidence names which parent |
-  | `HALF_SIB_NOT_FULL`, `FULL_SIB_NOT_HALF` | high | siblings are of the other kind |
+  | `HALF_SIB_NOT_FULL`, `FULL_SIB_NOT_HALF` | high | siblings are of the other kind. Full siblings each confirmed the child of both recorded parents (parent-offspring with each, no flag) are never `HALF_SIB_NOT_FULL`: a second-degree kinship is then chance inheritance, or the parents' consanguinity, whose runs of homozygosity in the children pull KING-robust down |
   | `EXPECTED_RELATED_UNRELATED` | high, medium past the second degree | recorded relatives are unrelated |
   | `UNEXPECTED_RELATED_IN_FAMILY` | high | first-degree relatives by their genotypes, though both have both parents recorded and the pedigree does not make them so |
   | `RELATED_BEYOND_PEDIGREE` | info | members closer than the pedigree says, which its missing parents allow: e.g. siblings whose parents are not in it |
