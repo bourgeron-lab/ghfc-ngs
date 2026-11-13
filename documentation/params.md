@@ -710,7 +710,7 @@ It runs in the sample QC image.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `denovo_label` 📄 | string | `"dnm_v1"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family, and is the only way a new mask bundle or a new version of the analysis reaches families already done. `dnm_v1` is the first version, with the mask bundle `denovo_masks_v1`. |
+| `denovo_label` 📄 | string | `"dnm_v2"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family, and is the only way a new mask bundle or a new version of the analysis reaches families already done. `dnm_v1` was the first version (#62), with the mask bundle `denovo_masks_v1`; `dnm_v2`, with the same bundle, gives Unfazed BAM slices of the children's reads instead of their CRAMs, on which it ran out of memory or phased almost nothing. |
 | `denovo_masks` | dir | `""` | The mask bundle, built with `scripts/denovo/build_mask_bundle`: one bgzipped, indexed BED per flag listed in its `MANIFEST.tsv`, and their `union.bed.gz`. Read in place. **Required.** |
 | `denovo_wombat_config` | string | `"de_novo_mutations"` | The `wombat_config_list` entry, without `.yml`, whose Wombat table holds the candidates. Not in the list, the step warns and reads the tables on disk. |
 

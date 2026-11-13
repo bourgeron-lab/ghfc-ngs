@@ -197,7 +197,7 @@ upd_af_field: "AF_genomes" # gnomad_file INFO field for the missing parent's all
 # origin with Unfazed, and a per-child count against the callable genome. Report-only: read
 # families/.../denovo/<FID>.<label>.dnm.tsv and cohorts/<cohort>/denovo/<cohort>.<label>.{dnm,qc}.tsv.
 # The mask bundle is built with scripts/denovo/build_mask_bundle and copied to the cluster.
-denovo_label: "dnm_v1" # Label baked into output file names; a new mask bundle needs a new one (default: dnm_v1)
+denovo_label: "dnm_v2" # Label baked into output file names; a new mask bundle needs a new one (default: dnm_v2)
 denovo_masks: "" # TODO: path to the mask bundle, e.g. .../references/GRCh38/denovo/denovo_masks_v1
 denovo_wombat_config: "de_novo_mutations" # wombat_config_list entry holding the candidates (default: de_novo_mutations)
 
