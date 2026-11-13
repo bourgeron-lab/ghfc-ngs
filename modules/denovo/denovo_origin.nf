@@ -14,8 +14,12 @@ process DENOVO_ORIGIN {
 
   Unfazed 1.0.2 (Belyeu 2021) on the files DENOVO_EVIDENCE wrote: the candidates as a BED, the
   family's biallelic SNVs within 5 kb of them as the informative sites, a PED of the trios, and
-  each child's CRAM. A son's chrX and chrY candidates are phased by his sex (-g 38). About a
-  quarter to a third of the candidates of a 30x genome are phased; the others are unphased.
+  each child's reads within 6 kb of its candidates, copied from its CRAM to a BAM first (pysam,
+  one pass): Unfazed opens the alignment file again for every candidate, which on a CRAM loads
+  reference sequence each time; on the CRAMs themselves it ran out of 4 GB on real families and
+  phased 1-2% of the candidates of the others. A son's chrX and chrY candidates are phased by his
+  sex (-g 38). About a quarter of the candidates of a 30x genome are phased; the others are
+  unphased.
 
   A failure of Unfazed is written in the table (origin error for the family's children), never a
   failed task: parent of origin is a bonus. Unfazed's pysam 0.16 reads CRAM 3.0, not 3.1.

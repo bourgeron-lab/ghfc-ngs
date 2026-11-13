@@ -19,8 +19,9 @@ evidence
     kids.tsv}.
 
 origin
-    One family, in the Unfazed image. Runs Unfazed on the files evidence wrote and the children's
-    CRAMs, and writes <out>: the origin of each candidate it could phase. A failure of Unfazed
+    One family, in the Unfazed image (pysam). Copies each child's reads around its candidates
+    from its CRAM to a BAM, runs Unfazed on those and the files evidence wrote, and writes <out>:
+    the origin of each candidate it could phase. A failure of Unfazed
     is recorded in the table, never a failed task: parent of origin is a bonus, not a gate.
 
 family
@@ -98,6 +99,9 @@ NEARBY_BP = 20
 PILEUP_PAD = 25
 # Unfazed looks for informative sites this far from a candidate
 ORIGIN_WINDOW = 5000
+# Each child's reads within this distance of its candidates are copied to a BAM for Unfazed: the
+# informative sites' window and a fragment's length beyond it
+ORIGIN_SLICE_PAD = ORIGIN_WINDOW + 1000
 # Callable genome
 CALLABLE_CHILD_DP = 15
 CALLABLE_PARENT_DP = 10
@@ -774,6 +778,36 @@ def n_items(text):
     return len([x for x in (text or "").split(",") if x and x not in ("-", ".")])
 
 
+def slice_to_bam(cram, ref, windows, out):
+    """Copy a CRAM's reads around the candidates to an indexed BAM, through one handle.
+
+    Unfazed opens the alignment file again for every candidate, and on a CRAM each opening loads
+    reference sequence: on real families of 300-700 candidates it ran out of 4 GB, and phased 1-2%
+    of the candidates of those that finished. On BAM slices of the same reads it phases about a
+    quarter of them, in a few hundred MB. pysam is only needed here, in Unfazed's image."""
+    import pysam
+
+    with pysam.AlignmentFile(cram, "rc", reference_filename=ref) as inp, \
+            pysam.AlignmentFile(out, "wb", template=inp) as bam:
+        order = {name: i for i, name in enumerate(inp.references)}
+        merged = [w for w in merge_windows([(c, max(1, s), e) for c, s, e in windows]) if w[0] in order]
+        merged.sort(key=lambda w: (order[w[0]], w[1]))
+        n, previous = 0, set()
+        for chrom, start, end in merged:
+            current = set()
+            for read in inp.fetch(chrom, start - 1, end):
+                key = (read.query_name, read.flag, read.reference_start)
+                # A read across the gap between two windows is fetched by both
+                if key in previous:
+                    continue
+                current.add(key)
+                bam.write(read)
+                n += 1
+            previous = current
+    pysam.index(out)
+    return n
+
+
 def cmd_origin(args):
     d = args.unfazed_dir
     kids = [k for k in open(os.path.join(d, "kids.tsv")).read().split() if k]
@@ -782,12 +816,20 @@ def cmd_origin(args):
     if not kids or os.path.getsize(os.path.join(d, "dnms.bed")) == 0:
         write_tsv(args.out, ORIGIN_COLUMNS, [])
         return
+    windows = {}
+    with open(os.path.join(d, "dnms.bed")) as fh:
+        for line in fh:
+            chrom, start, end, kid = line.split("\t")[:4]
+            windows.setdefault(kid, []).append((chrom, int(start) - ORIGIN_SLICE_PAD, int(end) + ORIGIN_SLICE_PAD))
     pairs = []
     for kid in kids:
         found = sorted(glob.glob(f"{kid}.*.cram"))
         if len(found) != 1:
             die(f"expected one CRAM named {kid}.<ref_name>.cram, found {found}")
-        pairs.append(f"{kid}:{found[0]}")
+        bam = f"{kid}.slice.bam"
+        n = slice_to_bam(found[0], args.ref, windows.get(kid, []), bam)
+        print(f"{kid}: {n} reads around {len(windows.get(kid, []))} candidates", file=sys.stderr)
+        pairs.append(f"{kid}:{bam}")
     out_bed = "unfazed.out.bed"
     cmd = [args.unfazed, "-d", os.path.join(d, "dnms.bed"), "-s", os.path.join(d, "sites.vcf.gz"),
            "-p", os.path.join(d, "family.ped"), "-g", "38", "-r", args.ref, "-o", "bed", "--verbose",

@@ -53,7 +53,7 @@ jobs:
       - run: tests/checks/repo_hygiene.sh
 
   script-tests:
-    name: Script tests (Python 3.12, bcftools, samtools, numpy/pandas/pyBigWig)
+    name: Script tests (Python 3.12, bcftools, samtools, numpy/pandas/pyBigWig, pysam)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -64,6 +64,8 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq bcftools samtools tabix
       # What modules/cnv/scripts/cnv_coverage runs with in fcliquet/cnv-coverage
       - run: pip install "numpy>=2,<3" "pandas>=2.2,<3" "pyBigWig>=0.3.22,<0.4"
+      # What modules/denovo/scripts/denovo_tables origin slices CRAMs with, in Unfazed's image
+      - run: pip install "pysam>=0.16,<0.25"
       - run: tests/run_script_tests.sh
 
   script-tests-py36:

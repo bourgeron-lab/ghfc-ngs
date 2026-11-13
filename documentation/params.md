@@ -760,8 +760,11 @@ family and cohort tasks run in the sample QC image; parent of origin in Unfazed'
   at 30-40x; the masks take a fifth of the genome away.
 - **Parent of origin**: Unfazed 1.0.2's read-backed phasing (Belyeu 2021) of the candidates of the
   children with a CRAM and both parents in the family BCF, from the family's biallelic SNVs
-  within 5 kb; a son's chrX and chrY are phased by his sex. Its pysam reads CRAM 3.0, not 3.1. A
-  failure is written as `origin_status` `error`, never a failed task.
+  within 5 kb; a son's chrX and chrY are phased by his sex. Each child's reads within 6 kb of
+  its candidates are first copied from the CRAM to a BAM: Unfazed opens its alignment file again
+  for every candidate, which on a CRAM loads reference sequence each time, and ran out of memory
+  on real families. Its pysam reads CRAM 3.0, not 3.1. A failure is written as `origin_status`
+  `error`, never a failed task.
 - **What reruns.** The label is the cache. The family tables are also checked against
   `inputs.tsv`: the family's pedigree rows, which members have a CRAM and a bedgraph, the Wombat
   table's name, the mask bundle's directory name, `ref_name` and `bin`. A family is also redone
