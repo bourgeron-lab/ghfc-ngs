@@ -99,7 +99,11 @@ AUTO_SWITCH. A segment is a run of one UPD state, cut wherever two of its sites 
 SEGMENT_MAX_GAP apart: a segment never spans a region with no site, such as one the mask removed,
 so its length is covered genome. With LR the likelihood of a
 site under the segment's state over N:
-    lod              sum of log10 LR over the segment's sites: the score
+    lod              sum of log10 LR over the segment's sites: the score. In a trio, against
+                     whichever state of normal inheritance fits the segment best, N, auto,
+                     ibd_mat or ibd_pat: a heterodisomy against a shared haplotype is then scored
+                     on the few sites that tell them apart, not on the thousands where the
+                     child's genotype is its parent's, which both predict
     n_informative    sites where LR is at least 2-fold either way
     n_supporting     sites favouring the state at least 2-fold
     n_contradicting  sites favouring N at least 2-fold, such as a child het inside an isodisomy
@@ -110,6 +114,14 @@ site under the segment's state over N:
                      identical to its parent where the parent is heterozygous)
     support_fraction n_supporting / (n_supporting + n_contradicting)
     depth_ratio      the child's mean DP over the segment's sites, over its mean DP genome-wide
+    informativeness  trio only: the strong sites the segment's state predicts per site there,
+                     from the parents' genotypes alone, over the same across the child's
+                     autosomes. A heterodisomy shows only where the parents are opposite
+                     homozygotes, and an isodisomy where the other parent lacks the child's
+                     allele; where the parents share a haplotype, related parents over tens of
+                     Mb, there are almost none, and the state cannot be told from normal
+                     inheritance with that haplotype (ibd_P, auto): the few strong sites left are
+                     the parents' genotyping errors. About 1 for a real UPD
 A solo segment is scored at the child's non-reference SNVs inside it: a hom-alt site has
 probability 1 - SOLO_HET_IN_ROH in a ROH and p / (2 - p) otherwise, a het site SOLO_HET_IN_ROH
 and 2(1 - p) / (2 - p).
@@ -128,7 +140,13 @@ disorder its parent of origin implies there; a trio or duo event outside them ca
 terminal UPD of distal 15q, say, not Prader-Willi, since a trio sees the heterodisomic parts
 too. A solo event carries those of every imprinted region of its chromosome (above).
 
-Siblings. Two children sharing a parent in the BCF, with events on one chromosome overlapping by
+Siblings. A site where a child of the same two parents has a Mendelian error is left out of
+a trio (n_sibling_errors in the members table): a UPD is sporadic, so an error two siblings
+share is the parents' calls (a deletion of a parent's, reads mismapped alike), and it would be a
+strong site for the other. Autosomes only. MZ twins (genotypes discordant at MZ_MAX_DISCORDANCE
+or less of every MZ_SITE_STEP-th site) do not count for each other, and a child with more than
+SIBLING_MAX_ERROR_RATE of Mendelian errors (a child of other parents has about 8%, one with a
+whole-chromosome UPD well under 1%) for nobody. Then two children sharing a parent in the BCF, with events on one chromosome overlapping by
 SIBLING_OVERLAP of the shorter, share an artefact, a parental CNV or reads mismapped alike, not a
 UPD: a UPD is sporadic. Both events are then low, whatever their origin, unless the two are MZ
 twins (genotypes discordant at MZ_MAX_DISCORDANCE or less of the sites they are called at), who
@@ -141,7 +159,8 @@ Confidence of a segment, and of an event (its best segment's):
     medium  lod >= MEDIUM_LOD, at least MEDIUM_MIN_MB long, and n_strong >= MEDIUM_STRONG (or
             n_supporting >= MEDIUM_SUPPORT)
     low     the rest
-    Both high and medium also need a support fraction of MIN_SUPPORT_FRACTION. A trio state, a
+    Both high and medium also need an informativeness of MIN_INFORMATIVENESS in a trio, and a
+    support fraction of MIN_SUPPORT_FRACTION. A trio state, a
     duo's present-parent state, and an isodisomy of its missing parent (the child homozygous)
     predict the child's genotypes closely, so a real UPD is all but never contradicted (1.00 on
     the real events seen, the known UPD15 as either duo included), where a mapping artefact is
@@ -195,6 +214,7 @@ calls are artefacts more often than UPD.
 
 import argparse
 import bisect
+import collections
 import glob
 import gzip
 import json
@@ -238,8 +258,11 @@ MEDIUM_SUPPORT = 20
 MEDIUM_MIN_MB = 0.5
 MIN_SUPPORT_FRACTION = 0.9
 MIN_DIFFUSE_HET_SUPPORT = 0.5
+MIN_INFORMATIVENESS = 0.25
 SIBLING_OVERLAP = 0.5
+SIBLING_MAX_ERROR_RATE = 0.03
 MZ_MAX_DISCORDANCE = 0.02
+MZ_SITE_STEP = 16
 PARENTAGE_MAX_OPPOSITE = 0.01
 X_HET_TWO_X_MIN = 0.1
 SEX_TOLERANCE = 0.25
@@ -278,15 +301,15 @@ IMPRINTED = {
 
 SEGMENT_COLUMNS = ["family_id", "sample", "mode", "father", "mother", "chrom", "start", "end", "length_mb",
                    "state", "origin", "source", "n_sites", "n_informative", "n_supporting", "n_contradicting",
-                   "n_strong", "support_fraction", "lod", "depth_ratio", "roh_fraction", "interpretation",
-                   "confidence", "event_id"]
+                   "n_strong", "support_fraction", "lod", "depth_ratio", "roh_fraction", "informativeness",
+                   "interpretation", "confidence", "event_id"]
 EVENT_COLUMNS = ["family_id", "sample", "mode", "event_id", "chrom", "start", "end", "length_mb", "origin",
                  "composition", "extent", "terminal", "n_segments", "n_supporting", "n_strong",
                  "support_fraction", "lod", "depth_ratio", "interpretation", "imprinting", "confidence",
                  "shared_with", "notes"]
 LOG2 = math.log10(2)
 MEMBER_COLUMNS = ["family_id", "sample", "father", "mother", "mode", "father_used", "mother_used", "chrx",
-                  "n_sites", "error_rate", "status", "n_events", "n_events_high"]
+                  "n_sites", "error_rate", "status", "n_events", "n_events_high", "n_sibling_errors"]
 # Read by name by genetics-viz: do not rename
 WINDOW_COLUMNS = ["family_id", "sample", "mode", "chrom", "start", "end", "n_sites", "n_het", "n_hom_alt", "n_mat",
                   "n_pat", "n_lacks_father", "n_lacks_mother", "depth_ratio"]
@@ -604,6 +627,28 @@ def trio_table(on_x):
     return table
 
 
+def expected_strong(table):
+    """(9 father + 3 mother) -> per state, the probability that a site of parents of these
+    genotypes is strong (LR over N of 10 or more) were the child in that state: how much a
+    state can be seen at such a site, whatever the child's genotype. 0 for parents both 0/0."""
+    k = len(STATES)
+    out = [None] * 9
+    for fm in range(9):
+        rows = [table[3 * fm + c] for c in range(3)]
+        if fm == 0 or any(r is None for r in rows):
+            out[fm] = (0.0,) * k
+            continue
+        out[fm] = tuple(sum(math.exp(r[s]) for r in rows if r[s] - r[0] >= LN10) for s in range(k))
+    return out
+
+
+# A Mendelian error: the child's genotype, code 9 father + 3 mother + child, is not one its
+# parents can give
+ALLELES = ({0}, {0, 1}, {1})
+MENDEL_ERROR = bytes(int(c not in {a + b for a in ALLELES[f] for b in ALLELES[m]})
+                     for f in range(3) for m in range(3) for c in range(3))
+
+
 def duo_table(parent_is_father, on_x):
     """code (af bin, 3 parent + child) -> log emission per state, the first five of STATES: none
     of the shared-haplotype states, which a duo cannot tell from iso_P and het_P."""
@@ -720,6 +765,8 @@ class Member:
         self.mode, self.status, self.chrx = "solo", "analysed", "no"
         self.n_sites, self.errors = 0, 0
         self.segments = []
+        # chromosome -> indices of the sites a sibling's Mendelian error leaves out of a trio
+        self.dropped = {}
 
 
 def depth_mean(chroms, i, cap):
@@ -758,11 +805,12 @@ def model_sites(chrom, member, used, caps):
     if len(used) == 2:
         (fi, fc), (mi, mc) = used
         gf, df, gm, dm = chrom.g[fi], chrom.dp[fi], chrom.g[mi], chrom.dp[mi]
+        drop = member.dropped.get(chrom.name) or ()
         for j in range(len(chrom)):
             c, f, m = gc[j], gf[j], gm[j]
             if c == MISSING or f == MISSING or m == MISSING or dc[j] > cc or df[j] > fc or dm[j] > mc:
                 continue
-            if c + f + m == 0 or (on_x and (f == 1 or in_par(chrom.pos[j]))):
+            if c + f + m == 0 or (on_x and (f == 1 or in_par(chrom.pos[j]))) or j in drop:
                 continue
             idx.append(j)
             codes.append(9 * f + 3 * m + c)
@@ -796,21 +844,32 @@ def runs(path, idx, pos):
     return out
 
 
-def score_run(chrom, member, idx, codes, table, state, a, b, mean_depth):
-    lod = 0.0
+def score_run(chrom, member, idx, codes, table, state, a, b, mean_depth, expected=None):
+    """The scores of a run; with expected (a trio's expected_strong), the strong sites the state
+    predicts there, from the parents' genotypes, and lod against the best state of normal
+    inheritance, the shared-haplotype ones included."""
+    normal = [0] + ([s for s in SHARED_STATES] if expected is not None else [])
+    lods = [0.0] * len(normal)
     informative = supporting = contradicting = strong = 0
     depth_total = 0
+    predicted = 0.0
     dp = chrom.dp[member.index]
     for i in range(a, b + 1):
-        row = table[codes[i]]
+        code = codes[i]
+        row = table[code]
         lr = (row[state] - row[0]) / LN10
-        lod += lr
+        for k, s in enumerate(normal):
+            lods[k] += row[state] - row[s]
         if lr >= LOG2:
             supporting += 1
             strong += lr >= 1
         elif lr <= -LOG2:
             contradicting += 1
         depth_total += dp[idx[i]]
+        if expected is not None:
+            predicted += expected[code // 3][state]
+    # A shared-haplotype state impossible on the chromosome (ibd_pat on X) is no alternative
+    lod = min(x for x in lods if x != float("inf")) / LN10
     informative = supporting + contradicting
     n = b - a + 1
     name = STATES[state]
@@ -819,7 +878,9 @@ def score_run(chrom, member, idx, codes, table, state, a, b, mean_depth):
     # lacks: the child's alleles drawn from the population, so its support fraction says little
     weak = member.mode == "duo" and (ORIGIN[name] == "paternal") == (member.father is not None)
     diffuse = member.mode == "duo" and not weak
-    return {"weak": weak, "diffuse": diffuse, "chrom": chrom.name, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6,
+    return {"weak": weak, "diffuse": diffuse, "state_index": state,
+            "predicted": predicted / n if expected is not None else None,
+            "chrom": chrom.name, "start": start, "end": end, "length_mb": (end - start + 1) / 1e6,
             "state": name.split("_")[0], "origin": ORIGIN[name], "source": "hmm", "n_sites": n,
             "n_informative": informative, "n_supporting": supporting, "n_contradicting": contradicting,
             "n_strong": strong,
@@ -831,20 +892,33 @@ def hmm_member(chroms, member, used, caps, mean_depth, tables):
     """Viterbi segments of one member, over the chromosomes its model covers."""
     member.segments, member.n_sites, member.errors = [], 0, 0
     names = AUTOSOMES + (["X"] if member.chrx == "yes" else [])
+    trio = len(used) == 2
+    # Per (father, mother) genotypes, the autosomal sites: what a state can be seen by genome-wide
+    parents = [0] * 9
     for name in names:
         chrom = chroms.get(name)
         if chrom is None:
             continue
         table = tables(name == "X")
+        expected = expected_strong(table) if trio else None
         idx, codes = model_sites(chrom, member, used, caps)
         path = viterbi(codes, table)
         member.n_sites += len(codes)
+        if trio and name != "X":
+            for code, n in collections.Counter(codes).items():
+                parents[code // 3] += n
         for s, a, b in runs(path, idx, chrom.pos):
-            member.segments.append(score_run(chrom, member, idx, codes, table, s, a, b, mean_depth))
+            member.segments.append(score_run(chrom, member, idx, codes, table, s, a, b, mean_depth, expected))
         # Sites the normal state cannot explain, outside the segments: the genotyping error
         for i, code in enumerate(codes):
             if path[i] == 0 and table[code][0] < math.log(10 * GENOTYPE_ERROR):
                 member.errors += 1
+    if trio and sum(parents):
+        expected = expected_strong(tables(False))
+        genome = [sum(n * expected[fm][s] for fm, n in enumerate(parents)) / sum(parents) for s in range(len(STATES))]
+        for seg in member.segments:
+            g = genome[seg["state_index"]]
+            seg["informativeness"] = seg["predicted"] / g if g else None
 
 
 def window_rows(fid, member, chroms, index, caps, mean_depth):
@@ -913,7 +987,9 @@ def classify(segment):
         high, medium = segment["n_strong"] >= HIGH_STRONG, segment["n_strong"] >= MEDIUM_STRONG
     needed = MIN_DIFFUSE_HET_SUPPORT if segment["diffuse"] and segment["state"] == "het" else MIN_SUPPORT_FRACTION
     supported = segment["support_fraction"] is not None and segment["support_fraction"] >= needed
-    high, medium = high and supported, medium and supported
+    # A trio state the parents' genotypes hardly let be seen there: they share a haplotype
+    informed = segment.get("informativeness") is None or segment["informativeness"] >= MIN_INFORMATIVENESS
+    high, medium = high and supported and informed, medium and supported and informed
     if lod >= HIGH_LOD and length >= HIGH_MIN_MB and depth_ok and high:
         return kind, "high"
     if lod >= MEDIUM_LOD and length >= MEDIUM_MIN_MB and medium:
@@ -1236,22 +1312,79 @@ def collapse(fid, member, spans, isolation, chroms):
     return events
 
 
-def discordance(chroms, a, b, caps):
+def discordance(chroms, a, b, caps, step=1):
     """Share of the autosomal sites two members are called at, one of them carrying the ALT,
-    where their genotypes differ: about 0.4 for siblings, the genotyping error for MZ twins."""
+    where their genotypes differ: about 0.4 for siblings, the genotyping error for MZ twins.
+    With step, every step-th site only."""
     n = differ = 0
     for name in AUTOSOMES:
         chrom = chroms.get(name)
         if chrom is None:
             continue
         ga, da, gb, db = chrom.g[a], chrom.dp[a], chrom.g[b], chrom.dp[b]
-        for j in range(len(chrom)):
+        for j in range(0, len(chrom), step):
             x, y = ga[j], gb[j]
             if x == MISSING or y == MISSING or x + y == 0 or da[j] > caps[a] or db[j] > caps[b]:
                 continue
             n += 1
             differ += x != y
     return differ / n if n else None
+
+
+def sibling_errors(members, chroms, index, caps):
+    """sample -> {chromosome: indices of the autosomal sites to leave out of its trio}: those where
+    another child of the same two parents has a Mendelian error, unless the two are MZ twins. A
+    UPD is sporadic, so an error two siblings share is the parents' calls, not a UPD: a deletion of
+    a parent's, or reads mismapped alike. A child with more than SIBLING_MAX_ERROR_RATE of errors
+    (not the child of one of them) leaves out nothing for the others."""
+    sibships = {}
+    for sample, info in members.items():
+        if sample in index and info["father"] in index and info["mother"] in index:
+            sibships.setdefault((info["father"], info["mother"]), []).append(sample)
+    dropped = {}
+    for (father, mother), kids in sibships.items():
+        if len(kids) < 2:
+            continue
+        fi, mi = index[father], index[mother]
+        ks = [index[k] for k in kids]
+        errors = [{} for _ in kids]
+        called, wrong = [0] * len(kids), [0] * len(kids)
+        for name in AUTOSOMES:
+            chrom = chroms.get(name)
+            if chrom is None:
+                continue
+            gf, df, gm, dm = chrom.g[fi], chrom.dp[fi], chrom.g[mi], chrom.dp[mi]
+            cf, cm = caps[fi], caps[mi]
+            kid_calls = [(t, chrom.g[i], chrom.dp[i], caps[i]) for t, i in enumerate(ks)]
+            for j in range(len(chrom)):
+                f, m = gf[j], gm[j]
+                if f == MISSING or m == MISSING or df[j] > cf or dm[j] > cm:
+                    continue
+                base = 9 * f + 3 * m
+                for t, gk, dk, ck in kid_calls:
+                    c = gk[j]
+                    if c == MISSING or dk[j] > ck or base + c == 0:
+                        continue
+                    called[t] += 1
+                    if MENDEL_ERROR[base + c]:
+                        wrong[t] += 1
+                        errors[t].setdefault(name, []).append(j)
+        donors = [t for t in range(len(kids)) if called[t] and wrong[t] / called[t] <= SIBLING_MAX_ERROR_RATE]
+        twins = {}
+        for t, kid in enumerate(kids):
+            out = dropped.setdefault(kid, {})
+            for u in donors:
+                if u == t:
+                    continue
+                pair = (min(t, u), max(t, u))
+                if pair not in twins:
+                    d = discordance(chroms, ks[t], ks[u], caps, MZ_SITE_STEP)
+                    twins[pair] = d is not None and d <= MZ_MAX_DISCORDANCE
+                if twins[pair]:
+                    continue
+                for name, js in errors[u].items():
+                    out.setdefault(name, set()).update(js)
+    return dropped
 
 
 def sibling_artefacts(analysed, members, chroms, index, caps):
@@ -1303,6 +1436,7 @@ def cmd_family(args):
     medians = median_depths(chroms, len(order))
     caps = [MAX_DP_FACTOR * m if m else 65535 for m in medians]
     trio_tables = {False: trio_table(False), True: trio_table(True)}
+    dropped = sibling_errors(members, chroms, index, caps)
     duo_tables = {}
     solo = solo_table()
 
@@ -1311,6 +1445,7 @@ def cmd_family(args):
         if not info["sequenced"]:
             continue
         member = Member(sample, index.get(sample), info)
+        member.dropped = dropped.get(sample, {})
         row = {"family_id": fid, "sample": sample, "father": info["father"], "mother": info["mother"]}
         if member.index is None:
             member.status = "not_in_bcf"
@@ -1396,7 +1531,9 @@ def cmd_family(args):
                                  mother_used=member.mother or ".", chrx=member.chrx,
                                  n_sites=member.n_sites if member.mode != "solo" else None,
                                  error_rate=member.errors / member.n_sites if member.n_sites else None,
-                                 status=member.status))
+                                 status=member.status,
+                                 n_sibling_errors=sum(len(js) for js in member.dropped.values())
+                                 if member.mode == "trio" else None))
 
     sibling_artefacts(analysed, members, chroms, index, caps)
     for e in rows_events:
