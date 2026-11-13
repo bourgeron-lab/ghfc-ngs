@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# Build the region masks the denovo step flags its candidates with.
+#
+# Downloads public GRCh38 BEDs, keeps chr1-22, X and Y, sorts and merges each one, and writes
+# one bgzipped, tabix-indexed BED per flag, their union, a MANIFEST.tsv (flag, file, source, URL, version,
+# sha256 of the download and of the result, bases covered) and a README.md. The bundle is data,
+# not code: it is not committed, it is copied to the cluster, and denovo_masks points at it.
+#
+#   scripts/denovo/build_mask_bundle --out ~/Data/denovo/denovo_masks_v1
+#
+# Rebuilding the same version gives the same BEDs as long as the sources have not changed;
+# MANIFEST.tsv records their checksums to tell. A changed source or flag set is a new version
+# (--version), and a new version needs a new denovo_label, since labels are the cache key.
+#
+# Needs curl, gzip, sort, awk, bgzip and tabix. Downloads go to <out>/raw/<flag>/, one empty
+# directory each, and are only read as text.
+
+set -euo pipefail
+
+VERSION="v1"
+OUT=""
+
+usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out) OUT="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        -h|--help) usage 0 ;;
+        *) echo "unknown argument: $1" >&2; usage 1 ;;
+    esac
+done
+[[ -n "${OUT}" ]] || { echo "--out is required" >&2; usage 1; }
+[[ -e "${OUT}/MANIFEST.tsv" ]] && { echo "${OUT} already holds a bundle; remove it or pick another --out" >&2; exit 1; }
+
+for tool in curl gzip sort awk bgzip tabix; do
+    command -v "${tool}" >/dev/null || { echo "missing tool: ${tool}" >&2; exit 1; }
+done
+
+if command -v sha256sum >/dev/null; then sha() { sha256sum "$1" | cut -d' ' -f1; }
+else sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+fi
+
+GIAB="https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/v3.6/GRCh38@all"
+
+# flag | output file | URL | source | source version | columns to keep (chrom,start,end)
+SOURCES=(
+"LCR|lcr.bed.gz|https://github.com/lh3/varcmp/raw/master/scripts/LCR-hs38.bed.gz|Heng Li low-complexity regions (mdust), lh3/varcmp|LCR-hs38|1,2,3"
+"TR_HOMOPOLYMER|tr_homopolymer.bed.gz|${GIAB}/LowComplexity/GRCh38_AllTandemRepeatsandHomopolymers_slop5.bed.gz|GIAB genome stratifications, all tandem repeats and homopolymers, 5 bp slop|v3.6|1,2,3"
+"SEGDUP|segdup.bed.gz|${GIAB}/SegmentalDuplications/GRCh38_segdups.bed.gz|GIAB genome stratifications, segmental duplications|v3.6|1,2,3"
+"SATELLITE|satellite.bed.gz|${GIAB}/LowComplexity/GRCh38_satellites_slop5.bed.gz|GIAB genome stratifications, satellites, 5 bp slop|v3.6|1,2,3"
+"LOWMAP|lowmap.bed.gz|${GIAB}/Mappability/GRCh38_nonunique_l100_m2_e1.bed.gz|GIAB genome stratifications, non-unique 100-mers (2 mismatches, 1 indel)|v3.6|1,2,3"
+"BLACKLIST|blacklist.bed.gz|https://raw.githubusercontent.com/Boyle-Lab/Blacklist/master/lists/hg38-blacklist.v2.bed.gz|ENCODE blacklist, Boyle-Lab/Blacklist|v2|1,2,3"
+"CENTROMERE|centromere.bed.gz|https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/centromeres.txt.gz|UCSC hg38 centromeres table (modelled centromeric sequence)|hg38 database dump|2,3,4"
+)
+
+mkdir -p "${OUT}/raw"
+manifest="${OUT}/MANIFEST.tsv"
+printf 'flag\tfile\tsource\tsource_version\turl\tdownloaded\tdownload_sha256\tbed_sha256\tintervals\tbases\n' > "${manifest}.tmp"
+
+for entry in "${SOURCES[@]}"; do
+    IFS='|' read -r flag file url source sversion cols <<< "${entry}"
+    raw_dir="${OUT}/raw/${flag}"
+    mkdir "${raw_dir}"
+    raw="${raw_dir}/$(basename "${url}")"
+    echo "== ${flag}: ${url}"
+    curl -fsSL --retry 3 -o "${raw}" "${url}"
+
+    # chr1-22, X, Y only; half-open BED coordinates as given (all sources are 0-based BED or,
+    # for UCSC tables, chromStart/chromEnd, which are the same convention); sort and merge
+    # overlapping or touching intervals.
+    gzip -dc "${raw}" \
+        | awk -v cols="${cols}" 'BEGIN { FS = OFS = "\t"; split(cols, c, ",") }
+            /^(#|track|browser)/ { next }
+            $c[1] ~ /^chr([1-9]|1[0-9]|2[0-2]|X|Y)$/ && $c[2] ~ /^[0-9]+$/ && $c[3] ~ /^[0-9]+$/ && $c[3] > $c[2] {
+                print $c[1], $c[2], $c[3]
+            }' \
+        | LC_ALL=C sort -k1,1 -k2,2n -k3,3n \
+        | awk 'BEGIN { FS = OFS = "\t" }
+            $1 != chrom || $2 > end { if (chrom != "") print chrom, start, end; chrom = $1; start = $2; end = $3; next }
+            $3 > end { end = $3 }
+            END { if (chrom != "") print chrom, start, end }' \
+        | bgzip -c > "${OUT}/${file}"
+    tabix -f -p bed "${OUT}/${file}"
+
+    read -r n bases < <(gzip -dc "${OUT}/${file}" | awk '{ n++; b += $3 - $2 } END { printf "%d %d\n", n, b }')
+    [[ "${n}" -gt 0 ]] || { echo "${flag}: no interval left after filtering" >&2; exit 1; }
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${flag}" "${file}" "${source}" "${sversion}" "${url}" "$(date -u +%Y-%m-%d)" \
+        "$(sha "${raw}")" "$(sha "${OUT}/${file}")" "${n}" "${bases}" >> "${manifest}.tmp"
+done
+mv "${manifest}.tmp" "${manifest}"
+
+# The union of every mask: the denovo step takes it away from each child's callable genome, since
+# a masked candidate is never strict
+echo "== union"
+for entry in "${SOURCES[@]}"; do
+    IFS='|' read -r _ file _ <<< "${entry}"
+    gzip -dc "${OUT}/${file}"
+done \
+    | LC_ALL=C sort -k1,1 -k2,2n -k3,3n \
+    | awk 'BEGIN { FS = OFS = "\t" }
+        $1 != chrom || $2 > end { if (chrom != "") print chrom, start, end; chrom = $1; start = $2; end = $3; next }
+        $3 > end { end = $3 }
+        END { if (chrom != "") print chrom, start, end }' \
+    | bgzip -c > "${OUT}/union.bed.gz"
+tabix -f -p bed "${OUT}/union.bed.gz"
+
+cat > "${OUT}/README.md" <<EOF
+# denovo mask bundle ${VERSION}
+
+Region masks for the ghfc-ngs \`denovo\` step, GRCh38 (chr-prefixed, chr1-22, X, Y).
+Built on $(date -u +%Y-%m-%d) by \`scripts/denovo/build_mask_bundle\` of ghfc-ngs.
+
+Each \`<flag>.bed.gz\` is a sorted, merged, bgzipped and tabix-indexed BED. A candidate inside
+one of its intervals gets the flag; nothing is filtered on it. \`MANIFEST.tsv\` lists, for each
+flag, the source, its URL and version, the checksums of the download and of the BED, and the
+intervals and bases it covers. \`union.bed.gz\` is all of them merged, which the step takes
+away from the callable genome. \`raw/\` keeps the downloads as they came.
+
+Copy the whole directory to the cluster and point \`denovo_masks\` at it. A changed source or
+flag set is a new bundle version, and needs a new \`denovo_label\`.
+EOF
+
+echo
+column -t -s $'\t' "${manifest}" | cut -c1-200

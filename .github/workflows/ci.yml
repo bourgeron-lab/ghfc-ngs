@@ -53,14 +53,15 @@ jobs:
       - run: tests/checks/repo_hygiene.sh
 
   script-tests:
-    name: Script tests (Python 3.12, bcftools, numpy/pandas/pyBigWig)
+    name: Script tests (Python 3.12, bcftools, samtools, numpy/pandas/pyBigWig)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq bcftools tabix
+      # samtools makes the simulated CRAMs of modules/denovo/scripts/denovo_tables_test
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq bcftools samtools tabix
       # What modules/cnv/scripts/cnv_coverage runs with in fcliquet/cnv-coverage
       - run: pip install "numpy>=2,<3" "pandas>=2.2,<3" "pyBigWig>=0.3.22,<0.4"
       - run: tests/run_script_tests.sh

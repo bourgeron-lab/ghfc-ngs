@@ -6,7 +6,7 @@
 #      its message (-preview, so nothing is written even if a check stops working);
 #      then the Slurm options of a task under the slurm profile, with and without exclude_nodes,
 #      read from what a fake sbatch is given;
-#   2. fresh      - all 17 steps with -stub-run on the untouched cohort;
+#   2. fresh      - all 18 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
 #                   the pedigree;
@@ -61,13 +61,16 @@ params() {
 
 valid_scenario=(
     'cohort_name: "STUB"'
-    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc", "upd"]'
+    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc", "upd", "denovo"]'
     "ancestry_reference: \"${fixture}/refs/bundle\""
     'expansionhunter_catalog_name: "eh_stub"'
     'melt_label: "melt_stub"'
     'cnv_panel_version: "stub1"'
     'sampleqc_label: "sqc_stub"'
     'upd_label: "upd_stub"'
+    'denovo_label: "dnm_stub"'
+    "denovo_masks: \"${fixture}/refs/denovo_masks\""
+    'denovo_wombat_config: "standard"'
     "cnv_panel_dir: \"${fixture}/refs/cnv_panel/v0\""
 )
 
@@ -113,6 +116,10 @@ expect_refusal sampleqc_no_sites "the 'sampleqc' step cannot find somalier_sites
 expect_refusal upd_bad_label "upd_label 'upd/stub' may only hold" "${v[0]}" 'steps: ["upd"]' 'upd_label: "upd/stub"'
 expect_refusal upd_no_gnomad_index "with a .csi or .tbi index" "${v[0]}" 'steps: ["upd"]' \
     "gnomad_file: \"${fixture}/refs/ref.fa\""
+expect_refusal denovo_bad_label "denovo_label 'dnm/stub' may only hold" "${v[0]}" 'steps: ["denovo"]' \
+    'denovo_label: "dnm/stub"' "denovo_masks: \"${fixture}/refs/denovo_masks\""
+expect_refusal denovo_not_a_bundle "is not a mask bundle" "${v[0]}" 'steps: ["denovo"]' \
+    'denovo_label: "dnm_stub"' "denovo_masks: \"${fixture}/refs/bundle\""
 { cat "${fixture}/data/cohorts/STUB/STUB.pedigree.tsv"; printf 'FAM02\tBC003\t0\t0\t1\t2\n'; } \
     > "${fixture}/conflict.pedigree.tsv"
 expect_refusal pedigree_conflict "Pedigree file has two different rows for BC003" "${v[@]}" \

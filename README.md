@@ -349,6 +349,7 @@ The pipeline supports seventeen main steps that must be explicitly listed in the
 - **`cnv_panel`**: Builds a versioned control panel - per-bin median and MAD of the controls' normalised coverage, for the autosomes, XX and XY - from every sample of a dedicated controls cohort.
 - **`sampleqc`**: Sample and family QC with [somalier](https://github.com/brentp/somalier). Extracts each sample's allele counts at somalier's sites from its CRAM, checks every pair of a family against the relationship its pedigree gives them, infers every member's sex and karyotype, counts the Mendelian errors of each trio, then relates every sample of the cohort to find relatives, duplicates and swaps across families. Report-only: it flags, and blocks nothing.
 - **`upd`**: Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy or mixed), parent of origin and a likelihood score with its supporting sites, from the family `norm.bcf`: an HMM of the child's genotypes given both parents (trio), or one parent and the gnomAD frequency of the missing one's allele (duo), and for a member with no parent in the BCF, the `roh` step's ROH segments (isodisomy only). Report-only.
+- **`denovo`**: Evidence on every de novo candidate of the Wombat de novo table: region masks (LCR, tandem repeats, segmental duplications, satellites, low mappability, ENCODE blacklist, centromeres), clusters, a pileup of every family member's CRAM (parental and sibling reads, mosaic child, strand, read quality), parent of origin with [Unfazed](https://github.com/jbelyeu/unfazed), and a per-child count against the callable genome. Report-only: every candidate is kept, with flags.
 
 **Step Dependencies:**
 
@@ -368,6 +369,7 @@ The pipeline supports seventeen main steps that must be explicitly listed in the
 - `cnv_panel` requires every sample's coverage files (needs `cnv_coverage` in `steps` if any is missing)
 - `sampleqc` requires CRAM files, and treats a sample with none as `expansionhunter` does. It reads the `cnv_coverage` JSONs and the family `norm.bcf` when they exist or are made in the run, and does without them otherwise
 - `upd` requires normalized family BCF files (needs `deepvariant_family` in `steps` if they are missing) and `gnomad_file`. It reads the `cnv_coverage` JSONs and the `roh` tables when they exist or are made in the run; without roh tables, a member with no parent in its family's BCF gets no isodisomy calls. Its mask is the roh panel of `ancestry_reference`, without which it warns
+- `denovo` requires normalized family BCF files (needs `deepvariant_family` in `steps` if they are missing), the Wombat table of `denovo_wombat_config` (a family whose table is due without `wombat` in `steps` waits, with a warning) and the mask bundle of `denovo_masks`. It reads the CRAMs and coverage bedgraphs, on disk or made in the run
 - The pipeline will error if required steps are not listed in parameters
 
 ### Workflow Details
@@ -707,6 +709,24 @@ modules/upd/scripts/upd_segments_test
 
 **Outputs:** Per family: the segments, events and members tables and the inputs snapshot. Per cohort: the same tables and the snapshot.
 
+#### De novo Workflow
+
+Evidence on the de novo SNVs and indels of each family, per family and then per cohort. The candidates are those of the Wombat de novo table (`denovo_wombat_config`): pywombat stays the one definition of a candidate. Nothing is filtered: every candidate is kept with flags saying why it may be an artefact, so that a real de novo mutation set aside later can still be found and the reason read.
+1. **Evidence** - each candidate gets one flag per mask of the bundle it overlaps (`denovo_masks`, built by `scripts/denovo/build_mask_bundle`), `CLUSTER` when another candidate of the child is within 20 bp, and the child's other calls within 20 bp. A `bcftools mpileup` of every member with a CRAM at the candidates, at mapping and base quality 20 and with every read, counts the parents' alternate reads (`PARENT_ALT_POSSIBLE` at one, `PARENT_ALT_LIKELY` at two or more: a parental mosaic), the siblings' (`SIB_SHARED`: a parental germline mosaic), and the child's: a VAF below 0.5 by a binomial test (`CHILD_MOSAIC_POSSIBLE`), strand bias, low-quality support. Indels are matched once both sides are left-aligned. Each child's callable genome is the bins where it has 15x and each parent 10x, less the masks
+2. **Origin** - Unfazed's read-backed phasing of the candidates from the family's informative SNVs within 5 kb, paternal or maternal for about a quarter of them; a failure is recorded, never a failed task
+3. **Family tables** - one row per child and candidate, `strict` when it has no flag but `SIB_SHARED`, and one QC row per child: strict SNVs and indels, transition fraction, the rate per callable unmasked Gb
+4. **Cohort** - the family tables in one, a candidate other families also carry flagged `RECURRENT`, each child's rate against the cohort (median ± 4 MADs, or a fixed range on a small cohort), with the trio's sampleqc flags
+
+**What reruns.** As for UPD: each family's tables are written beside `inputs.tsv`, a snapshot of its pedigree rows, which members have a CRAM and a bedgraph, the Wombat table and the mask bundle. A family is redone when its snapshot differs, or when its BCF or Wombat table is made in the run or is newer than its tables.
+
+The script ships with a self-contained test on a simulated quad, which needs `python3`, `samtools`, `bcftools`, `tabix` and `bgzip`:
+
+```bash
+modules/denovo/scripts/denovo_tables_test
+```
+
+**Outputs:** Per family: the dnm and qc tables and the inputs snapshot. Per cohort: the same tables and the snapshot.
+
 ### Parameters File (params.yml)
 
 Every parameter the workflow reads is documented in
@@ -780,6 +800,8 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Sample QC tables (cohort)**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${sampleqc_label}.{samples.tsv,pairs.tsv,flags.tsv,html}`, and its `inputs.tsv` identical to the cohort's snapshot
 - **UPD tables (family)**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${upd_label}.{segments,events,members,windows}.tsv` (non-empty), and `${FID}.${upd_label}.inputs.tsv` identical to the snapshot the run builds; and the family's BCF, roh tables and coverage JSONs not made in the run
 - **UPD tables (cohort)**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${upd_label}.{segments,events,members}.tsv`, and its `inputs.tsv` identical to the cohort's snapshot
+- **De novo tables (family)**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${denovo_label}.{dnm,qc}.tsv` (non-empty), and `${FID}.${denovo_label}.inputs.tsv` identical to the snapshot the run builds; and the family's BCF and Wombat table neither made in the run nor newer than them
+- **De novo tables (cohort)**: `${data}/cohorts/${cohort_name}/denovo/${cohort_name}.${denovo_label}.{dnm,qc}.tsv`, and its `inputs.tsv` identical to the cohort's snapshot
 
 If these files exist with their indices (where applicable), the corresponding steps are skipped.
 
@@ -880,6 +902,10 @@ data/
 │               │   ├── FID001.upd_v5.events.tsv             # Segments per member, chromosome and origin
 │               │   ├── FID001.upd_v5.members.tsv            # Each member's mode (trio, duo, solo) and status
 │               │   └── FID001.upd_v5.inputs.tsv             # The snapshot they were built from
+│               ├── denovo/
+│               │   ├── FID001.dnm_v1.dnm.tsv                # Each child's candidates: evidence, flags, origin
+│               │   ├── FID001.dnm_v1.qc.tsv                 # One row per child: strict counts, callable genome
+│               │   └── FID001.dnm_v1.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -969,6 +995,10 @@ data/
 │           ├── COHORT_NAME.upd_v5.{segments,members}.tsv      # The family tables in one
 │           ├── COHORT_NAME.upd_v5.events.tsv                  # ... with the events other families share
 │           └── COHORT_NAME.upd_v5.inputs.tsv
+│       └── denovo/
+│           ├── COHORT_NAME.dnm_v1.dnm.tsv                     # The family tables in one, with recurrence
+│           ├── COHORT_NAME.dnm_v1.qc.tsv                      # ... with the cohort's QC range and sampleqc flags
+│           └── COHORT_NAME.dnm_v1.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw
@@ -1187,6 +1217,15 @@ Paths use `${U}` as shorthand for `${upd_label}`. Missing values are `.`. Column
 - **Inputs snapshot**: `${FID}.${U}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex in_bcf coverage_tag` per member
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${U}.{segments,events,members}.tsv` - the family tables concatenated; `events.tsv` adds `recurrent_families recurrent`
 
+### De novo Outputs
+
+Paths use `${D}` as shorthand for `${denovo_label}`. Missing values are `.`. Flags and thresholds are in [documentation/params.md](documentation/params.md#de-novo).
+
+- **Family candidates**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${D}.dnm.tsv` - one row per child and candidate: `family_id child father mother child_sex chrom pos ref alt var_type inheritance_model genes consequences wombat_child_gt wombat_child_dp wombat_child_gq wombat_child_vaf cluster_n nearby_calls child_ref child_alt child_alt_fwd child_alt_rev child_ref_fwd child_ref_rev child_alt_raw child_vaf child_binom_p strand_p father_ref father_alt father_alt_raw mother_ref mother_alt mother_alt_raw sibs_called sibs_with_alt origin origin_evidence origin_status flags strict`. Read counts are at mapping and base quality 20, `*_raw` of every read; `origin` is `paternal` or `maternal` when phased, `origin_status` `phased`, `unphased`, `not_run` or `error`
+- **Family QC**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${D}.qc.tsv` - one row per child whose two parents have a CRAM: `family_id child father mother child_sex n_candidates n_strict n_strict_snv n_strict_indel ti_fraction median_vaf_strict n_parent_alt n_child_mosaic n_sib_shared n_paternal n_maternal callable_bp callable_unmasked_bp rate_per_gb callable_status`, the strict counts on the autosomes
+- **Inputs snapshot**: `${FID}.${D}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex cram bedgraph` per member
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/denovo/${cohort_name}.${D}.{dnm,qc}.tsv` - the family tables concatenated; `dnm.tsv` adds `recurrence_families` (and the flag `RECURRENT`), `qc.tsv` recomputes the strict counts with it and adds `sampleqc_flags qc_reference qc_low qc_high qc`
+
 ### Pipeline Reports
 
 - **Execution timeline**: `reports/timeline.html`
@@ -1267,7 +1306,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
 ```
 
 ### Custom Configuration
@@ -1428,7 +1467,7 @@ tests/ci_local.sh
 | Repository hygiene | scripts keep their exec bit, no large files or run artefacts | `tests/checks/repo_hygiene.sh` |
 | Script tests | every `*_test` next to a script; those under `scripts/` also on Python 3.6, the cluster's | `tests/run_script_tests.sh` |
 | `lib/` tests | unit tests of `lib/*.groovy`, on Nextflow 24.10.5 and 25.10.4 | `tests/lib/run.sh` |
-| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 17 steps run with `-stub-run`, a second run schedules nothing but the extractor, an added family redoes every cohort file, and an edited pedigree redoes that family's sample QC and UPD tables | `tests/stub/run.sh` |
+| Stub runs | on a fake cohort, on Nextflow 24.10.5 and 25.10.4: bad parameters are refused, all 18 steps run with `-stub-run`, a second run schedules nothing but the extractor, an added family redoes every cohort file, and an edited pedigree redoes that family's sample QC and UPD tables | `tests/stub/run.sh` |
 | Docker build | each `containers/*/Dockerfile` still builds, when one changes; nothing is pushed | |
 
 The stub runs compare the tasks they ran with

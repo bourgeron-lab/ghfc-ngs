@@ -19,7 +19,8 @@ steps: [
     # "cnv_coverage",
     # "sampleqc",
     # "upd",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
+    # "denovo",
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/"
@@ -189,6 +190,16 @@ sampleqc_label: "somalier_hg38" # Label baked into output file names; one per si
 # pedigree rows, its BCF or its roh tables change, and the cohort when any family is.
 upd_label: "upd_v5" # Label baked into output file names (default: upd_v5)
 upd_af_field: "AF_genomes" # gnomad_file INFO field for the missing parent's allele frequency (default: AF_genomes)
+
+# De novo (step "denovo")
+# Evidence on every candidate of the Wombat de novo table: region masks, clusters, a pileup of every
+# family member's CRAM (parental and sibling reads, mosaic child, strand, read quality), parent of
+# origin with Unfazed, and a per-child count against the callable genome. Report-only: read
+# families/.../denovo/<FID>.<label>.dnm.tsv and cohorts/<cohort>/denovo/<cohort>.<label>.{dnm,qc}.tsv.
+# The mask bundle is built with scripts/denovo/build_mask_bundle and copied to the cluster.
+denovo_label: "dnm_v1" # Label baked into output file names; a new mask bundle needs a new one (default: dnm_v1)
+denovo_masks: "" # TODO: path to the mask bundle, e.g. .../references/GRCh38/denovo/denovo_masks_v1
+denovo_wombat_config: "de_novo_mutations" # wombat_config_list entry holding the candidates (default: de_novo_mutations)
 
 # Resource limits
 max_memory: "460.GB"

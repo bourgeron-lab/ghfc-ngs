@@ -28,6 +28,7 @@ include { CNV_COVERAGE } from './workflows/cnv_coverage'
 include { CNV_PANEL } from './workflows/cnv_panel'
 include { SAMPLEQC } from './workflows/sampleqc'
 include { UPD } from './workflows/upd'
+include { DENOVO } from './workflows/denovo'
 
 /*
 ========================================================================================
@@ -125,6 +126,11 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Families with their tables built from the current snapshot
         upd:                ('upd' in RunContext.steps)
                                 ? CohortState.progress(plan.upd.family_existing.size(), n_families)
+                                : null,
+        // Families with their tables built from the current snapshot, of the pedigree's families
+        // with a child whose parents are both in it
+        denovo:             ('denovo' in RunContext.steps)
+                                ? CohortState.progress(plan.denovo.family_existing.size(), plan.denovo.eligible.size())
                                 : null,
         // One sentinel entry: the panel version directory, complete or not
         cnv_panel:          ('cnv_panel' in RunContext.steps)
@@ -409,11 +415,11 @@ def validateParams() {
 
     if (RunContext.steps.isEmpty()) {
         recordFailedRun("no steps requested")
-        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd"
+        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo"
     }
 
     // Validate steps
-    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc', 'upd']
+    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc', 'upd', 'denovo']
     def invalid_steps = RunContext.steps - valid_steps
     if (invalid_steps) {
         recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -626,6 +632,31 @@ def validateParams() {
         }
     }
 
+    // The de novo step reads the Wombat de novo table of denovo_wombat_config with the mask bundle
+    // of denovo_masks, and names every file after denovo_label
+    if ('denovo' in RunContext.steps) {
+        def missing_denovo_params = ['denovo_label', 'denovo_masks', 'denovo_wombat_config', 'vep_config_name', 'ref'].findAll { key -> !params[key] }
+        if (missing_denovo_params) {
+            recordFailedRun("denovo step is missing ${missing_denovo_params.join(', ')}")
+            exit 1, "ERROR: the 'denovo' step requires ${missing_denovo_params.join(', ')} to be set"
+        }
+        if (!(params.denovo_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid denovo_label")
+            exit 1, "ERROR: denovo_label '${params.denovo_label}' may only hold letters, digits, '.', '_' and '-': it is part of every de novo file name"
+        }
+        def masks = params.denovo_masks.toString()
+        def unreadable = ['MANIFEST.tsv', 'union.bed.gz', 'union.bed.gz.tbi'].findAll { name -> !new File(masks, name).isFile() }
+        if (unreadable) {
+            recordFailedRun("denovo_masks is not a mask bundle")
+            exit 1, "ERROR: denovo_masks ${masks} is not a mask bundle (scripts/denovo/build_mask_bundle): it lacks ${unreadable.join(', ')}"
+        }
+        def configs = (params.wombat_config_list ?: []).collect { config_file -> config_file.toString().replaceAll(/\.ya?ml$/, '') }
+        if (!(params.denovo_wombat_config.toString() in configs)) {
+            // Not an error: the tables on disk are read as they are, but nothing will refresh them
+            log.warn "denovo_wombat_config '${params.denovo_wombat_config}' is not in wombat_config_list: the de novo step reads the Wombat tables on disk, and none is made again"
+        }
+    }
+
     // The cohort's `resources:` overrides are only read by sized() in nextflow.config, task by task,
     // so a typo there would surface hours into the run, or - for a key that matches nothing - never.
     // containsKey first: reading an unset params key, even with get(), logs a warning every run.
@@ -779,8 +810,10 @@ workflow {
         )
 
         aligned_crams = ALIGNMENT.out.crams
+        aligned_bedgraphs = ALIGNMENT.out.bedgraphs
     } else {
         aligned_crams = Channel.empty()
+        aligned_bedgraphs = Channel.empty()
     }
     
     // Collect all available CRAM files (existing + newly aligned)
@@ -1081,6 +1114,7 @@ workflow {
         )
     }
 
+    sampleqc_cohort_flags = Channel.empty()
     // Run the sample QC if needed and allowed. Like melt it reads the CRAMs, existing and newly
     // aligned, and the sex check reads the coverage JSONs this run's cnv_coverage makes
     if ((analysis_plan.sampleqc.needed.size() > 0 ||
@@ -1106,6 +1140,8 @@ workflow {
             pedigree_data.family_members,
             analysis_plan.sampleqc
         )
+        sampleqc_cohort_flags = SAMPLEQC.out.cohort_tables
+            .map { _cohort, _samples, _pairs, flags, _html, _inputs -> flags }
     }
     
     // Run Extractor if TSV files are provided and step is allowed
@@ -1254,6 +1290,29 @@ workflow {
             roh_new_tables,
             pedigree_data.family_members,
             analysis_plan.upd
+        )
+    }
+
+    // Run the de novo step if needed and allowed. It reads the family BCFs, the Wombat de novo
+    // tables, the CRAMs and the coverage bedgraphs, each on disk or made in this run
+    if ((analysis_plan.denovo.need_family.size() > 0 || analysis_plan.denovo.need_cohort) && 'denovo' in RunContext.steps) {
+        def denovo_tasks = []
+        if (analysis_plan.denovo.need_family.size() > 0) {
+            denovo_tasks.add("evidence for ${analysis_plan.denovo.need_family.size()} families")
+        }
+        if (analysis_plan.denovo.need_cohort) {
+            denovo_tasks.add("cohort tables")
+        }
+        log.info "Running de novo: ${denovo_tasks.join(', ')}..."
+
+        DENOVO(
+            channels.existing_normalized_bcfs.mix(normalized_bcfs_output),
+            wombat_output,
+            aligned_crams,
+            aligned_bedgraphs,
+            sampleqc_cohort_flags,
+            pedigree_data.family_members,
+            analysis_plan.denovo
         )
     }
 }
@@ -1503,6 +1562,19 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
               cohort_edited: false, coverage_members: [:], coverage_from_run: planBucket(),
               roh_families: planBucket(), roh_from_run: planBucket(), snapshots: [:], cohort_snapshot: null,
               mask: null, stale_skipped: planBucket()],
+        // eligible: the families with a child whose two parents are in the pedigree, the only ones
+        // that can have a de novo call. need_family, family_existing and edited are families, as
+        // for upd; waiting: families whose
+        // Wombat table is not current and is not made in this run. wombat_from_run: families whose
+        // Wombat de novo table this run makes. crams, bedgraphs: family -> its members with one,
+        // on disk or made in this run; crams_from_run, bedgraphs_from_run: the members whose
+        // file this run makes. snapshots: family -> its inputs snapshot.
+        // sampleqc_flags: the cohort's sampleqc flags table on disk, null without one;
+        // sampleqc_from_run: whether this run's sampleqc step writes it.
+        denovo: [eligible: planBucket(), need_family: planBucket(), family_existing: planBucket(), edited: planBucket(), waiting: planBucket(),
+                 need_cohort: false, cohort_edited: false, wombat_from_run: planBucket(), crams: [:], bedgraphs: [:],
+                 crams_from_run: planBucket(), bedgraphs_from_run: planBucket(),
+                 snapshots: [:], cohort_snapshot: null, sampleqc_flags: null, sampleqc_from_run: false],
         pedigree_drift: [:],
         // The families' own {FID}.pedigree.tsv (lib/FamilyPedigree.groovy). on_disk: family -> the
         // rows its file holds, null when it cannot be read. outdated: family -> what differs from
@@ -2362,7 +2434,128 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             plan.wombat_cohort.needed.add('cohort')  // Single cohort entry
         }
     }
-    
+
+    // Check existing de novo tables, as for upd: only when the step is requested, with
+    // denovo_label in every file name, and against the inputs snapshot they were built from - the
+    // pedigree rows, which members have a CRAM and a coverage bedgraph, the Wombat table and the
+    // mask bundle - so that a pedigree edit or a new CRAM redoes the family. A family whose Wombat
+    // table or BCF is remade in this run, or newer on disk than its tables, is redone too. A
+    // family waits, untouched, while its Wombat table is due and the wombat step is not
+    // requested. CRAMs and bedgraphs made in this run are used. Planned after Wombat.
+    if ('denovo' in RunContext.steps) {
+        def denovo = plan.denovo
+        def label = params.denovo_label
+        def config_name = params.denovo_wombat_config.toString()
+        def configs = (params.wombat_config_list ?: []).collect { config_file -> config_file.toString().replaceAll(/\.ya?ml$/, '') }
+        def settings = [step: 'denovo', label: label, wombat_config: config_name,
+                        masks: new File(params.denovo_masks.toString()).name, ref_name: params.ref_name.toString(),
+                        bin: params.bin.toString()]
+
+        def rows_by_family = [:]
+        InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
+            rows_by_family.get(row[0], []) << row
+        }
+        def real = { barcode -> barcode && barcode != '0' && !DummyMember.isDummy(barcode) }
+        def cohort_rows = []
+        families.each { fid ->
+            def rows = rows_by_family[fid] ?: []
+            def in_family = rows.collect { row -> row[1] } as Set
+            // Only families with a child whose two parents are in it can have a de novo call
+            if (!rows.any { row -> real.call(row[2]) && real.call(row[3]) && row[2] in in_family && row[3] in in_family }) {
+                return
+            }
+            denovo.eligible.add(fid)
+            def bcf_from_run = 'deepvariant_family' in RunContext.steps && fid in plan.deepvariant_family.needed
+            if (!(fid in plan.deepvariant_family.existing) && !bcf_from_run) {
+                // validateStepsAvailability stops the run on it: denovo is a consumer of the BCF
+                return
+            }
+            def fam_dir = Sharding.getFamilyDir(params.data, fid)
+            def table = new File("${fam_dir}/wombat/${fid}.rare.${params.vep_config_name}.annotated.${config_name}.tsv")
+            def wombat_due = fid in plan.wombat.needed || !table.exists()
+            def wombat_from_run = wombat_due && 'wombat' in RunContext.steps && config_name in configs &&
+                (fid in plan.wombat.needed)
+            if (wombat_due && !wombat_from_run) {
+                denovo.waiting.add(fid)
+                return
+            }
+            // A member's CRAM and bedgraph, on disk or made in this run
+            def aligning = 'alignment' in RunContext.steps
+            def members = rows.collect { row -> row[1] }.findAll { barcode -> real.call(barcode) }
+            def with_cram = members.findAll { barcode ->
+                if (aligning && barcode in plan.alignment.needed) {
+                    denovo.crams_from_run.add(barcode)
+                    return true
+                }
+                return barcode in plan.alignment.existing
+            }
+            def with_bedgraph = members.findAll { barcode ->
+                if (aligning && (barcode in plan.alignment.needed || barcode in plan.alignment.need_bedgraph)) {
+                    denovo.bedgraphs_from_run.add(barcode)
+                    return true
+                }
+                // As the alignment step's own check: the bedgraph and its index
+                def bedgraph = "${Sharding.getSampleDir(params.data, barcode)}/sequences/${barcode}.by${params.bin}.bedgraph.gz"
+                return new File(bedgraph).exists() && new File("${bedgraph}.tbi").exists()
+            }
+            def snapshot_rows = rows.collect { row ->
+                row + [row[1] in with_cram ? 'yes' : 'no', row[1] in with_bedgraph ? 'yes' : 'no']
+            }
+            cohort_rows.addAll(snapshot_rows)
+            def snapshot = InputsSnapshot.render(settings + [family: fid.toString(), wombat_table: table.name], snapshot_rows)
+            denovo.snapshots[fid] = snapshot
+            denovo.crams[fid] = with_cram
+            denovo.bedgraphs[fid] = with_bedgraph
+            if (wombat_from_run) {
+                denovo.wombat_from_run.add(fid)
+            }
+
+            def prefix = "${fam_dir}/denovo/${fid}.${label}"
+            def dnm = new File("${prefix}.dnm.tsv")
+            def tables_exist = ['dnm', 'qc'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
+            def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
+            def bcf = new File("${fam_dir}/vcfs/${fid}.norm.bcf")
+            def newer = tables_exist && (table.lastModified() > dnm.lastModified() || bcf.lastModified() > dnm.lastModified())
+            def remade = bcf_from_run || wombat_from_run || newer ||
+                with_cram.any { barcode -> barcode in denovo.crams_from_run }
+            if (tables_exist && same_inputs && !remade) {
+                denovo.family_existing.add(fid)
+            } else {
+                denovo.need_family.add(fid)
+                if (tables_exist && new File("${prefix}.inputs.tsv").exists() && !same_inputs) {
+                    denovo.edited.add(fid)
+                }
+            }
+        }
+
+        if (denovo.snapshots) {
+            // The cohort's sampleqc flags table: the one this run's sampleqc step writes, else the
+            // one on disk. The snapshot names it by the inputs snapshot it was built from, which
+            // the plan knows before the run, so new sample QC tables regather the cohort's de novo
+            // tables, which is cheap, and the same ones do not
+            def qc_prefix = params.sampleqc_label ?
+                "${params.data}/cohorts/${params.cohort_name}/qc/${params.cohort_name}.${params.sampleqc_label}" : null
+            def qc_inputs = null
+            if (qc_prefix && 'sampleqc' in RunContext.steps && plan.sampleqc.need_cohort && plan.sampleqc.cohort_snapshot) {
+                denovo.sampleqc_from_run = true
+                qc_inputs = plan.sampleqc.cohort_snapshot
+            } else if (qc_prefix && new File("${qc_prefix}.flags.tsv").exists()) {
+                denovo.sampleqc_flags = "${qc_prefix}.flags.tsv".toString()
+                def stored = new File("${qc_prefix}.inputs.tsv")
+                qc_inputs = stored.isFile() ? stored.getText('UTF-8') : "mtime ${new File(denovo.sampleqc_flags).lastModified()}".toString()
+            }
+            def qc_key = qc_inputs == null ? 'none' :
+                "${params.sampleqc_label}@${java.security.MessageDigest.getInstance('SHA-256').digest(qc_inputs.getBytes('UTF-8')).encodeHex().toString().take(16)}".toString()
+            def cohort_settings = settings + [cohort: params.cohort_name.toString(), sampleqc_flags: qc_key]
+            denovo.cohort_snapshot = InputsSnapshot.render(cohort_settings, cohort_rows)
+            def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/denovo/${params.cohort_name}.${label}"
+            def cohort_exist = ['dnm', 'qc'].every { kind -> new File("${cohort_prefix}.${kind}.tsv").length() > 0 }
+            def cohort_same = InputsSnapshot.matches("${cohort_prefix}.inputs.tsv", denovo.cohort_snapshot)
+            denovo.cohort_edited = cohort_exist && new File("${cohort_prefix}.inputs.tsv").exists() && !cohort_same
+            denovo.need_cohort = !cohort_exist || !cohort_same || denovo.need_family.size() > 0
+        }
+    }
+
     return plan
 }
 
@@ -2402,6 +2595,8 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     == Sample QC ==
     SAMPLEQC: ${'sampleqc' in RunContext.steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     UPD: ${'upd' in RunContext.steps ? "${analysis_plan.upd.family_existing.size()} families done and ${analysis_plan.upd.need_family.size()} to do (${analysis_plan.upd.edited.size()} with changed inputs, ${analysis_plan.upd.roh_families.size()} with ROH tables for their members without a parent), cohort tables: ${analysis_plan.upd.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    == De novo ==
+    DENOVO: ${'denovo' in RunContext.steps ? "${analysis_plan.denovo.family_existing.size()} families done and ${analysis_plan.denovo.need_family.size()} to do (${analysis_plan.denovo.edited.size()} with changed inputs, ${analysis_plan.denovo.waiting.size()} waiting for their Wombat table), cohort tables: ${analysis_plan.denovo.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == Ancestry / PGS ==
     ANCESTRY: ${'ancestry' in RunContext.steps ? "${analysis_plan.ancestry.existing.size()} families done and ${analysis_plan.ancestry.needed.size()} to do (${analysis_plan.ancestry.need_extract.size()} samples needing panel extraction)" : 'Skipped (step not requested)'}
     ROH: ${'roh' in RunContext.steps ? "${analysis_plan.roh.existing.size()} families done and ${analysis_plan.roh.needed.size()} to do (${analysis_plan.roh.from_ancestry.size()} waiting on this run's ancestry)" : 'Skipped (step not requested)'}
@@ -2484,6 +2679,13 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     }
     if (analysis_plan.upd.edited) {
         log.info "Families whose UPD analysis is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.upd.edited.take(50).join(', ')}${analysis_plan.upd.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.denovo.edited) {
+        log.info "Families whose de novo tables are redone for an edited pedigree, a new CRAM or bedgraph, or new settings: ${analysis_plan.denovo.edited.take(50).join(', ')}${analysis_plan.denovo.edited.size() > 50 ? ' and others' : ''}"
+    }
+    if (analysis_plan.denovo.waiting) {
+        def waiting = analysis_plan.denovo.waiting
+        log.warn "The de novo step waits for ${waiting.size()} ${waiting.size() == 1 ? 'family' : 'families'} whose ${params.denovo_wombat_config} Wombat table is due without the wombat step in this run: ${waiting.take(50).join(', ')}${waiting.size() > 50 ? ' and others' : ''}"
     }
     if (analysis_plan.upd.stale_skipped) {
         def skipped = analysis_plan.upd.stale_skipped
@@ -2784,7 +2986,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
     // never touches the normalized or annotated call sets, so `steps: ["ancestry"]`
     // must not be blocked by families that have no norm.bcf yet. Every steps list
     // that includes one of the consumers below behaves exactly as before.
-    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'extractor', 'upd']
+    def family_consumers = ['deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'extractor', 'upd', 'denovo']
     def annotation_consumers = ['annotation', 'wombat', 'wombat_cohort', 'snvs_cohort']
 
     // Check if deepvariant_family is needed but not available
@@ -2827,7 +3029,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")

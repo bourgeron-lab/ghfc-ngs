@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-75 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+78 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -86,6 +86,9 @@ program can see is in this table. A key that is not here is not read by anything
 | `cram4realignment_pattern` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `data` | always — **required** | [Core paths and identity](#core-paths-and-identity) |
 | `deepvariant_threads` | `deepvariant_sample` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
+| `denovo_label` 📄 | `denovo` | [De novo](#de-novo) |
+| `denovo_masks` | `denovo` — **required** | [De novo](#de-novo) |
+| `denovo_wombat_config` | `denovo` | [De novo](#de-novo) |
 | `enable_conda` ✗ | never | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `exclude_nodes` | always, by every task's Slurm options | [Containers and resources](#containers-and-resources) |
 | `expansionhunter_catalog` | `expansionhunter` — **required** | [ExpansionHunter](#expansionhunter) |
@@ -126,7 +129,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `sampleqc_hom_cutoff` | `sampleqc` | [Sample QC](#sample-qc) |
-| `sampleqc_label` 📄 | `sampleqc` — **required** | [Sample QC](#sample-qc) |
+| `sampleqc_label` 📄 | `sampleqc` — **required**; `denovo`, to find the cohort's flags | [Sample QC](#sample-qc) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `scratch` | `alignment` | [Core paths and identity](#core-paths-and-identity) |
 | `singularity_cache` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
@@ -145,7 +148,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `wisecondorx_binsize` 📄 | `wisecondorx` | [WisecondorX](#wisecondorx) |
 | `wisecondorx_predict_args` | `wisecondorx` | [WisecondorX](#wisecondorx) |
 | `wisecondorx_reference` | `wisecondorx` | [WisecondorX](#wisecondorx) |
-| `wombat_config_list` 📄 | `wombat` | [Wombat](#wombat) |
+| `wombat_config_list` 📄 | `wombat`; `denovo`, to check `denovo_wombat_config` is in it | [Wombat](#wombat) |
 | `wombat_config_path` | `wombat` | [Wombat](#wombat) |
 | `work_dir` | always, at config-parse time | [Core paths and identity](#core-paths-and-identity) |
 
@@ -228,6 +231,7 @@ the command line. Every entry must be one of these seventeen:
 | `cnv_coverage` | Normalised coverage per sample on a fixed bin grid, as a bigWig for genetics-viz, and with `cnv_panel_dir` the cohort's fit against a control panel |
 | `cnv_panel` | A versioned control panel, per-bin median and MAD of the controls' normalised coverage, built once from a dedicated controls cohort |
 | `sampleqc` | Relatedness (IBS0, IBS2, KING kinship) against the pedigree within each family and between families, sex and sex-chromosome karyotype, and Mendelian errors, as per-family and cohort tables of flags |
+| `denovo` | Evidence on every de novo candidate of the Wombat de novo table: region masks, clusters, a pileup of every family member (parental and sibling reads, mosaic child, strand, read quality), parent of origin with Unfazed, and a per-child count against the callable genome, per family and per cohort with recurrence |
 | `upd` | Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy or mixed), parent of origin and a score, from the family BCF with both parents, one, or none (isodisomy only, from the `roh` tables), per family and per cohort |
 
 ### The rule that catches people out
@@ -242,7 +246,7 @@ missing prerequisite is only an error when something in *this* run would consume
 - `alignment` and `deepvariant_sample` are checked unconditionally — if any individual needs
   them and they are not listed, the run fails.
 - `deepvariant_family` is only demanded when one of `deepvariant_family`, `annotation`,
-  `wombat`, `wombat_cohort`, `snvs_cohort`, `extractor` or `upd` is listed.
+  `wombat`, `wombat_cohort`, `snvs_cohort`, `extractor`, `upd` or `denovo` is listed.
 - `annotation` is only demanded when one of `annotation`, `wombat`, `wombat_cohort` or
   `snvs_cohort` is listed.
 - `wombat` is only demanded when `wombat_cohort` is listed and a cohort table is due, which it
@@ -261,6 +265,10 @@ missing prerequisite is only an error when something in *this* run would consume
 - `upd` demands `deepvariant_family`, as above. It uses the cnv_coverage JSONs and the `roh`
   tables when they exist or are made in the run, and does without them otherwise: a member
   with no parent in the family BCF is then reported as skipped, not an error.
+- `denovo` demands `deepvariant_family`, as above. It reads the Wombat table of
+  `denovo_wombat_config`, made in the run or on disk, and the CRAMs and coverage bedgraphs on
+  disk. A family whose table is due while `wombat` is not listed, or with a member still to be
+  aligned, waits, with a warning, and is done by a later run.
 
 `snvs_cohort` used to merge the wombat tables too. A parameters file that lists `snvs_cohort`
 and not `wombat_cohort` gets a warning at startup, because its cohort wombat tables are no
@@ -307,6 +315,9 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: upd_af_field '...' is not an INFO field name` | a field name with a character other than letters, digits and `_` |
 | `ERROR: the 'upd' step cannot find gnomad_file ...` | the gnomAD file, or its `.csi` or `.tbi` index, does not exist |
 | `ERROR: ... has no INFO/<field> (upd_af_field)`, in a `UPD_FAMILY` task | `upd_af_field` names a field the gnomAD file does not have |
+| `ERROR: the 'denovo' step requires ...` | `denovo` listed without `denovo_label`, `denovo_masks`, `denovo_wombat_config`, `vep_config_name` or `ref` |
+| `ERROR: denovo_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: denovo_masks ... is not a mask bundle` | the directory lacks `MANIFEST.tsv` or `union.bed.gz` and its index: build it with `scripts/denovo/build_mask_bundle` |
 | `ERROR: the 'cnv_panel' step requires cnv_panel_version to be set` | `cnv_panel` listed without `cnv_panel_version` |
 | `ERROR: cnv_panel_version '...' may only hold ...` / `... is written without its v` | a version that cannot be a directory name, or `v1` where `1` was meant |
 | `ERROR: the CNV panel directory ... exists but is incomplete` | a partial `cnv_panel/v<version>/`, from a build that died or a hand edit: it is never overwritten |
@@ -695,6 +706,69 @@ It runs in the sample QC image.
 - **Gaps.** Mosaic UPD, which only shows as skewed allele fractions, is not seen. Small events and repeat-rich regions give false calls, which `recurrent`, the sibling rule and the thresholds are for; the immunoglobulin loci (IGH, IGK, IGL), where blood DNA rearranges somatically, are among them. Exome data are sparse for heterodisomies under 10 Mb.
 - **What reruns.** The label is the cache. The family and cohort tables are also checked against `inputs.tsv`: the family's pedigree rows, which members are in the BCF and have a coverage JSON, which roh tables are read, and the gnomAD file and field. A family is also redone when its BCF, its roh tables or a member's coverage JSON is made in the run. The cohort is redone when any family is, or when a family is added or removed.
 
+### De novo
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `denovo_label` 📄 | string | `"dnm_v1"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family, and is the only way a new mask bundle or a new version of the analysis reaches families already done. `dnm_v1` is the first version, with the mask bundle `denovo_masks_v1`. |
+| `denovo_masks` | dir | `""` | The mask bundle, built with `scripts/denovo/build_mask_bundle`: one bgzipped, indexed BED per flag listed in its `MANIFEST.tsv`, and their `union.bed.gz`. Read in place. **Required.** |
+| `denovo_wombat_config` | string | `"de_novo_mutations"` | The `wombat_config_list` entry, without `.yml`, whose Wombat table holds the candidates. Not in the list, the step warns and reads the tables on disk. |
+
+Also read: `vep_config_name` and `ref` (**required**), `ref_name` and `bin` (the CRAMs and
+bedgraphs), `sampleqc_label` (the cohort's sampleqc flags). The step is report-only: nothing is
+filtered, every candidate is kept with flags saying why it may be an artefact. Its evidence,
+family and cohort tasks run in the sample QC image; parent of origin in Unfazed's biocontainer.
+
+- **Candidates** are the rows of the family's Wombat de novo table, one per child and variant
+  (Wombat writes one per consequence): pywombat stays the one definition of a candidate.
+- **Per family:** `families/{S1}/{S2}/<FID>/denovo/<FID>.<label>.{dnm,qc,inputs}.tsv`.
+  - `dnm.tsv`: one row per child and candidate: the pedigree, `var_type`, `inheritance_model`
+    (heterozygous, homozygous or hemizygous), genes and consequences, Wombat's genotype columns,
+    `cluster_n` and `nearby_calls`, the high-quality read counts of the child (with strands) and
+    of each parent, the counts of reads of any quality (`*_alt_raw`), `child_vaf`,
+    `child_binom_p` (against 0.5), `strand_p`, `sibs_called` and `sibs_with_alt`, `origin`
+    (`paternal`, `maternal` or empty) with `origin_evidence` and `origin_status` (`phased`,
+    `unphased`, `not_run` or `error`), `flags` and `strict`.
+  - `qc.tsv`: one row per child whose two parents have a CRAM: candidates, strict ones (SNVs,
+    indels, transition fraction, median VAF), candidates with parental reads, mosaic, sibling-
+    shared, paternal and maternal ones, `callable_bp`, `callable_unmasked_bp` and `rate_per_gb`.
+- **Per cohort:** `cohorts/<cohort_name>/denovo/<cohort_name>.<label>.{dnm,qc,inputs}.tsv`. The
+  candidates add `recurrence_families`, the other families with the same candidate (the flag
+  `RECURRENT`). The QC rows add the trio's sampleqc flags, from the cohort's sampleqc flags table
+  when there is one, and `qc` (`ok`, `low`, `high` or `no_callable`) against `qc_low` and
+  `qc_high`: median ± 4 scaled MADs of `rate_per_gb` with 20 children or more, a fixed 15-40 per
+  Gb below.
+- **Flags.** One per mask of the bundle: `LCR`, `TR_HOMOPOLYMER`, `SEGDUP`, `SATELLITE`,
+  `LOWMAP`, `BLACKLIST`, `CENTROMERE`. `CLUSTER`: another candidate of the child within 20 bp.
+  `PARENT_ALT_POSSIBLE` (one alternate read) and `PARENT_ALT_LIKELY` (two or more) in an
+  informative parent, at mapping and base quality 20: both parents on the autosomes and PARs, the
+  mother for a son's chrX, the father for his chrY. `SIB_SHARED`: a full sibling has the same
+  candidate or 2 high-quality alternate reads. `CHILD_MOSAIC_POSSIBLE`: a heterozygous call below
+  0.5 VAF with a binomial p below 0.001. `STRAND_BIAS`: Fisher p below 0.001 against the
+  reference reads, or 5 alternate reads or more all on one strand. `LOW_QUALITY_SUPPORT`: fewer
+  than 3 high-quality alternate reads, or under half of those of any quality. `NO_CHILD_READS`,
+  `NO_PARENT_READS`: no CRAM. `RECURRENT`, in the cohort table.
+- **Strict** means no flag but `SIB_SHARED`, which is evidence of a parental germline mosaic,
+  not of an artefact. The QC counts strict candidates on the autosomes.
+- **Pileup.** `bcftools mpileup` of every member with a CRAM, 25 bp around each candidate, with
+  per-strand allele depths and BAQ off, then `bcftools norm` against `ref`: an indel is matched
+  to the candidate once both are left-aligned. Twice: reads of mapping and base quality 20, and
+  every read, anomalous pairs included.
+- **Callable genome**: the autosomal bins of the coverage bedgraphs where the child's mean depth
+  is at least 15 and each parent's 10 (Zhou 2022), less the masks' union, since a masked
+  candidate is never strict. Published counts are 60-90 de novo mutations per child genome-wide
+  at 30-40x; the masks take a fifth of the genome away.
+- **Parent of origin**: Unfazed 1.0.2's read-backed phasing (Belyeu 2021) of the candidates of the
+  children with a CRAM and both parents in the family BCF, from the family's biallelic SNVs
+  within 5 kb; a son's chrX and chrY are phased by his sex. Its pysam reads CRAM 3.0, not 3.1. A
+  failure is written as `origin_status` `error`, never a failed task.
+- **What reruns.** The label is the cache. The family tables are also checked against
+  `inputs.tsv`: the family's pedigree rows, which members have a CRAM and a bedgraph, the Wombat
+  table's name, the mask bundle's directory name, `ref_name` and `bin`. A family is also redone
+  when its BCF or Wombat table is made in the run, or is newer on disk than its tables. The
+  cohort is redone when any family is, when a family is added or removed, or when the cohort's
+  sampleqc flags table changes.
+
 ### Containers and resources
 
 | Key | Type | Default | Effect |
@@ -859,9 +933,10 @@ made with the old catalog, and mixes in new ones made with the new catalog. **`m
 does the same for the MELT calls. **`cnv_cov_bin`** and **`cnv_cov_mapq`** make the tag
 `cov_b<bin>q<mapq>` of every CNV coverage file, and **`cnv_panel_version`** the directory of a
 panel, which is built once and never rebuilt under the same version. **`sampleqc_label`** does
-the same for the somalier extracts, and **`upd_label`** for the UPD tables. The sample QC and
-UPD tables are the exception to the rule: they are also rebuilt when the pedigree or the
-settings they were built from change, see [Sample QC](#sample-qc) and [UPD](#upd).
+the same for the somalier extracts, **`upd_label`** for the UPD tables, and **`denovo_label`**
+for the de novo tables. The sample QC, UPD and de novo tables are the exception to the rule:
+they are also rebuilt when the pedigree or the settings they were built from change, see
+[Sample QC](#sample-qc), [UPD](#upd) and [De novo](#de-novo).
 
 ### Three different directories
 
