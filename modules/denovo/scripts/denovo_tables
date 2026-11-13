@@ -1,0 +1,1006 @@
+#!/usr/bin/env python3
+
+"""Evidence, parent of origin and QC for the de novo candidates of a family, and the cohort's.
+
+The candidates are those of the Wombat de novo table (denovo_wombat_config): pywombat stays the
+one definition of a candidate. Nothing is filtered here: every candidate is kept with its
+evidence, and with flags saying why it may be an artefact, so that a real de novo mutation set
+aside later can still be found and the reason read. Python 3.8 or newer, standard library only;
+bcftools, tabix and bgzip on the PATH for evidence.
+
+Four subcommands, one for each process of the denovo step.
+
+evidence
+    One family, in the sampleqc image. Reads the Wombat table, the family's norm.bcf, the
+    inputs snapshot (the pedigree rows with which members have a CRAM and a coverage bedgraph),
+    the CRAMs and bedgraphs staged in the working directory, and the mask bundle. Writes
+    <prefix>.evidence.tsv (one row per child and candidate), <prefix>.callable.tsv (one row per
+    child) and, for the origin step, unfazed/{dnms.bed,sites.vcf.gz,sites.vcf.gz.tbi,family.ped,
+    kids.tsv}.
+
+origin
+    One family, in the Unfazed image. Runs Unfazed on the files evidence wrote and the children's
+    CRAMs, and writes <out>: the origin of each candidate it could phase. A failure of Unfazed
+    is recorded in the table, never a failed task: parent of origin is a bonus, not a gate.
+
+family
+    One family. Joins evidence, origin and callable genome, and writes <prefix>.dnm.tsv and
+    <prefix>.qc.tsv.
+
+cohort
+    The family tables concatenated, with the number of other families carrying each candidate
+    (RECURRENT), each child's count of strict candidates against the cohort (QC), and the
+    sampleqc flags of the child's trio from the cohort's sampleqc flags table, when there is one:
+    a count out of range with a sampleqc flag is explained (a parent who is not the parent, a
+    contaminated sample), one with a clean sampleqc is what the count is there to catch.
+
+Flags (column flags, comma-separated; '.' when none)
+    LCR, TR_HOMOPOLYMER, SEGDUP, SATELLITE, LOWMAP, BLACKLIST, CENTROMERE
+        the candidate overlaps that mask of the bundle (one flag per MANIFEST.tsv row)
+    CLUSTER
+        another candidate of the same child within CLUSTER_BP
+    PARENT_ALT_POSSIBLE, PARENT_ALT_LIKELY
+        an informative parent has 1, or PARENT_ALT_LIKELY_MIN or more, alternate reads of
+        mapping and base quality HQ_MAPQ / HQ_BASEQ. A parental mosaic: 5% and 42% confirmed
+        at one and two or more reads in DDD (Wright 2019). Informative parents: both on the
+        autosomes and the PARs, the mother for a son's chrX, the father for a son's chrY
+    SIB_SHARED
+        a full sibling has the same candidate in the Wombat table, or SIB_ALT_MIN or more
+        high-quality alternate reads: a parental germline mosaic until shown otherwise
+    CHILD_MOSAIC_POSSIBLE
+        a diploid heterozygous call whose high-quality VAF is below 0.5 with a two-sided
+        binomial p below MOSAIC_P
+    STRAND_BIAS
+        the child's alternate reads on one strand against its reference reads (Fisher p below
+        STRAND_P), or all on one strand with STRAND_ONE_SIDED_MIN or more
+    LOW_QUALITY_SUPPORT
+        fewer than CHILD_ALT_MIN high-quality alternate reads in the child, or under
+        HQ_FRACTION_MIN of its alternate reads of any quality
+    NO_CHILD_READS, NO_PARENT_READS
+        the child, or an informative parent, has no CRAM: its read columns are empty
+    RECURRENT (cohort table only)
+        another family has the same candidate
+
+Strict candidates are those with no flag, but SIB_SHARED: a shared candidate is evidence of a
+parental mosaic, not of an artefact. The per-child QC counts them on the autosomes, against the
+callable genome: 1 kb bins where the child's mean depth is at least CALLABLE_CHILD_DP and each
+parent's CALLABLE_PARENT_DP (a definition used for SPARK, Zhou 2022), less the masked bases,
+since a masked candidate is never strict. Published counts are 60-90 per child genome-wide at
+30-40x; the masks take a quarter of the genome away, so the rate is per callable, unmasked Gb.
+"""
+
+import argparse
+import csv
+import glob
+import gzip
+import math
+import os
+import statistics
+import subprocess
+import sys
+from array import array
+
+# Read quality of the pileup's high-quality counts; the raw counts take every read
+HQ_MAPQ = 20
+HQ_BASEQ = 20
+# Candidate evidence
+PARENT_ALT_LIKELY_MIN = 2
+SIB_ALT_MIN = 2
+MOSAIC_P = 1e-3
+STRAND_P = 1e-3
+STRAND_ONE_SIDED_MIN = 5
+CHILD_ALT_MIN = 3
+HQ_FRACTION_MIN = 0.5
+CLUSTER_BP = 20
+NEARBY_BP = 20
+# Window searched around a candidate for the pileup's own representation of an indel, which
+# bcftools norm then left-aligns as the candidate is
+PILEUP_PAD = 25
+# Unfazed looks for informative sites this far from a candidate
+ORIGIN_WINDOW = 5000
+# Callable genome
+CALLABLE_CHILD_DP = 15
+CALLABLE_PARENT_DP = 10
+# QC: a cohort of at least QC_MIN_CHILDREN children is its own reference, median +- QC_MAD_K
+# scaled MADs of the rate; a smaller one is held to the fixed range, per callable unmasked Gb
+QC_MIN_CHILDREN = 20
+QC_MAD_K = 4.0
+QC_RATE_RANGE = (15.0, 40.0)
+
+AUTOSOMES = {f"chr{i}" for i in range(1, 23)}
+# GRCh38, 1-based inclusive, as pywombat's de novo config
+PAR_X = ((10001, 2781479), (155701383, 156030895))
+PAR_Y = ((10001, 2781479), (56887903, 57217415))
+
+STRICT_IGNORED = {"SIB_SHARED"}
+
+EVIDENCE_COLUMNS = [
+    "family_id", "child", "father", "mother", "child_sex", "chrom", "pos", "ref", "alt", "var_type",
+    "inheritance_model", "genes", "consequences",
+    "wombat_child_gt", "wombat_child_dp", "wombat_child_gq", "wombat_child_vaf",
+    "cluster_n", "nearby_calls",
+    "child_ref", "child_alt", "child_alt_fwd", "child_alt_rev", "child_ref_fwd", "child_ref_rev",
+    "child_alt_raw", "child_vaf", "child_binom_p", "strand_p",
+    "father_ref", "father_alt", "father_alt_raw", "mother_ref", "mother_alt", "mother_alt_raw",
+    "sibs_called", "sibs_with_alt",
+    "flags",
+]
+ORIGIN_COLUMNS = ["family_id", "child", "chrom", "start", "end", "origin", "origin_parent",
+                  "origin_evidence", "origin_sites", "origin_reads", "other_sites", "other_reads"]
+CALLABLE_COLUMNS = ["family_id", "child", "father", "mother", "callable_bp", "callable_unmasked_bp",
+                    "status"]
+DNM_COLUMNS = EVIDENCE_COLUMNS[:-1] + ["origin", "origin_evidence", "origin_status", "flags", "strict"]
+QC_COLUMNS = [
+    "family_id", "child", "father", "mother", "child_sex",
+    "n_candidates", "n_strict", "n_strict_snv", "n_strict_indel", "ti_fraction", "median_vaf_strict",
+    "n_parent_alt", "n_child_mosaic", "n_sib_shared", "n_paternal", "n_maternal",
+    "callable_bp", "callable_unmasked_bp", "rate_per_gb", "callable_status",
+]
+COHORT_QC_COLUMNS = QC_COLUMNS + ["sampleqc_flags", "qc_reference", "qc_low", "qc_high", "qc"]
+COHORT_DNM_COLUMNS = DNM_COLUMNS + ["recurrence_families"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------------------------
+
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fmt(value, digits=4):
+    if value is None or value == "":
+        return "."
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return "."
+        if value != 0 and abs(value) < 1e-3:
+            return f"{value:.3g}"
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def write_tsv(path, columns, rows):
+    with open(path, "w") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for row in rows:
+            fh.write("\t".join(fmt(row.get(c)) for c in columns) + "\n")
+
+
+def read_tsv(path):
+    with open(path, newline="") as fh:
+        header = fh.readline().rstrip("\n").lstrip("#").split("\t")
+        rows = []
+        for line in fh:
+            line = line.rstrip("\n")
+            if line:
+                rows.append(dict(zip(header, line.split("\t"))))
+    return header, rows
+
+
+def as_int(text):
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def as_float(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
+
+
+def run(cmd, stdin=None, check=True):
+    proc = subprocess.run(cmd, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True)
+    if check and proc.returncode != 0:
+        die(f"{' '.join(cmd)} failed ({proc.returncode}): {proc.stderr.strip()[-2000:]}")
+    return proc
+
+
+def in_ranges(pos, ranges):
+    return any(a <= pos <= b for a, b in ranges)
+
+
+def read_snapshot(path):
+    """Members in pedigree order: sample -> dict(fid, father, mother, sex, cram, bedgraph).
+    Header lines start with '#'; parents are '0' when unknown, sex 1, 2 or 0."""
+    members = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) != 7:
+                die(f"{path}: snapshot row with {len(cols)} columns instead of 7: {line}")
+            fid, sample, father, mother, sex, cram, bedgraph = cols
+            members[sample] = {"fid": fid, "father": father, "mother": mother,
+                               "sex": {"1": "male", "2": "female"}.get(sex, "unknown"),
+                               "cram": cram == "yes", "bedgraph": bedgraph == "yes"}
+    if not members:
+        die(f"{path} has no member")
+    return members
+
+
+def full_sibs(members, child):
+    m = members[child]
+    return [s for s, o in members.items()
+            if s != child and o["father"] == m["father"] and o["mother"] == m["mother"]
+            and m["father"] != "0" and m["mother"] != "0"]
+
+
+def informative_parents(sex, chrom, pos):
+    """Which parents must be without the allele, by the child's sex and the site."""
+    if sex == "male" and chrom == "chrX" and not in_ranges(pos, PAR_X):
+        return ("mother",)
+    if chrom == "chrY":
+        return ("father",) if not in_ranges(pos, PAR_Y) else ("father", "mother")
+    return ("father", "mother")
+
+
+def inheritance_model(sex, chrom, pos, child_gt):
+    if sex == "male" and ((chrom == "chrX" and not in_ranges(pos, PAR_X)) or chrom == "chrY"):
+        return "hemizygous"
+    if child_gt.replace("|", "/") in ("1/1",):
+        return "homozygous"
+    return "heterozygous"
+
+
+def var_type(ref, alt):
+    if len(ref) == 1 and len(alt) == 1:
+        return "SNV"
+    if len(ref) != len(alt):
+        return "INDEL"
+    return "MNV"
+
+
+def span0(pos, ref, alt):
+    """The candidate's bases, 0-based half-open: the anchor and deleted bases of a deletion, the
+    anchor and the next base of an insertion."""
+    start = pos - 1
+    end = start + len(ref) + (1 if len(alt) > len(ref) else 0)
+    return start, end
+
+
+def log_binom_pmf(k, n, p):
+    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+            + k * math.log(p) + (n - k) * math.log(1 - p))
+
+
+def binom_two_sided(k, n, p=0.5):
+    if n <= 0:
+        return None
+    obs = log_binom_pmf(k, n, p)
+    total = 0.0
+    for i in range(n + 1):
+        lp = log_binom_pmf(i, n, p)
+        if lp <= obs + 1e-9:
+            total += math.exp(lp)
+    return min(1.0, total)
+
+
+def fisher_two_sided(a, b, c, d):
+    """2x2 table [[a, b], [c, d]]."""
+    row1, col1, n = a + b, a + c, a + b + c + d
+    if n == 0:
+        return None
+
+    def lp(x):
+        return (math.lgamma(row1 + 1) + math.lgamma(n - row1 + 1) + math.lgamma(col1 + 1)
+                + math.lgamma(n - col1 + 1) - math.lgamma(n + 1) - math.lgamma(x + 1)
+                - math.lgamma(row1 - x + 1) - math.lgamma(col1 - x + 1)
+                - math.lgamma(n - row1 - col1 + x + 1))
+
+    obs = lp(a)
+    lo, hi = max(0, row1 + col1 - n), min(row1, col1)
+    return min(1.0, sum(math.exp(lp(x)) for x in range(lo, hi + 1) if lp(x) <= obs + 1e-9))
+
+
+def merge_windows(windows):
+    """[(chrom, start, end)] 1-based inclusive -> merged, sorted by chrom then start."""
+    out = []
+    for chrom, start, end in sorted(windows):
+        if out and out[-1][0] == chrom and start <= out[-1][2] + 1:
+            out[-1] = (chrom, out[-1][1], max(out[-1][2], end))
+        else:
+            out.append((chrom, start, end))
+    return out
+
+
+def write_regions(path, windows):
+    with open(path, "w") as fh:
+        for chrom, start, end in merge_windows(windows):
+            fh.write(f"{chrom}\t{max(1, start)}\t{end}\n")
+
+
+# ---------------------------------------------------------------------------------------------
+# evidence
+# ---------------------------------------------------------------------------------------------
+
+def read_candidates(path, members):
+    """One record per child and variant from the Wombat table, whose rows repeat a variant once
+    per VEP consequence."""
+    candidates = {}
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        need = {"#CHROM", "POS", "REF", "ALT", "sample"}
+        missing = need - set(reader.fieldnames or [])
+        if missing:
+            die(f"{path} lacks the columns {', '.join(sorted(missing))}: not a Wombat table")
+        for row in reader:
+            child = row["sample"]
+            if child not in members:
+                die(f"{path}: {child} is not in the family's snapshot")
+            key = (child, row["#CHROM"], int(row["POS"]), row["REF"], row["ALT"])
+            rec = candidates.get(key)
+            if rec is None:
+                m = members[child]
+                rec = candidates[key] = {
+                    "child": child, "father": m["father"], "mother": m["mother"],
+                    "child_sex": m["sex"], "chrom": key[1], "pos": key[2], "ref": key[3],
+                    "alt": key[4], "var_type": var_type(key[3], key[4]),
+                    "wombat_child_gt": row.get("sample_gt", ""),
+                    "wombat_child_dp": row.get("sample_dp", ""),
+                    "wombat_child_gq": row.get("sample_gq", ""),
+                    "wombat_child_vaf": as_float(row.get("sample_vaf")),
+                    "_genes": [], "_csq": [], "flags": [],
+                }
+                rec["inheritance_model"] = inheritance_model(m["sex"], key[1], key[2],
+                                                             rec["wombat_child_gt"])
+            for field, col in (("_genes", "VEP_SYMBOL"), ("_csq", "VEP_Consequence")):
+                for value in (row.get(col) or "").replace("&", ",").split(","):
+                    if value and value != "." and value not in rec[field]:
+                        rec[field].append(value)
+    for rec in candidates.values():
+        rec["genes"] = ",".join(rec.pop("_genes")) or None
+        rec["consequences"] = ",".join(rec.pop("_csq")) or None
+    return sorted(candidates.values(), key=lambda r: (r["chrom"], r["pos"], r["ref"], r["alt"], r["child"]))
+
+
+def read_manifest(masks_dir):
+    path = os.path.join(masks_dir, "MANIFEST.tsv")
+    if not os.path.isfile(path):
+        die(f"{masks_dir} has no MANIFEST.tsv: not a denovo mask bundle")
+    _, rows = read_tsv(path)
+    masks = [(row["flag"], os.path.join(masks_dir, row["file"])) for row in rows]
+    for flag, file in masks:
+        if not os.path.isfile(file) or not os.path.isfile(file + ".tbi"):
+            die(f"mask {flag}: {file} or its .tbi is missing")
+    return masks
+
+
+def flag_masks(candidates, masks, workdir):
+    if not candidates:
+        return
+    bed = os.path.join(workdir, "candidates.bed")
+    spans = {}
+    with open(bed, "w") as fh:
+        for rec in sorted(candidates, key=lambda r: (r["chrom"], r["pos"])):
+            start, end = span0(rec["pos"], rec["ref"], rec["alt"])
+            spans[id(rec)] = (start, end)
+            fh.write(f"{rec['chrom']}\t{max(0, start - 1)}\t{end + 1}\n")
+    by_chrom = {}
+    for rec in candidates:
+        by_chrom.setdefault(rec["chrom"], []).append(rec)
+    for flag, file in masks:
+        out = run(["tabix", "-R", bed, file]).stdout
+        intervals = {}
+        for line in out.splitlines():
+            chrom, start, end = line.split("\t")[:3]
+            intervals.setdefault(chrom, set()).add((int(start), int(end)))
+        for chrom, ivs in intervals.items():
+            for rec in by_chrom.get(chrom, []):
+                start, end = spans[id(rec)]
+                if any(s < end and start < e for s, e in ivs):
+                    rec["flags"].append(flag)
+
+
+def flag_clusters(candidates):
+    by_child = {}
+    for rec in candidates:
+        by_child.setdefault((rec["child"], rec["chrom"]), []).append(rec)
+    for recs in by_child.values():
+        recs.sort(key=lambda r: r["pos"])
+        for rec in recs:
+            rec["cluster_n"] = sum(1 for o in recs if o is not rec and abs(o["pos"] - rec["pos"]) <= CLUSTER_BP)
+            if rec["cluster_n"]:
+                rec["flags"].append("CLUSTER")
+
+
+def count_nearby(candidates, bcf, workdir):
+    """The child's other calls within NEARBY_BP, any frequency, from the family BCF."""
+    if not candidates:
+        return
+    bcf_samples = set(run(["bcftools", "query", "-l", bcf]).stdout.split())
+    children = sorted({r["child"] for r in candidates if r["child"] in bcf_samples})
+    if not children:
+        return
+    regions = os.path.join(workdir, "nearby.tsv")
+    write_regions(regions, [(r["chrom"], r["pos"] - NEARBY_BP, r["pos"] + len(r["ref"]) + NEARBY_BP)
+                            for r in candidates])
+    out = run(["bcftools", "query", "-R", regions, "-s", ",".join(children),
+               "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%GT]\n", bcf]).stdout
+    calls = {}
+    seen = set()
+    for line in out.splitlines():
+        cols = line.split("\t")
+        site = tuple(cols[:4])
+        if site in seen:
+            continue
+        seen.add(site)
+        for child, gt in zip(children, cols[4:]):
+            if any(a not in ("0", ".") for a in gt.replace("|", "/").split("/")):
+                calls.setdefault((child, cols[0]), []).append((int(cols[1]), cols[2], cols[3]))
+    for rec in candidates:
+        own = (rec["pos"], rec["ref"], rec["alt"])
+        rec["nearby_calls"] = sum(
+            1 for p, ref, alt in calls.get((rec["child"], rec["chrom"]), [])
+            if (p, ref, alt) != own and abs(p - rec["pos"]) <= NEARBY_BP + len(rec["ref"]))
+
+
+def normalize_candidates(candidates, ref_fasta, workdir):
+    """The candidates' alleles left-aligned and trimmed by bcftools norm, as the pileup's are."""
+    vcf = os.path.join(workdir, "candidates.vcf")
+    keys = sorted({(r["chrom"], r["pos"], r["ref"], r["alt"]) for r in candidates})
+    with open(vcf, "w") as fh:
+        fh.write("##fileformat=VCFv4.2\n")
+        for chrom in sorted({k[0] for k in keys}):
+            fh.write(f"##contig=<ID={chrom}>\n")
+        fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+        for i, (chrom, pos, ref, alt) in enumerate(keys):
+            fh.write(f"{chrom}\t{pos}\tc{i}\t{ref}\t{alt}\t.\t.\t.\n")
+    out = run(["bcftools", "norm", "-f", ref_fasta, "-c", "w", vcf]).stdout
+    norm = {}
+    for line in out.splitlines():
+        if line.startswith("#"):
+            continue
+        cols = line.split("\t")
+        norm[keys[int(cols[2][1:])]] = (cols[0], int(cols[1]), cols[3], cols[4])
+    return {k: norm.get(k, k) for k in keys}
+
+
+def pileup(candidates, samples, crams, ref_fasta, workdir, high_quality):
+    """{(chrom, pos, ref, alt) normalised: {sample: (ref, alt, alt_fwd, alt_rev, ref_fwd,
+    ref_rev)}} and {(chrom, pos): {sample: depth}}, from bcftools mpileup over the windows."""
+    regions = os.path.join(workdir, "pileup.tsv")
+    write_regions(regions, [(r["chrom"], r["pos"] - PILEUP_PAD, r["pos"] + len(r["ref"]) + PILEUP_PAD)
+                            for r in candidates])
+    quality = ["-q", str(HQ_MAPQ), "-Q", str(HQ_BASEQ)] if high_quality else ["-q", "0", "-Q", "0", "-A"]
+    mpileup = ["bcftools", "mpileup", "-f", ref_fasta, "-R", regions, "--ignore-RG", "-B",
+               "-d", "100000", "-a", "FORMAT/AD,FORMAT/ADF,FORMAT/ADR", "-Ou"] + quality + crams
+    norm = ["bcftools", "norm", "-f", ref_fasta, "-m", "-any", "-c", "w", "-Ou"]
+    query = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT[\t%AD\t%ADF\t%ADR]\n"]
+    p1 = subprocess.Popen(mpileup, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p2 = subprocess.Popen(norm, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p1.stdout.close()
+    p3 = subprocess.Popen(query, stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True)
+    p2.stdout.close()
+    out, err3 = p3.communicate()
+    err2 = p2.communicate()[1]
+    err1 = p1.communicate()[1]
+    for proc, cmd, err in ((p1, mpileup, err1), (p2, norm, err2), (p3, query, err3)):
+        if proc.returncode != 0:
+            msg = err.decode(errors="replace") if isinstance(err, bytes) else err
+            die(f"{' '.join(cmd[:2])} failed ({proc.returncode}): {msg.strip()[-2000:]}")
+
+    alleles, depth = {}, {}
+    for line in out.splitlines():
+        cols = line.split("\t")
+        chrom, pos, ref, alt = cols[0], int(cols[1]), cols[2], cols[3]
+        per_sample = {}
+        for i, sample in enumerate(samples):
+            ad, adf, adr = cols[4 + 3 * i: 7 + 3 * i]
+
+            def pair(text):
+                vals = [as_int(v) or 0 for v in text.split(",")]
+                return (vals + [0, 0])[:2]
+            r, a = pair(ad)
+            rf, af = pair(adf)
+            rr, ar = pair(adr)
+            per_sample[sample] = (r, a, af, ar, rf, rr)
+        if alt != "<*>":
+            alleles[(chrom, pos, ref, alt)] = per_sample
+        if len(ref) == 1:
+            d = depth.setdefault((chrom, pos), {})
+            for sample, v in per_sample.items():
+                # Every split record of a site carries the reads of its other alleles as
+                # neither: the deepest sum is the closest to the site's depth
+                d[sample] = max(d.get(sample, 0), v[0] + v[1])
+    return alleles, depth
+
+
+def add_read_evidence(candidates, members, wombat_keys, ref_fasta, workdir):
+    samples = [s for s, m in members.items() if m["cram"]]
+    if not candidates:
+        return
+    crams = []
+    for s in samples:
+        found = sorted(glob.glob(f"{s}.*.cram"))
+        if len(found) != 1:
+            die(f"expected one CRAM named {s}.<ref_name>.cram in the working directory, found {found}")
+        crams.append(found[0])
+    norm = normalize_candidates(candidates, ref_fasta, workdir)
+    if samples:
+        hq, hq_depth = pileup(candidates, samples, crams, ref_fasta, workdir, True)
+        raw, _ = pileup(candidates, samples, crams, ref_fasta, workdir, False)
+    else:
+        hq, hq_depth, raw = {}, {}, {}
+
+    def counts(table, key, sample, site):
+        if sample not in samples:
+            return None
+        rec = table.get(key)
+        if rec is not None:
+            return rec[sample]
+        d = hq_depth.get(site, {}).get(sample, 0)
+        return (d, 0, 0, 0, 0, 0)
+
+    for rec in candidates:
+        key = norm[(rec["chrom"], rec["pos"], rec["ref"], rec["alt"])]
+        site = (key[0], key[1])
+        child = rec["child"]
+        c = counts(hq, key, child, site)
+        c_raw = counts(raw, key, child, site)
+        flags = rec["flags"]
+        if c is None:
+            flags.append("NO_CHILD_READS")
+        else:
+            r, a, af, ar, rf, rr = c
+            rec.update(child_ref=r, child_alt=a, child_alt_fwd=af, child_alt_rev=ar,
+                       child_ref_fwd=rf, child_ref_rev=rr, child_alt_raw=c_raw[1])
+            rec["child_vaf"] = a / (r + a) if r + a else None
+            if rec["inheritance_model"] == "heterozygous" and r + a:
+                rec["child_binom_p"] = binom_two_sided(a, r + a)
+                if rec["child_vaf"] < 0.5 and rec["child_binom_p"] < MOSAIC_P:
+                    flags.append("CHILD_MOSAIC_POSSIBLE")
+            rec["strand_p"] = fisher_two_sided(af, ar, rf, rr) if a else None
+            one_sided = a >= STRAND_ONE_SIDED_MIN and min(af, ar) == 0
+            if (rec["strand_p"] is not None and rec["strand_p"] < STRAND_P) or one_sided:
+                flags.append("STRAND_BIAS")
+            if a < CHILD_ALT_MIN or (c_raw[1] and a < HQ_FRACTION_MIN * c_raw[1]):
+                flags.append("LOW_QUALITY_SUPPORT")
+
+        parent_alt = []
+        missing_parent = False
+        for role in informative_parents(rec["child_sex"], rec["chrom"], rec["pos"]):
+            parent = rec[role]
+            p = counts(hq, key, parent, site)
+            p_raw = counts(raw, key, parent, site)
+            if p is None:
+                missing_parent = True
+                continue
+            rec[f"{role}_ref"], rec[f"{role}_alt"], rec[f"{role}_alt_raw"] = p[0], p[1], p_raw[1]
+            parent_alt.append(p[1])
+        # A non-informative parent (a son's father on chrX) still gets his counts, unflagged
+        for role in ("father", "mother"):
+            if f"{role}_alt" not in rec and rec[role] in samples:
+                p = counts(hq, key, rec[role], site)
+                p_raw = counts(raw, key, rec[role], site)
+                rec[f"{role}_ref"], rec[f"{role}_alt"], rec[f"{role}_alt_raw"] = p[0], p[1], p_raw[1]
+        if missing_parent:
+            flags.append("NO_PARENT_READS")
+        if parent_alt and max(parent_alt) >= PARENT_ALT_LIKELY_MIN:
+            flags.append("PARENT_ALT_LIKELY")
+        elif parent_alt and max(parent_alt) >= 1:
+            flags.append("PARENT_ALT_POSSIBLE")
+
+        sibs = full_sibs(members, child)
+        called = [s for s in sibs if (s, rec["chrom"], rec["pos"], rec["ref"], rec["alt"]) in wombat_keys]
+        with_alt, sib_alt_max = [], 0
+        for s in sibs:
+            v = counts(hq, key, s, site)
+            if v is not None and v[1] > 0:
+                with_alt.append(f"{s}:{v[1]}/{v[0] + v[1]}")
+                sib_alt_max = max(sib_alt_max, v[1])
+        rec["sibs_called"] = ",".join(called) or None
+        rec["sibs_with_alt"] = ",".join(with_alt) or None
+        if called or sib_alt_max >= SIB_ALT_MIN:
+            flags.append("SIB_SHARED")
+
+
+def read_union(path):
+    """The masks' union on the autosomes: chrom -> (starts, ends), sorted and disjoint."""
+    union = {}
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            chrom, start, end = line.rstrip("\n").split("\t")[:3]
+            if chrom not in AUTOSOMES:
+                continue
+            s, e = union.setdefault(chrom, (array("q"), array("q")))
+            s.append(int(start))
+            e.append(int(end))
+    return union
+
+
+def read_bedgraph(path):
+    """Autosomal bins of a mosdepth regions file: (chroms, starts, ends, depths)."""
+    chroms, starts, ends, depths = [], array("q"), array("q"), array("f")
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            cols = line.rstrip("\n").split("\t")
+            if cols[0] not in AUTOSOMES:
+                continue
+            # Interned: three million bins share 22 names
+            chroms.append(sys.intern(cols[0]))
+            starts.append(int(cols[1]))
+            ends.append(int(cols[2]))
+            depths.append(float(cols[3]))
+    return chroms, starts, ends, depths
+
+
+def masked_per_bin(bins, union):
+    chroms, starts, ends = bins
+    masked = array("q", [0]) * len(starts)
+    i = 0
+    n = len(starts)
+    while i < n:
+        chrom = chroms[i]
+        us, ue = union.get(chrom, (array("q"), array("q")))
+        j = 0
+        while i < n and chroms[i] == chrom:
+            s, e = starts[i], ends[i]
+            while j < len(ue) and ue[j] <= s:
+                j += 1
+            k, covered = j, 0
+            while k < len(us) and us[k] < e:
+                covered += min(e, ue[k]) - max(s, us[k])
+                k += 1
+            masked[i] = covered
+            i += 1
+    return masked
+
+
+def callable_genome(members, children, masks_dir, fid):
+    rows = []
+    union_path = os.path.join(masks_dir, "union.bed.gz")
+    cache, bins, masked = {}, None, None
+    for child in children:
+        m = members[child]
+        row = {"family_id": fid, "child": child, "father": m["father"], "mother": m["mother"]}
+        trio = [child, m["father"], m["mother"]]
+        lacking = [s for s in trio if s not in members or not members[s]["bedgraph"]]
+        if lacking:
+            row["status"] = "no_bedgraph:" + ",".join(lacking)
+            rows.append(row)
+            continue
+        for s in trio:
+            if s not in cache:
+                found = sorted(glob.glob(f"{s}.by*.bedgraph.gz"))
+                if len(found) != 1:
+                    die(f"expected one bedgraph named {s}.by<bin>.bedgraph.gz, found {found}")
+                cache[s] = read_bedgraph(found[0])
+        ref = cache[child]
+        if any(cache[s][1] != ref[1] or cache[s][0] != ref[0] for s in trio[1:]):
+            row["status"] = "bins_differ"
+            rows.append(row)
+            continue
+        if bins is None or bins[1] != ref[1]:
+            bins = ref[:3]
+            masked = masked_per_bin(bins, read_union(union_path))
+        total, unmasked = 0, 0
+        dc, df, dm = cache[child][3], cache[m["father"]][3], cache[m["mother"]][3]
+        for i in range(len(dc)):
+            if dc[i] >= CALLABLE_CHILD_DP and df[i] >= CALLABLE_PARENT_DP and dm[i] >= CALLABLE_PARENT_DP:
+                size = bins[2][i] - bins[1][i]
+                total += size
+                unmasked += size - masked[i]
+        row.update(callable_bp=total, callable_unmasked_bp=unmasked, status="ok")
+        rows.append(row)
+    return rows
+
+
+def write_unfazed_inputs(candidates, members, bcf, outdir):
+    """Unfazed's inputs: candidates of the children with a CRAM and both parents in the BCF; the
+    family's biallelic SNVs within ORIGIN_WINDOW of them; a PED of those trios."""
+    os.makedirs(outdir, exist_ok=True)
+    bcf_samples = set(run(["bcftools", "query", "-l", bcf]).stdout.split())
+    kids = []
+    for child in sorted({r["child"] for r in candidates}):
+        m = members[child]
+        if m["cram"] and child in bcf_samples and m["father"] in bcf_samples and m["mother"] in bcf_samples:
+            kids.append(child)
+    chosen = [r for r in candidates if r["child"] in kids]
+    with open(os.path.join(outdir, "dnms.bed"), "w") as fh:
+        for r in sorted(chosen, key=lambda r: (r["chrom"], r["pos"], r["child"])):
+            start, end = span0(r["pos"], r["ref"], r["alt"])
+            # Unfazed reads every small variant alike; its type names only SVs
+            fh.write(f"{r['chrom']}\t{start}\t{max(end, start + 1)}\t{r['child']}\t"
+                     f"{'INDEL' if r['var_type'] == 'INDEL' else 'SNV'}\n")
+    with open(os.path.join(outdir, "family.ped"), "w") as fh:
+        for child in kids:
+            m = members[child]
+            sex = {"male": "1", "female": "2"}.get(m["sex"], "0")
+            fh.write(f"{m['fid']}\t{child}\t{m['father']}\t{m['mother']}\t{sex}\t2\n")
+        for parent in sorted({members[k]["father"] for k in kids} | {members[k]["mother"] for k in kids}):
+            p = members.get(parent, {})
+            sex = {"male": "1", "female": "2"}.get(p.get("sex"), "0")
+            fh.write(f"{p.get('fid', '.')}\t{parent}\t0\t0\t{sex}\t1\n")
+    with open(os.path.join(outdir, "kids.tsv"), "w") as fh:
+        for child in kids:
+            fh.write(child + "\n")
+    sites = os.path.join(outdir, "sites.vcf.gz")
+    if chosen:
+        regions = os.path.join(outdir, "windows.tsv")
+        write_regions(regions, [(r["chrom"], r["pos"] - ORIGIN_WINDOW, r["pos"] + ORIGIN_WINDOW) for r in chosen])
+        trios = sorted(set(kids) | {members[k]["father"] for k in kids} | {members[k]["mother"] for k in kids})
+        run(["bcftools", "view", "-R", regions, "-s", ",".join(trios), "-v", "snps", "-m2", "-M2",
+             "-Oz", "-o", sites, bcf])
+        os.remove(regions)
+    else:
+        run(["bcftools", "view", "-h", "-Oz", "-o", sites, bcf])
+    run(["tabix", "-f", "-p", "vcf", sites])
+
+
+def cmd_evidence(args):
+    members = read_snapshot(args.snapshot)
+    fid = next(iter(members.values()))["fid"]
+    candidates = read_candidates(args.table, members)
+    wombat_keys = {(r["child"], r["chrom"], r["pos"], r["ref"], r["alt"]) for r in candidates}
+    workdir = args.workdir
+    os.makedirs(workdir, exist_ok=True)
+    flag_masks(candidates, read_manifest(args.masks), workdir)
+    flag_clusters(candidates)
+    count_nearby(candidates, args.bcf, workdir)
+    add_read_evidence(candidates, members, wombat_keys, args.ref, workdir)
+    for rec in candidates:
+        rec["family_id"] = fid
+        rec["flags"] = ",".join(rec["flags"]) or None
+    write_tsv(f"{args.out_prefix}.evidence.tsv", EVIDENCE_COLUMNS, candidates)
+    # Every child with both parents sequenced, candidates or not: a child without any is a QC
+    # finding too
+    children = sorted({r["child"] for r in candidates} |
+                      {s for s, m in members.items() if m["cram"]
+                       and members.get(m["father"], {}).get("cram") and members.get(m["mother"], {}).get("cram")})
+    write_tsv(f"{args.out_prefix}.callable.tsv", CALLABLE_COLUMNS,
+              callable_genome(members, children, args.masks, fid))
+    write_unfazed_inputs(candidates, members, args.bcf, args.unfazed_dir)
+    print(f"{fid}: {len(candidates)} candidates in {len({r['child'] for r in candidates})} children",
+          file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------------------------
+# origin
+# ---------------------------------------------------------------------------------------------
+
+def n_items(text):
+    return len([x for x in (text or "").split(",") if x and x not in ("-", ".")])
+
+
+def cmd_origin(args):
+    d = args.unfazed_dir
+    kids = [k for k in open(os.path.join(d, "kids.tsv")).read().split() if k]
+    fid = args.family
+    rows, status = [], {}
+    if not kids or os.path.getsize(os.path.join(d, "dnms.bed")) == 0:
+        write_tsv(args.out, ORIGIN_COLUMNS, [])
+        return
+    pairs = []
+    for kid in kids:
+        found = sorted(glob.glob(f"{kid}.*.cram"))
+        if len(found) != 1:
+            die(f"expected one CRAM named {kid}.<ref_name>.cram, found {found}")
+        pairs.append(f"{kid}:{found[0]}")
+    out_bed = "unfazed.out.bed"
+    cmd = [args.unfazed, "-d", os.path.join(d, "dnms.bed"), "-s", os.path.join(d, "sites.vcf.gz"),
+           "-p", os.path.join(d, "family.ped"), "-g", "38", "-r", args.ref, "-o", "bed", "--verbose",
+           "-t", str(args.threads), "--outfile", out_bed, "--bam-pairs"] + pairs
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    sys.stderr.write(proc.stderr[-5000:])
+    if proc.returncode != 0 or not os.path.isfile(out_bed):
+        print(f"WARNING: unfazed failed ({proc.returncode}); the family's candidates get origin_status error",
+              file=sys.stderr)
+        for kid in kids:
+            status[kid] = "error"
+        write_tsv(args.out, ORIGIN_COLUMNS,
+                  [{"family_id": fid, "child": kid, "origin": "error"} for kid in kids])
+        return
+    _, phased = read_tsv(out_bed)
+    ped = {}
+    for line in open(os.path.join(d, "family.ped")):
+        cols = line.split()
+        ped[cols[1]] = cols
+    for r in phased:
+        kid = r["kid"]
+        father, mother = ped[kid][2], ped[kid][3]
+        parent = r.get("origin_parent", "")
+        origin = "paternal" if parent == father else "maternal" if parent == mother else "ambiguous"
+        rows.append({"family_id": fid, "child": kid, "chrom": r["chrom"], "start": r["start"],
+                     "end": r["end"], "origin": origin, "origin_parent": parent,
+                     "origin_evidence": r.get("evidence_count"),
+                     # Unfazed lists the sites and read names; their numbers are enough here
+                     "origin_sites": n_items(r.get("origin_parent_sites")),
+                     "origin_reads": n_items(r.get("origin_parent_reads")),
+                     "other_sites": n_items(r.get("other_parent_sites")),
+                     "other_reads": n_items(r.get("other_parent_reads"))})
+    write_tsv(args.out, ORIGIN_COLUMNS, rows)
+
+
+# ---------------------------------------------------------------------------------------------
+# family
+# ---------------------------------------------------------------------------------------------
+
+def is_strict(flags):
+    return not [f for f in flags if f not in STRICT_IGNORED]
+
+
+def is_transition(ref, alt):
+    return {ref, alt} in ({"A", "G"}, {"C", "T"})
+
+
+def qc_rows(dnm, callable_rows, members):
+    by_child = {}
+    for r in dnm:
+        by_child.setdefault(r["child"], []).append(r)
+    rows = []
+    for c in callable_rows:
+        child = c["child"]
+        recs = by_child.get(child, [])
+        auto = [r for r in recs if r["chrom"] in AUTOSOMES]
+        strict = [r for r in auto if r["strict"] == "yes"]
+        snv = [r for r in strict if r["var_type"] == "SNV"]
+        vafs = [as_float(r["child_vaf"]) for r in strict if as_float(r["child_vaf"]) is not None]
+        unmasked = as_int(c.get("callable_unmasked_bp"))
+
+        def has(flag):
+            return sum(1 for r in recs if flag in r["flags"].split(","))
+        rows.append({
+            "family_id": c["family_id"], "child": child, "father": c["father"], "mother": c["mother"],
+            "child_sex": members.get(child, {}).get("sex"),
+            "n_candidates": len(recs), "n_strict": len(strict), "n_strict_snv": len(snv),
+            "n_strict_indel": sum(1 for r in strict if r["var_type"] == "INDEL"),
+            "ti_fraction": (sum(1 for r in snv if is_transition(r["ref"], r["alt"])) / len(snv)) if snv else None,
+            "median_vaf_strict": statistics.median(vafs) if vafs else None,
+            "n_parent_alt": has("PARENT_ALT_POSSIBLE") + has("PARENT_ALT_LIKELY"),
+            "n_child_mosaic": has("CHILD_MOSAIC_POSSIBLE"), "n_sib_shared": has("SIB_SHARED"),
+            "n_paternal": sum(1 for r in recs if r["origin"] == "paternal"),
+            "n_maternal": sum(1 for r in recs if r["origin"] == "maternal"),
+            "callable_bp": c.get("callable_bp"), "callable_unmasked_bp": c.get("callable_unmasked_bp"),
+            "rate_per_gb": len(strict) / (unmasked / 1e9) if unmasked else None,
+            "callable_status": c.get("status"),
+        })
+    return rows
+
+
+def cmd_family(args):
+    members = read_snapshot(args.snapshot)
+    _, evidence = read_tsv(args.evidence)
+    _, origins = read_tsv(args.origin)
+    _, callable_rows = read_tsv(args.callable)
+    by_span, failed = {}, set()
+    for o in origins:
+        if o["origin"] == "error":
+            failed.add(o["child"])
+        else:
+            by_span[(o["child"], o["chrom"], o["start"], o["end"])] = o
+    kids = set()
+    kids_file = os.path.join(args.unfazed_dir, "kids.tsv") if args.unfazed_dir else None
+    if kids_file and os.path.isfile(kids_file):
+        kids = set(open(kids_file).read().split())
+    dnm = []
+    for r in evidence:
+        start, end = span0(int(r["pos"]), r["ref"], r["alt"])
+        o = by_span.get((r["child"], r["chrom"], str(start), str(max(end, start + 1))))
+        row = dict(r)
+        if o is not None:
+            row.update(origin=o["origin"], origin_evidence=o["origin_evidence"], origin_status="phased")
+        else:
+            row["origin"] = None
+            row["origin_status"] = ("error" if r["child"] in failed else
+                                    "unphased" if r["child"] in kids else "not_run")
+        flags = [f for f in r["flags"].split(",") if f and f != "."]
+        row["flags"] = ",".join(flags) or None
+        row["strict"] = "yes" if is_strict(flags) else "no"
+        dnm.append(row)
+    for row in dnm:
+        if row["flags"] is None:
+            row["flags"] = "."
+    write_tsv(f"{args.out_prefix}.dnm.tsv", DNM_COLUMNS, dnm)
+    write_tsv(f"{args.out_prefix}.qc.tsv", QC_COLUMNS, qc_rows(dnm, callable_rows, members))
+
+
+# ---------------------------------------------------------------------------------------------
+# cohort
+# ---------------------------------------------------------------------------------------------
+
+def cmd_cohort(args):
+    dnm, qc = [], []
+    for path in sorted(args.dnm):
+        dnm.extend(read_tsv(path)[1])
+    for path in sorted(args.qc):
+        qc.extend(read_tsv(path)[1])
+    families = {}
+    for r in dnm:
+        families.setdefault((r["chrom"], r["pos"], r["ref"], r["alt"]), set()).add(r["family_id"])
+    for r in dnm:
+        n = len(families[(r["chrom"], r["pos"], r["ref"], r["alt"])] - {r["family_id"]})
+        r["recurrence_families"] = n
+        if n:
+            flags = [f for f in r["flags"].split(",") if f and f != "."] + ["RECURRENT"]
+            r["flags"] = ",".join(flags)
+            r["strict"] = "yes" if is_strict(flags) else "no"
+    # The strict counts follow the cohort's RECURRENT flags
+    strict_by_child = {}
+    for r in dnm:
+        if r["chrom"] in AUTOSOMES and r["strict"] == "yes":
+            strict_by_child[(r["family_id"], r["child"])] = strict_by_child.get((r["family_id"], r["child"]), 0) + 1
+    for q in qc:
+        n = strict_by_child.get((q["family_id"], q["child"]), 0)
+        unmasked = as_int(q.get("callable_unmasked_bp"))
+        q["n_strict"] = n
+        q["rate_per_gb"] = n / (unmasked / 1e9) if unmasked else None
+    rates = [q["rate_per_gb"] for q in qc if q["rate_per_gb"] is not None]
+    if len(rates) >= QC_MIN_CHILDREN:
+        med = statistics.median(rates)
+        mad = 1.4826 * statistics.median([abs(x - med) for x in rates])
+        low, high, reference = max(0.0, med - QC_MAD_K * mad), med + QC_MAD_K * mad, "cohort"
+    else:
+        (low, high), reference = QC_RATE_RANGE, "fixed"
+    sampleqc_flags = read_tsv(args.sampleqc_flags)[1] if args.sampleqc_flags else []
+    for q in qc:
+        trio = {q["child"], q["father"], q["mother"]}
+        q["sampleqc_flags"] = ";".join(sorted({f"{f['flag']}({f['sample_a']},{f['sample_b']})" for f in sampleqc_flags
+                                               if f.get("sample_a") in trio or f.get("sample_b") in trio})) or None
+        rate = q["rate_per_gb"]
+        q.update(qc_reference=reference, qc_low=low, qc_high=high)
+        q["qc"] = ("no_callable" if rate is None else "high" if rate > high else
+                   "low" if rate < low else "ok")
+    write_tsv(f"{args.out_prefix}.dnm.tsv", COHORT_DNM_COLUMNS, dnm)
+    write_tsv(f"{args.out_prefix}.qc.tsv", COHORT_QC_COLUMNS, qc)
+    print(f"{len(dnm)} candidates, {len(qc)} children, QC range {low:.1f}-{high:.1f} per Gb ({reference})",
+          file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("evidence")
+    p.add_argument("--table", required=True, help="the family's Wombat de novo table")
+    p.add_argument("--bcf", required=True, help="the family's norm.bcf, indexed")
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--masks", required=True, help="the mask bundle directory")
+    p.add_argument("--ref", required=True, help="reference FASTA, indexed")
+    p.add_argument("--out-prefix", required=True)
+    p.add_argument("--unfazed-dir", default="unfazed")
+    p.add_argument("--workdir", default="tmp")
+    p.set_defaults(func=cmd_evidence)
+
+    p = sub.add_parser("origin")
+    p.add_argument("--family", required=True)
+    p.add_argument("--unfazed-dir", default="unfazed")
+    p.add_argument("--ref", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--threads", type=int, default=1)
+    p.add_argument("--unfazed", default="unfazed", help="the unfazed executable")
+    p.set_defaults(func=cmd_origin)
+
+    p = sub.add_parser("family")
+    p.add_argument("--evidence", required=True)
+    p.add_argument("--origin", required=True)
+    p.add_argument("--callable", required=True)
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--unfazed-dir", default=None, help="for kids.tsv: who Unfazed was run on")
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_family)
+
+    p = sub.add_parser("cohort")
+    p.add_argument("--dnm", nargs="+", required=True)
+    p.add_argument("--qc", nargs="+", required=True)
+    p.add_argument("--sampleqc-flags", default=None, help="the cohort's sampleqc flags table, if any")
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_cohort)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -172,6 +172,17 @@ flowchart TB
         upd_family_call --> upd_family --> upd_concat --> upd_cohort
     end
 
+    subgraph denovo [**De novo**]
+        direction TB
+        dnm_wombat["Wombat de novo table (**{denovo_wombat_config}**)"]
+        dnm_evidence["masks + clusters + bcftools mpileup of every member + callable genome"]
+        dnm_origin["Unfazed parent of origin"]
+        dnm_family["families/**{FID}**/denovo/**{FID}**.**{label}**.{dnm,qc,inputs}.tsv"]:::of
+        dnm_concat["concatenate family tables + recurrence + QC range + sampleqc flags"]
+        dnm_cohort["cohorts/**{cohort}**/denovo/**{cohort}**.**{label}**.{dnm,qc,inputs}.tsv"]:::oc
+        dnm_wombat --> dnm_evidence --> dnm_origin --> dnm_family --> dnm_concat --> dnm_cohort
+    end
+
     subgraph wisecondorx [**WisecondorX**]
         direction TB
         wcx_call["WisecondorX call"]
@@ -189,6 +200,11 @@ flowchart TB
     glnexus_vcf ==> upd_family_call
     cnv_sample -.-> upd_family_call
     roh_family -.-> upd_family_call
+    annotation_rare_file ==> dnm_wombat
+    glnexus_vcf ==> dnm_evidence
+    alignment ==> dnm_evidence
+    bedgraph_bedgraph ==> dnm_evidence
+    sqc_cohort -.-> dnm_concat
     alignment ==> wisecondorx
     alignment ==> deepvariant
     deepvariant ==> glnexus

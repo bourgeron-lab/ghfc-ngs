@@ -38,6 +38,9 @@ class StaleFamily {
      *  - `upd/` - the UPD tables. They do come from the joint call, but the plan redoes them
      *    whenever the family's BCF is called in the run, and whenever their inputs snapshot,
      *    which lists the members the BCF holds, changes.
+     *  - `denovo/` - the de novo tables. As for `upd/`, the plan redoes them whenever the
+     *    family's BCF or Wombat table is made in the run or is newer than them, and whenever
+     *    their inputs snapshot, which lists the family's members, changes.
      *  - `*.dnm.*` - left by DNM_EXTRACTION, since removed, so nothing would regenerate
      *    them. A file left stale is recoverable; a file deleted that nothing rebuilds is not.
      *  - `extractor/` - the plan does no completeness check for it, so deleting would not

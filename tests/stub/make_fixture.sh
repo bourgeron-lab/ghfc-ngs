@@ -51,6 +51,11 @@ for f in ref.fa ref.fa.fai old37.fa old38.fa bazam.jar vep.ini gnomad.vcf.gz gno
          melt/me_refs/Hg38/SVA_MELT.zip melt/add_bed_files/Hg38/Hg38.genes.bed somalier_sites.vcf.gz; do
     touch "${refs}/${f}"
 done
+# A de novo mask bundle: main.nf checks for its manifest and union before the run
+mkdir -p "${refs}/denovo_masks"
+printf 'flag\tfile\nLCR\tlcr.bed.gz\n' > "${refs}/denovo_masks/MANIFEST.tsv"
+touch "${refs}/denovo_masks/lcr.bed.gz" "${refs}/denovo_masks/lcr.bed.gz.tbi" \
+      "${refs}/denovo_masks/union.bed.gz" "${refs}/denovo_masks/union.bed.gz.tbi"
 # A CNV panel for the cohort fit: main.nf reads its panel.json before the run
 mkdir -p "${refs}/cnv_panel/v0"
 printf '{"panel_version": "0", "tag": "cov_b250q1"}\n' > "${refs}/cnv_panel/v0/panel.json"

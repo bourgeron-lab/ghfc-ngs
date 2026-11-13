@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+
+# Self-contained check of denovo_tables, on a simulated quad. Needs python3, samtools, bcftools,
+# tabix and bgzip.
+#
+# A random 20 kb chr1 and 10 kb chr2; a father F, a mother M, a son C1 and a daughter C2, each
+# with single-end reads at about 33x, planted with the alleles of the cases below. Asserts that:
+#   - a clean heterozygous candidate is strict, with its reads counted, and phased paternal by
+#     the (fake) Unfazed;
+#   - two candidates of C1 6 bp apart are both CLUSTER, and a non-candidate call of C1 3 bp from
+#     the clean one is counted in nearby_calls;
+#   - two alternate reads in the father give PARENT_ALT_LIKELY, one in the mother
+#     PARENT_ALT_POSSIBLE;
+#   - 5 alternate reads of 33 are CHILD_MOSAIC_POSSIBLE; alternate reads all forward,
+#     STRAND_BIAS; alternate reads of mapping quality 0, LOW_QUALITY_SUPPORT with raw reads seen;
+#   - a candidate both children have is SIB_SHARED in each, which leaves them strict; one that
+#     only C1 has, with 3 alternate reads in C2, is SIB_SHARED too;
+#   - a one-base deletion in a homopolymer, given right-shifted as Wombat could, is matched to
+#     the pileup's left-aligned deletion;
+#   - a candidate in the LCR mask is flagged LCR, its Wombat rows (one per consequence) are one
+#     candidate with both genes;
+#   - the callable genome counts the bins where the child has 15x and each parent 10x, less the
+#     masked bases, and the QC counts strict autosomal candidates per callable unmasked Gb;
+#   - a failed Unfazed leaves origin_status error and still writes the tables;
+#   - the cohort marks a candidate two families share RECURRENT, no longer strict, holds a
+#     small cohort to the fixed range, and gives each child the sampleqc flags of its trio;
+#   - the hemizygous rules: a son's chrX outside the PARs is judged on the mother only, chrY on
+#     the father only, a PAR on both.
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/denovo_tables"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+for tool in python3 samtools bcftools tabix bgzip; do
+    command -v "${tool}" > /dev/null || { echo "SKIP: ${tool} not on PATH" >&2; exit 1; }
+done
+
+python3 - "${script}" <<'EOF'
+import gzip, os, random, subprocess, sys
+
+random.seed(7)
+script = sys.argv[1]
+L = {"chr1": 20000, "chr2": 10000}
+seq = {c: [random.choice("ACGT") for _ in range(n)] for c, n in L.items()}
+# A homopolymer AAAA at chr1:15001-15004, with non-A flanks
+for i, b in zip(range(14999, 15005), "CAAAAG"):
+    seq["chr1"][i] = b
+seq = {c: "".join(s) for c, s in seq.items()}
+with open("ref.fa", "w") as fh:
+    for c, s in seq.items():
+        fh.write(f">{c}\n")
+        for i in range(0, len(s), 60):
+            fh.write(s[i:i + 60] + "\n")
+subprocess.run(["samtools", "faidx", "ref.fa"], check=True)
+
+def alt_of(c, p):
+    r = seq[c][p - 1]
+    return {"A": "C", "C": "G", "G": "T", "T": "A"}[r]
+
+# Sites: name -> (chrom, pos); alt reads per sample, with options
+SNV = {
+    "clean": ("chr1", 3000), "clu1": ("chr1", 5000), "clu2": ("chr1", 5006),
+    "fa2": ("chr1", 8000), "mo1": ("chr1", 9000), "mosaic": ("chr1", 11000),
+    "strand": ("chr1", 12000), "lowq": ("chr1", 13000), "sib": ("chr1", 14000),
+    "lcr": ("chr1", 16000), "sibreads": ("chr1", 17000), "chr2": ("chr2", 5000),
+}
+DEL = ("chr1", 15000)   # left-aligned: chr1:15000 CA -> C (one A of the homopolymer deleted)
+plan = {  # site -> {sample: (n_alt, option)}
+    "clean": {"C1": (16, "")}, "clu1": {"C1": (15, "")}, "clu2": {"C1": (15, "")},
+    "fa2": {"C1": (16, ""), "F": (2, "")}, "mo1": {"C1": (16, ""), "M": (1, "")},
+    "mosaic": {"C1": (5, "")}, "strand": {"C1": (14, "fwd")}, "lowq": {"C1": (15, "mapq0")},
+    "sib": {"C1": (16, ""), "C2": (16, "")}, "lcr": {"C1": (16, "")},
+    "sibreads": {"C1": (16, ""), "C2": (3, "")}, "chr2": {"C2": (16, "")},
+    "del": {"C1": (15, "")},
+}
+NEARBY = ("chr1", 3003)  # a call of C1's, not a candidate
+plan["nearby"] = {"C1": (16, "")}
+SNV["nearby"] = NEARBY
+
+READ = 100
+samples = ["F", "M", "C1", "C2"]
+for sample in samples:
+    reads = []
+    n = 0
+    for chrom, length in L.items():
+        starts = list(range(1, length - READ + 2, 3))
+        # sites on this chromosome, with which of the reads covering them carry the alt
+        sites = [(name, p) for name, (c, p) in SNV.items() if c == chrom]
+        if chrom == DEL[0]:
+            sites.append(("del", DEL[1]))
+        carriers = {}
+        for name, p in sites:
+            k, opt = plan.get(name, {}).get(sample, (0, ""))
+            if name == "del":
+                cover = [s for s in starts if s <= p - 20 and s + READ - 1 >= p + 21]
+            else:
+                cover = [s for s in starts if s <= p <= s + READ - 1]
+            for s in cover[:k]:
+                carriers.setdefault(s, []).append((name, p, opt))
+        for i, s in enumerate(starts):
+            n += 1
+            mods = carriers.get(s, [])
+            opts = {o for _, _, o in mods}
+            flag = 0 if ("fwd" in opts or i % 2 == 0) else 16
+            mapq = 0 if "mapq0" in opts else 60
+            r = list(seq[chrom][s - 1: s - 1 + READ])
+            cigar = f"{READ}M"
+            for name, p, _ in mods:
+                if name != "del":
+                    r[p - s] = alt_of(chrom, p)
+            if any(name == "del" for name, _, _ in mods):
+                # delete the base after the anchor (chr1:15001), keep the read 100 bp long
+                off = DEL[1] - s + 1
+                full = seq[chrom][s - 1: s - 1 + READ + 1]
+                r = list(full[:off] + full[off + 1:])
+                cigar = f"{off}M1D{READ - off}M"
+            reads.append(f"r{n}\t{flag}\t{chrom}\t{s}\t{mapq}\t{cigar}\t*\t0\t0\t{''.join(r)}\t{'I' * READ}")
+    with open(f"{sample}.sam", "w") as fh:
+        fh.write("@HD\tVN:1.6\tSO:unsorted\n")
+        for c, n_ in L.items():
+            fh.write(f"@SQ\tSN:{c}\tLN:{n_}\n")
+        fh.write(f"@RG\tID:{sample}\tSM:{sample}\n")
+        for line in reads:
+            fh.write(line + f"\tRG:Z:{sample}\n")
+    subprocess.run(["samtools", "sort", "-O", "cram,version=3.0", "--reference", "ref.fa", "-o",
+                    f"{sample}.GRCh38_test.cram", f"{sample}.sam"], check=True, stderr=subprocess.DEVNULL)
+    subprocess.run(["samtools", "index", f"{sample}.GRCh38_test.cram"], check=True)
+    os.remove(f"{sample}.sam")
+
+# The family BCF: the candidates, the nearby call, a few inherited SNVs for Unfazed's sites
+def gt(sample, name):
+    k = plan.get(name, {}).get(sample, (0, ""))[0]
+    return "0/1" if k >= 5 else "0/0"
+records = []
+for name, (c, p) in SNV.items():
+    records.append((c, p, seq[c][p - 1], alt_of(c, p), name))
+records.append((DEL[0], DEL[1], "CA", "C", "del"))
+with open("fam.vcf", "w") as fh:
+    fh.write("##fileformat=VCFv4.2\n")
+    for c, n_ in L.items():
+        fh.write(f"##contig=<ID={c},length={n_}>\n")
+    fh.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="g">\n')
+    fh.write('##FORMAT=<ID=AD,Number=R,Type=Integer,Description="a">\n')
+    fh.write('##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="q">\n')
+    fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n")
+    for c, p, ref, alt, name in sorted(records, key=lambda r: (r[0], r[1])):
+        fh.write(f"{c}\t{p}\t.\t{ref}\t{alt}\t50\tPASS\t.\tGT:AD:GQ\t" +
+                 "\t".join(f"{gt(s, name)}:20,10:40" for s in samples) + "\n")
+subprocess.run(["bcftools", "view", "-Ob", "-o", "fam.norm.bcf", "fam.vcf"], check=True)
+subprocess.run(["bcftools", "index", "fam.norm.bcf"], check=True)
+
+# The Wombat table: one row per child, variant and consequence. The deletion is given
+# right-shifted (chr1:15003 AA -> A), and the LCR candidate has two consequences.
+cols = ["#CHROM", "POS", "REF", "ALT", "VEP_SYMBOL", "VEP_Consequence", "sample", "sample_gt",
+        "sample_dp", "sample_gq", "sample_vaf", "father_gt", "mother_gt"]
+rows = []
+def wrow(c, p, ref, alt, child, gene="G1", csq="missense_variant"):
+    rows.append([c, str(p), ref, alt, gene, csq, child, "0/1", "33", "40", "0.48", "0/0", "0/0"])
+for name in ["clean", "clu1", "clu2", "fa2", "mo1", "mosaic", "strand", "lowq", "sib", "lcr", "sibreads"]:
+    c, p = SNV[name]
+    wrow(c, p, seq[c][p - 1], alt_of(c, p), "C1")
+c, p = SNV["lcr"]
+wrow(c, p, seq[c][p - 1], alt_of(c, p), "C1", gene="G2", csq="intron_variant")
+c, p = SNV["sib"]
+wrow(c, p, seq[c][p - 1], alt_of(c, p), "C2")
+c, p = SNV["chr2"]
+wrow(c, p, seq[c][p - 1], alt_of(c, p), "C2")
+wrow("chr1", 15003, "AA", "A", "C1")
+with open("fam.wombat.tsv", "w") as fh:
+    fh.write("\t".join(cols) + "\n")
+    for r in rows:
+        fh.write("\t".join(r) + "\n")
+
+# Masks: LCR around chr1:16000, SEGDUP somewhere empty; and their union
+os.makedirs("masks")
+def bed(path, ivs):
+    with open(path[:-3], "w") as fh:
+        for c, s, e in ivs:
+            fh.write(f"{c}\t{s}\t{e}\n")
+    subprocess.run(["bgzip", "-f", path[:-3]], check=True)
+    subprocess.run(["tabix", "-f", "-p", "bed", path], check=True)
+bed("masks/lcr.bed.gz", [("chr1", 15900, 16100)])
+bed("masks/segdup.bed.gz", [("chr2", 9000, 9500)])
+bed("masks/union.bed.gz", [("chr1", 15900, 16100), ("chr2", 9000, 9500)])
+with open("masks/MANIFEST.tsv", "w") as fh:
+    fh.write("flag\tfile\n" "LCR\tlcr.bed.gz\n" "SEGDUP\tsegdup.bed.gz\n")
+
+# Bedgraphs of 1 kb bins: 30x, but the father at 8x over chr1:0-2000, and C2 at 12x over chr2
+for sample in samples:
+    with gzip.open(f"{sample}.by1000.bedgraph.gz", "wt") as fh:
+        for c, n_ in L.items():
+            for s in range(0, n_, 1000):
+                d = 30.0
+                if sample == "F" and c == "chr1" and s < 2000:
+                    d = 8.0
+                if sample == "C2" and c == "chr2":
+                    d = 12.0
+                fh.write(f"{c}\t{s}\t{min(s + 1000, n_)}\t{d}\n")
+
+with open("snapshot.tsv", "w") as fh:
+    fh.write("#inputs\tv1\n#step\tdenovo\n")
+    for s, f, m, sex in (("F", "0", "0", "1"), ("M", "0", "0", "2"), ("C1", "F", "M", "1"), ("C2", "F", "M", "2")):
+        fh.write(f"FAM1\t{s}\t{f}\t{m}\t{sex}\tyes\tyes\n")
+EOF
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+python3 "${script}" evidence --table fam.wombat.tsv --bcf fam.norm.bcf --snapshot snapshot.tsv \
+    --masks masks --ref ref.fa --out-prefix FAM1.t --unfazed-dir unfazed
+
+# A fake Unfazed: phases the clean candidate paternal, and checks what it was given
+mkdir bin
+cat > bin/unfazed <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""; args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    [[ "${args[i]}" == --outfile ]] && out="${args[i + 1]}"
+done
+grep -q -- '--bam-pairs' <<< "$*"
+grep -q 'C1:C1.GRCh38_test.cram' <<< "$*"
+grep -q -- '-g 38' <<< "$*"
+printf '#chrom\tstart\tend\tvartype\tkid\torigin_parent\tother_parent\tevidence_count\tevidence_types\torigin_parent_sites\torigin_parent_reads\tother_parent_sites\tother_parent_reads\n' > "${out}"
+printf 'chr1\t2999\t3000\tPOINT\tC1\tF\tM\t3\tREADBACKED\t1,2,3\t4,5\t\t\n' >> "${out}"
+EOF
+chmod +x bin/unfazed
+python3 "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.origin.tsv \
+    --unfazed bin/unfazed
+printf 'level\tfamily_id\tsample_a\tsample_b\tflag\tseverity\tevidence\nfamily\tFAM1\tC1\tF\tNOT_PARENT\terror\tx\n' > flags.tsv
+python3 "${script}" family --evidence FAM1.t.evidence.tsv --origin FAM1.origin.tsv \
+    --callable FAM1.t.callable.tsv --snapshot snapshot.tsv --unfazed-dir unfazed --out-prefix FAM1.t
+
+python3 - <<'EOF'
+import csv, sys
+def rows(path):
+    with open(path) as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+dnm = {(r["child"], r["chrom"], r["pos"]): r for r in rows("FAM1.t.dnm.tsv")}
+def get(child, chrom, pos):
+    r = dnm.get((child, chrom, str(pos)))
+    if r is None:
+        sys.exit(f"FAIL: no row for {child} {chrom}:{pos}; have {sorted(dnm)}")
+    return r
+def flags(r):
+    return set(r["flags"].split(",")) - {"."}
+def check(cond, msg):
+    if not cond:
+        sys.exit(f"FAIL: {msg}")
+
+assert len(dnm) == 14, len(dnm)
+r = get("C1", "chr1", 3000)
+check(flags(r) == set() and r["strict"] == "yes", f"clean: {r['flags']}")
+check(int(r["child_alt"]) == 16 and int(r["father_alt"]) == 0 and int(r["mother_alt"]) == 0, f"clean reads {r}")
+check(r["origin"] == "paternal" and r["origin_status"] == "phased", f"origin {r['origin']} {r['origin_status']}")
+check(r["nearby_calls"] == "1", f"nearby {r['nearby_calls']}")
+for p in (5000, 5006):
+    check("CLUSTER" in flags(get("C1", "chr1", p)), f"cluster {p}")
+check("PARENT_ALT_LIKELY" in flags(get("C1", "chr1", 8000)), "father 2 reads")
+check(get("C1", "chr1", 8000)["father_alt"] == "2", "father alt count")
+check("PARENT_ALT_POSSIBLE" in flags(get("C1", "chr1", 9000)), "mother 1 read")
+m = get("C1", "chr1", 11000)
+check("CHILD_MOSAIC_POSSIBLE" in flags(m) and float(m["child_vaf"]) < 0.2, f"mosaic {m['flags']} {m['child_vaf']}")
+check("STRAND_BIAS" in flags(get("C1", "chr1", 12000)), "strand")
+lq = get("C1", "chr1", 13000)
+check("LOW_QUALITY_SUPPORT" in flags(lq) and lq["child_alt"] == "0" and int(lq["child_alt_raw"]) == 15, f"lowq {lq}")
+for child in ("C1", "C2"):
+    s = get(child, "chr1", 14000)
+    check(flags(s) == {"SIB_SHARED"} and s["strict"] == "yes", f"sib {child} {s['flags']}")
+    check(s["sibs_called"] == ("C2" if child == "C1" else "C1"), f"sibs_called {s['sibs_called']}")
+sr = get("C1", "chr1", 17000)
+check("SIB_SHARED" in flags(sr) and sr["sibs_with_alt"] == "C2:3/33", f"sib reads {sr['sibs_with_alt']}")
+d = get("C1", "chr1", 15003)
+check(int(d["child_alt"]) == 15 and flags(d) == set(), f"deletion {d['child_alt']} {d['flags']}")
+l = get("C1", "chr1", 16000)
+check(flags(l) == {"LCR"} and l["genes"] == "G1,G2" and l["strict"] == "no", f"lcr {l['flags']} {l['genes']}")
+check(get("C1", "chr1", 3000)["origin_status"] == "phased" and get("C1", "chr1", 5000)["origin_status"] == "unphased", "unphased")
+
+qc = {r["child"]: r for r in rows("FAM1.t.qc.tsv")}
+check(set(qc) == {"C1", "C2"}, f"qc children {set(qc)}")
+c1 = qc["C1"]
+# chr1 20 bins less the father's two at 8x, chr2 10 bins: 28 kb; LCR 200 bp and SEGDUP 500 bp masked
+check(c1["callable_bp"] == "28000" and c1["callable_unmasked_bp"] == "27300", f"callable {c1}")
+# C1 strict on autosomes: clean, sib, sibreads, deletion, nearby? (not a candidate)
+check(c1["n_strict"] == "4" and c1["n_strict_indel"] == "1", f"strict {c1['n_strict']} {c1['n_strict_indel']}")
+check(abs(float(c1["rate_per_gb"]) - 4 / 27300e-9) < 1, f"rate {c1['rate_per_gb']}")
+check(c1["n_paternal"] == "1", f"qc {c1}")
+# C2: chr2 at 12x is not callable, so 18 kb on chr1, less the LCR 200 bp
+check(qc["C2"]["callable_bp"] == "18000" and qc["C2"]["callable_unmasked_bp"] == "17800", f"C2 {qc['C2']}")
+print("family: ok")
+EOF
+
+# A failed Unfazed: origin error, tables still written
+cat > bin/unfazed_fail <<'EOF'
+#!/usr/bin/env bash
+echo "boom" >&2
+exit 3
+EOF
+chmod +x bin/unfazed_fail
+python3 "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.err.tsv \
+    --unfazed bin/unfazed_fail 2> /dev/null
+python3 "${script}" family --evidence FAM1.t.evidence.tsv --origin FAM1.err.tsv \
+    --callable FAM1.t.callable.tsv --snapshot snapshot.tsv --unfazed-dir unfazed --out-prefix FAM1.e
+awk -F'\t' 'NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+    $2 == "C1" && $col["origin_status"] != "error" { bad = 1 } END { exit bad }' FAM1.e.dnm.tsv \
+    || fail "C1 rows without origin_status error"
+
+# The cohort: a second family with the same candidates makes them all RECURRENT
+sed 's/^FAM1\t/FAM2\t/' FAM1.t.dnm.tsv > FAM2.t.dnm.tsv
+sed 's/^FAM1\t/FAM2\t/' FAM1.t.qc.tsv > FAM2.t.qc.tsv
+python3 "${script}" cohort --dnm FAM1.t.dnm.tsv FAM2.t.dnm.tsv --qc FAM1.t.qc.tsv FAM2.t.qc.tsv \
+    --sampleqc-flags flags.tsv --out-prefix COH 2> /dev/null
+python3 - <<'EOF'
+import csv, sys
+rows = list(csv.DictReader(open("COH.dnm.tsv"), delimiter="\t"))
+assert len(rows) == 28, len(rows)
+for r in rows:
+    if "RECURRENT" not in r["flags"] or r["strict"] != "no" or r["recurrence_families"] != "1":
+        sys.exit(f"FAIL: cohort row {r['family_id']} {r['chrom']}:{r['pos']} {r['flags']} {r['strict']}")
+qc = list(csv.DictReader(open("COH.qc.tsv"), delimiter="\t"))
+for q in qc:
+    if q["n_strict"] != "0" or q["qc_reference"] != "fixed" or q["qc"] != "low":
+        sys.exit(f"FAIL: cohort qc {q}")
+    # Matched on the samples: C1 and C2 share F with the flag (FAM2 reuses the same names)
+    if q["sampleqc_flags"] != "NOT_PARENT(C1,F)":
+        sys.exit(f"FAIL: sampleqc flags {q['family_id']} {q['child']} {q['sampleqc_flags']}")
+print("cohort: ok")
+EOF
+
+# The sex-chromosome rules
+python3 -B - "${script}" <<'EOF'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("denovo_tables", sys.argv[1])
+spec = importlib.util.spec_from_loader("denovo_tables", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+assert m.informative_parents("male", "chrX", 50_000_000) == ("mother",)
+assert m.informative_parents("male", "chrX", 1_000_000) == ("father", "mother")
+assert m.informative_parents("female", "chrX", 50_000_000) == ("father", "mother")
+assert m.informative_parents("male", "chrY", 10_000_000) == ("father",)
+assert m.inheritance_model("male", "chrX", 50_000_000, "1/1") == "hemizygous"
+assert m.inheritance_model("female", "chr3", 1, "1/1") == "homozygous"
+assert m.inheritance_model("male", "chr3", 1, "0/1") == "heterozygous"
+assert 1e-5 < m.binom_two_sided(5, 33) < 1e-3
+assert m.binom_two_sided(16, 33) > 0.99
+assert m.fisher_two_sided(10, 0, 8, 8) < 0.05
+assert m.span0(15003, "AA", "A") == (15002, 15004)
+assert m.span0(100, "A", "AT") == (99, 101)
+print("rules: ok")
+EOF
+
+echo "denovo_tables: all checks passed"
