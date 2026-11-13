@@ -185,7 +185,7 @@ sampleqc_label: "somalier_hg38" # Label baked into output file names; one per si
 # tables, read under ancestry_panel_name). Report-only: read families/.../upd/<FID>.<label>.events.tsv
 # and cohorts/<cohort>/upd/<cohort>.<label>.events.tsv. Needs gnomad_file. A family is redone when its
 # pedigree rows, its BCF or its roh tables change, and the cohort when any family is.
-upd_label: "upd_v4" # Label baked into output file names (default: upd_v4)
+upd_label: "upd_v5" # Label baked into output file names (default: upd_v5)
 upd_af_field: "AF_genomes" # gnomad_file INFO field for the missing parent's allele frequency (default: AF_genomes)
 
 # Resource limits

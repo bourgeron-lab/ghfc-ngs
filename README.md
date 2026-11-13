@@ -876,10 +876,10 @@ data/
 │               │   ├── FID001.somalier_hg38.flags.tsv       # One row per flag, with its evidence
 │               │   └── FID001.somalier_hg38.inputs.tsv      # The pedigree snapshot they were built from
 │               ├── upd/
-│               │   ├── FID001.upd_v4.segments.tsv           # UPD segments: coordinates, state, origin, score
-│               │   ├── FID001.upd_v4.events.tsv             # Segments per member, chromosome and origin
-│               │   ├── FID001.upd_v4.members.tsv            # Each member's mode (trio, duo, solo) and status
-│               │   └── FID001.upd_v4.inputs.tsv             # The snapshot they were built from
+│               │   ├── FID001.upd_v5.segments.tsv           # UPD segments: coordinates, state, origin, score
+│               │   ├── FID001.upd_v5.events.tsv             # Segments per member, chromosome and origin
+│               │   ├── FID001.upd_v5.members.tsv            # Each member's mode (trio, duo, solo) and status
+│               │   └── FID001.upd_v5.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -966,9 +966,9 @@ data/
 │           ├── COHORT_NAME.somalier_hg38.html                 # somalier's interactive relatedness plot
 │           └── COHORT_NAME.somalier_hg38.inputs.tsv
 │       └── upd/
-│           ├── COHORT_NAME.upd_v4.{segments,members}.tsv      # The family tables in one
-│           ├── COHORT_NAME.upd_v4.events.tsv                  # ... with the events other families share
-│           └── COHORT_NAME.upd_v4.inputs.tsv
+│           ├── COHORT_NAME.upd_v5.{segments,members}.tsv      # The family tables in one
+│           ├── COHORT_NAME.upd_v5.events.tsv                  # ... with the events other families share
+│           └── COHORT_NAME.upd_v5.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw

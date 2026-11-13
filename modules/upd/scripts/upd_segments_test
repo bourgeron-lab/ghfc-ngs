@@ -10,8 +10,13 @@
 # 11p15.5. C1 and C2 also share an artefact on chr8: their genotypes copy their mother's over
 # 5 Mb. Asserts that:
 #   - the trio finds C1's two UPDs, sets her deletion aside by its depth, and finds nothing in C2 but the
-#     chr8 artefact, which both siblings carry and so is low; C3's chr11 carries no imprinting;
+#     chr8 artefact, whose Mendelian errors both siblings carry and so are left out; C3's chr11
+#     carries no imprinting;
 #   - MZ twins with the same UPD keep it high;
+#   - with related parents, a child whose genotypes are her mother's where the parents share a
+#     haplotype, and a cluster of parental genotyping errors there, has no heterodisomy, whether
+#     her siblings carry the errors (left out) or she has none (the parents hardly informative
+#     there); a sister's real heterodisomy of the chromosome, half over that haplotype, stays high;
 #   - a segment never spans a region the mask left without sites, and an event joins across it;
 #   - the support fraction gates trio and present-parent states, not missing-parent ones;
 #   - each duo, masked from the quad, finds C1's UPDs with the right parent, and holds C2's
@@ -159,16 +164,21 @@ def genotypes_of(person, c):
 GT = {0: "0/0", 1: "0/1", 2: "1/1"}
 
 
-def stream(people, error=0.001):
-    """bcftools query lines of the given (name, person) list, at sites where one of them carries the ALT."""
+def stream(people, error=0.001, calls_at=None):
+    """bcftools query lines of the given (name, person) list, at sites where one of them carries the ALT.
+    calls_at: (chrom, site) -> {name: dosage}, calls that are not the person's genotype (artefacts)."""
     lines = []
+    calls_at = calls_at or {}
     for c in CHROMS:
         cols = [genotypes_of(p, c) for _, p in people]
         for j, pos in enumerate(positions(c)):
             calls = []
-            for col in cols:
+            forced = calls_at.get((c, j), {})
+            for (name, _), col in zip(people, cols):
                 d, factor = col[j]
-                if random.random() < error:
+                if name in forced:
+                    d = forced[name]
+                elif random.random() < error:
                     d = random.choice([x for x in range(3) if x != d])
                 calls.append((d, max(10, int(random.randint(26, 34) * factor))))
             if all(d == 0 for d, _ in calls):
@@ -188,13 +198,13 @@ def snapshot(path, fid, rows):
             fh.write("\t".join([fid, sample, father, mother, sex, "yes" if sequenced else "no", "-"]) + "\n")
 
 
-def run(prefix, fid, rows, people, roh=None, expect_fail=False, extra=()):
+def run(prefix, fid, rows, people, roh=None, expect_fail=False, extra=(), calls_at=None):
     snapshot(f"{prefix}.inputs.tsv", fid, rows)
     cmd = [sys.executable, script, "family", "--snapshot", f"{prefix}.inputs.tsv",
            "--samples", ",".join(n for n, _ in people), "--out-prefix", prefix] + list(extra)
     if roh:
         cmd += ["--roh", roh[0], "--froh", roh[1]]
-    r = subprocess.run(cmd, input=stream(people), capture_output=True, text=True)
+    r = subprocess.run(cmd, input=stream(people, calls_at=calls_at), capture_output=True, text=True)
     if expect_fail:
         return r
     check(r.returncode == 0, f"{prefix}: exit {r.returncode}\n{r.stderr}")
@@ -271,8 +281,9 @@ check(not [x for x in ev if x["chrom"] == "3"], f"trio C1: the chr3 deletion is 
 others = [x for x in ev if x["chrom"] not in ("15", "22", "3", "8")]
 check(not others, f"trio C1 has other events: {others}")
 shared = [x for x in ev + events_of(t, "C2") if x["chrom"] == "8"]
-check(len(shared) >= 2 and all(x["confidence"] == "low" and x["shared_with"] in ("C1", "C2") for x in shared),
-      f"trio chr8 artefact of C1 and C2 not marked: {shared}")
+check(not shared, f"trio chr8 artefact of C1 and C2, Mendelian errors they share, is an event: {shared}")
+check(int(member(t, "C1")["n_sibling_errors"]) > 0 and int(member(t, "C2")["n_sibling_errors"]) > 0,
+      f"trio: no site left out for a sibling's error: {t['members']}")
 check(all(x["chrom"] == "8" for x in events_of(t, "C2")), f"trio C2 (autozygous chr5) has events: {events_of(t, 'C2')}")
 e = one(events_of(t, "C3"), "11", "trio C3")
 check((e["origin"], e["composition"], e["extent"], e["confidence"], e["imprinting"]) ==
@@ -284,7 +295,7 @@ check(float(member(t, "C1")["error_rate"]) < 0.01, f"trio C1 error rate {member(
 seg = [s for s in t["segments"] if s["sample"] == "C1" and s["chrom"] == "15"]
 check(all(int(s["n_strong"]) >= 20 and float(s["lod"]) > 20 for s in seg), f"trio C1 chr15 segments: {seg}")
 print("ok    trio: maternal isodisomy 15, paternal heterodisomy 22, the deletion set aside; no call in an autozygous block;"
-      " an artefact two siblings share is low; a segmental UPD away from 11p15.5 has no imprinting")
+      " an artefact two siblings share is no event; a segmental UPD away from 11p15.5 has no imprinting")
 
 # The windows, against the chromosomes of C1 that are inherited normally
 W = upd.WINDOW_BP
@@ -339,6 +350,36 @@ for s, other in (("T1", "T2"), ("T2", "T1")):
     e = one(events_of(tw, s), "15", f"twin {s}")
     check(e["confidence"] == "high" and e["shared_with"] == other and "MZ twin" in e["notes"], f"twin {s}: {e}")
 print("ok    MZ twins keep the UPD they share")
+
+# Related parents: P and Q share a haplotype over chr7 sites 1000-3999 (15 Mb), where they have no
+# opposite homozygote. K1 got the shared haplotype from P and Q's other one: her genotypes are
+# Q's there, normal inheritance that reads as a maternal heterodisomy wherever the parents are
+# opposite homozygotes, and there are none. The calls of 20 sites in 100 kb are an artefact of
+# the parents' (a deletion, say): P 1/1 and Q 0/0, K1 and K2 0/0, K3 0/1. K3 has a real maternal
+# heterodisomy of chr7, half of it where the parents share a haplotype
+P, Q = founder(male=True), founder()
+for j in range(1000, 4000):
+    Q["7"][0][j] = P["7"][0][j]
+K1 = child(P, Q, special={"7": ("haps", 0, 1)})
+K2 = child(P, Q, special={"7": ("haps", 1, 0)})
+K3 = child(P, Q, special={"7": ("het_mat_seg", 0, N_SITES)})
+artefact = {("7", j): {"P": 2, "Q": 0, "K1": 0, "K2": 0, "K3": 1} for j in range(2000, 2020)}
+rows_cons = [("P", "0", "0", "1", True), ("Q", "0", "0", "2", True), ("K1", "P", "Q", "2", True),
+             ("K2", "P", "Q", "2", True), ("K3", "P", "Q", "2", True)]
+c = run("related", "REL", rows_cons, [("P", P), ("Q", Q), ("K1", K1), ("K2", K2), ("K3", K3)], calls_at=artefact)
+check(not [e for e in events_of(c, "K1") + events_of(c, "K2") if e["chrom"] == "7"],
+      f"related parents: an event on chr7 of K1 or K2: {events_of(c, 'K1') + events_of(c, 'K2')}")
+e = one(events_of(c, "K3"), "7", "related parents K3")
+check((e["origin"], e["composition"], e["extent"], e["confidence"]) == ("maternal", "het", "whole_chromosome", "high"),
+      f"related parents: K3's heterodisomy: {e}")
+check(int(member(c, "K1")["n_sibling_errors"]) >= 20 and int(member(c, "K3")["n_sibling_errors"]) >= 20,
+      f"related parents: sites with a sibling's Mendelian error: {c['members']}")
+c = run("related_trio", "REL", rows_cons[:3], [("P", P), ("Q", Q), ("K1", K1)], calls_at=artefact)
+check(not [e for e in events_of(c, "K1") if e["chrom"] == "7"],
+      f"related parents, one child: an event on chr7: {events_of(c, 'K1')}")
+check(member(c, "K1")["n_sibling_errors"] == "0", f"related parents, one child: {member(c, 'K1')}")
+print("ok    related parents: a parental artefact where they share a haplotype is no heterodisomy, with siblings"
+      " or without; a real heterodisomy half over the shared haplotype stays high")
 
 seg = {"weak": False, "diffuse": False, "lod": 100.0, "length_mb": 5.0, "depth_ratio": 1.0, "n_strong": 50,
        "n_supporting": 100, "state": "het", "support_fraction": 0.5}
