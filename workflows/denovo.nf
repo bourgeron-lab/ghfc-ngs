@@ -127,10 +127,13 @@ workflow DENOVO {
     // =====================================================================
     if (denovo.need_cohort) {
         def all_families = denovo.snapshots.keySet()
-        // This run's sampleqc flags table, waited for, or the one on disk, or none
-        def flags = denovo.sampleqc_from_run
-            ? new_sampleqc.toList().map { files -> files.take(1) }
-            : channel.value(denovo.sampleqc_flags ? [file(denovo.sampleqc_flags)] : [])
+        // This run's sampleqc flags table, waited for, or the one on disk, or none. An if, not a
+        // ternary: Nextflow 24.10's parser reads `: channel.value(...)` as declaring `channel`
+        def disk_flags = denovo.sampleqc_flags ? [file(denovo.sampleqc_flags)] : []
+        def flags = new_sampleqc.toList().map { files -> files.take(1) }
+        if (!denovo.sampleqc_from_run) {
+            flags = channel.value(disk_flags)
+        }
 
         // Concat, then a single collect, so the cohort waits for this run's own families.
         // Never publish cohort tables built from part of the cohort.
