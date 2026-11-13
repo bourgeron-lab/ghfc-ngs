@@ -13,6 +13,7 @@
 
 // Include modules
 include { DENOVO_EVIDENCE } from '../modules/denovo/denovo_evidence'
+include { DENOVO_SLICE } from '../modules/denovo/denovo_slice'
 include { DENOVO_ORIGIN } from '../modules/denovo/denovo_origin'
 include { DENOVO_FAMILY } from '../modules/denovo/denovo_family'
 include { DENOVO_COHORT } from '../modules/denovo/denovo_cohort'
@@ -105,10 +106,17 @@ workflow DENOVO {
             }
         DENOVO_EVIDENCE(evidence_input)
 
-        origin_input = DENOVO_EVIDENCE.out.evidence
+        // Unfazed reads BAM slices of the children's reads, never the CRAMs: see DENOVO_SLICE
+        slice_input = DENOVO_EVIDENCE.out.evidence
             .map { fid, _evidence, _callable, unfazed, _inputs -> tuple(fid, unfazed) }
             .join(family_inputs.map { fid, _table, _norm, crams, _bedgraphs -> tuple(fid, crams) })
-            .map { fid, unfazed, crams -> tuple(fid, unfazed, crams, label, tables_script) }
+            .map { fid, unfazed, crams -> tuple(fid, unfazed, crams, label) }
+        DENOVO_SLICE(slice_input)
+
+        origin_input = DENOVO_EVIDENCE.out.evidence
+            .map { fid, _evidence, _callable, unfazed, _inputs -> tuple(fid, unfazed) }
+            .join(DENOVO_SLICE.out.slices)
+            .map { fid, unfazed, slices -> tuple(fid, unfazed, slices, label, tables_script) }
         DENOVO_ORIGIN(origin_input)
 
         family_input = DENOVO_EVIDENCE.out.evidence

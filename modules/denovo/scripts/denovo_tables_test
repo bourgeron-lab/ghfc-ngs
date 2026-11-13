@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
 # Self-contained check of denovo_tables, on a simulated quad. Needs python3, samtools, bcftools,
-# tabix and bgzip, and pysam for origin (python3's, or through uv).
+# tabix and bgzip.
 #
 # A random 20 kb chr1 and 10 kb chr2; a father F, a mother M, a son C1 and a daughter C2, each
 # with single-end reads at about 33x, planted with the alleles of the cases below. Asserts that:
 #   - a clean heterozygous candidate is strict, with its reads counted, and phased paternal by
-#     the (fake) Unfazed, which is given each child's reads as an indexed BAM slice;
+#     the (fake) Unfazed, which is given each child's reads as an indexed BAM slice, cut from its
+#     CRAM by DENOVO_SLICE's command over the windows evidence wrote;
 #   - two candidates of C1 6 bp apart are both CLUSTER, and a non-candidate call of C1 3 bp from
 #     the clean one is counted in nearby_calls;
 #   - two alternate reads in the father give PARENT_ALT_LIKELY, one in the mother
@@ -38,12 +39,6 @@ cd "${work}"
 for tool in python3 samtools bcftools tabix bgzip; do
     command -v "${tool}" > /dev/null || { echo "SKIP: ${tool} not on PATH" >&2; exit 1; }
 done
-# origin needs pysam, as in Unfazed's image: python3's own, or uv's
-origin_python=(python3)
-if ! python3 -c 'import pysam' 2> /dev/null; then
-    command -v uv > /dev/null || { echo "origin needs pysam: install it, or uv" >&2; exit 1; }
-    origin_python=(uv run -q --no-project --with pysam python3)
-fi
 
 python3 - "${script}" <<'EOF'
 import gzip, os, random, subprocess, sys
@@ -132,7 +127,7 @@ for sample in samples:
         fh.write(f"@RG\tID:{sample}\tSM:{sample}\n")
         for line in reads:
             fh.write(line + f"\tRG:Z:{sample}\n")
-    subprocess.run(["samtools", "sort", "-O", "cram,version=3.0", "--reference", "ref.fa", "-o",
+    subprocess.run(["samtools", "sort", "-O", "cram,version=3.1", "--reference", "ref.fa", "-o",
                     f"{sample}.GRCh38_test.cram", f"{sample}.sam"], check=True, stderr=subprocess.DEVNULL)
     subprocess.run(["samtools", "index", f"{sample}.GRCh38_test.cram"], check=True)
     os.remove(f"{sample}.sam")
@@ -229,15 +224,23 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 grep -q -- '--bam-pairs' <<< "$*"
 # Given the BAM slice of C1's CRAM, indexed and holding its reads
-grep -q 'C1:C1.slice.bam' <<< "$*"
-[[ -s C1.slice.bam.bai ]]
-(( $(samtools view -c C1.slice.bam) > 1000 ))
+grep -q 'C1:slices/C1.slice.bam' <<< "$*"
+[[ -s slices/C1.slice.bam.bai ]]
+(( $(samtools view -c slices/C1.slice.bam) > 1000 ))
 grep -q -- '-g 38' <<< "$*"
 printf '#chrom\tstart\tend\tvartype\tkid\torigin_parent\tother_parent\tevidence_count\tevidence_types\torigin_parent_sites\torigin_parent_reads\tother_parent_sites\tother_parent_reads\n' > "${out}"
 printf 'chr1\t2999\t3000\tPOINT\tC1\tF\tM\t3\tREADBACKED\t1,2,3\t4,5\t\t\n' >> "${out}"
 EOF
 chmod +x bin/unfazed
-"${origin_python[@]}" "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.origin.tsv \
+# DENOVO_SLICE's command: each child's reads of its windows, from its CRAM to an indexed BAM
+[[ "$(sort unfazed/kids.tsv | tr '\n' ' ')" == "C1 C2 " ]] || fail "kids $(cat unfazed/kids.tsv)"
+mkdir -p slices
+while read -r kid; do
+    [[ -s "unfazed/${kid}.windows.bed" ]] || fail "no windows for ${kid}"
+    samtools view -b -M -L "unfazed/${kid}.windows.bed" -T ref.fa -o "slices/${kid}.slice.bam" "${kid}".*.cram
+    samtools index "slices/${kid}.slice.bam"
+done < unfazed/kids.tsv
+python3 "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.origin.tsv \
     --unfazed bin/unfazed
 printf 'level\tfamily_id\tsample_a\tsample_b\tflag\tseverity\tevidence\nfamily\tFAM1\tC1\tF\tNOT_PARENT\terror\tx\n' > flags.tsv
 python3 "${script}" family --evidence FAM1.t.evidence.tsv --origin FAM1.origin.tsv \
@@ -309,7 +312,7 @@ echo "boom" >&2
 exit 3
 EOF
 chmod +x bin/unfazed_fail
-"${origin_python[@]}" "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.err.tsv \
+python3 "${script}" origin --family FAM1 --unfazed-dir unfazed --ref ref.fa --out FAM1.err.tsv \
     --unfazed bin/unfazed_fail 2> /dev/null
 python3 "${script}" family --evidence FAM1.t.evidence.tsv --origin FAM1.err.tsv \
     --callable FAM1.t.callable.tsv --snapshot snapshot.tsv --unfazed-dir unfazed --out-prefix FAM1.e

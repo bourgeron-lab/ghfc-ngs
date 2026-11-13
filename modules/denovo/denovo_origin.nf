@@ -14,15 +14,14 @@ process DENOVO_ORIGIN {
 
   Unfazed 1.0.2 (Belyeu 2021) on the files DENOVO_EVIDENCE wrote: the candidates as a BED, the
   family's biallelic SNVs within 5 kb of them as the informative sites, a PED of the trios, and
-  each child's reads within 6 kb of its candidates, copied from its CRAM to a BAM first (pysam,
-  one pass): Unfazed opens the alignment file again for every candidate, which on a CRAM loads
-  reference sequence each time; on the CRAMs themselves it ran out of 4 GB on real families and
-  phased 1-2% of the candidates of the others. A son's chrX and chrY candidates are phased by his
-  sex (-g 38). About a quarter of the candidates of a 30x genome are phased; the others are
-  unphased.
+  each child's reads within 6 kb of its candidates as a BAM, from DENOVO_SLICE. Never the CRAMs:
+  its pysam 0.16 cannot read CRAM 3.1, and on the cohort's CRAMs it read no read at all (only the
+  sons' chrX and chrY candidates, which it phases by sex, came out) and ran out of 4 GB on half
+  the families. A son's chrX and chrY candidates are phased by his sex (-g 38). About a quarter of
+  the candidates of a 30x genome are phased; the others are unphased.
 
   A failure of Unfazed is written in the table (origin error for the family's children), never a
-  failed task: parent of origin is a bonus. Unfazed's pysam 0.16 reads CRAM 3.0, not 3.1.
+  failed task: parent of origin is a bonus.
 
   Parameters
   ----------
@@ -30,8 +29,8 @@ process DENOVO_ORIGIN {
     Family ID
   unfazed : path
     Unfazed's input directory, from DENOVO_EVIDENCE
-  crams : path
-    The CRAMs and .crai of the family's members with one
+  slices : path
+    The children's BAM slices, from DENOVO_SLICE
   label : val
     denovo_label
   tables_script : path
@@ -47,7 +46,7 @@ process DENOVO_ORIGIN {
   label 'denovo_origin'
 
   input:
-  tuple val(fid), path(unfazed, stageAs: 'unfazed'), path(crams), val(label), path(tables_script)
+  tuple val(fid), path(unfazed, stageAs: 'unfazed'), path(slices, stageAs: 'slices'), val(label), path(tables_script)
 
   output:
   tuple val(fid), path("${prefix}.origin.tsv"), emit: origin
@@ -60,6 +59,7 @@ process DENOVO_ORIGIN {
   python3 ${tables_script} origin \\
     --family ${fid} \\
     --unfazed-dir unfazed \\
+    --slices-dir slices \\
     --ref ${params.ref} \\
     --threads ${task.cpus} \\
     --out ${prefix}.origin.tsv
