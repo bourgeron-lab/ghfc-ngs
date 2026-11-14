@@ -903,9 +903,9 @@ data/
 │               │   ├── FID001.upd_v5.members.tsv            # Each member's mode (trio, duo, solo) and status
 │               │   └── FID001.upd_v5.inputs.tsv             # The snapshot they were built from
 │               ├── denovo/
-│               │   ├── FID001.dnm_v1.dnm.tsv                # Each child's candidates: evidence, flags, origin
-│               │   ├── FID001.dnm_v1.qc.tsv                 # One row per child: strict counts, callable genome
-│               │   └── FID001.dnm_v1.inputs.tsv             # The snapshot they were built from
+│               │   ├── FID001.dnm_v2.dnm.tsv                # Each child's candidates: evidence, flags, origin
+│               │   ├── FID001.dnm_v2.qc.tsv                 # One row per child: strict counts, callable genome
+│               │   └── FID001.dnm_v2.inputs.tsv             # The snapshot they were built from
 │               ├── vcfs/
 │               │   ├── FID001.norm.bcf                                      # Normalized family BCF
 │               │   ├── FID001.norm.bcf.csi
@@ -996,9 +996,9 @@ data/
 │           ├── COHORT_NAME.upd_v5.events.tsv                  # ... with the events other families share
 │           └── COHORT_NAME.upd_v5.inputs.tsv
 │       └── denovo/
-│           ├── COHORT_NAME.dnm_v1.dnm.tsv                     # The family tables in one, with recurrence
-│           ├── COHORT_NAME.dnm_v1.qc.tsv                      # ... with the cohort's QC range and sampleqc flags
-│           └── COHORT_NAME.dnm_v1.inputs.tsv
+│           ├── COHORT_NAME.dnm_v2.dnm.tsv                     # The family tables in one, with recurrence
+│           ├── COHORT_NAME.dnm_v2.qc.tsv                      # ... with the cohort's QC range and sampleqc flags
+│           └── COHORT_NAME.dnm_v2.inputs.tsv
 │       └── cnv_panel/                                         # Controls cohort only
 │           └── v1/
 │               ├── panel.cov_b250q1.{autosomes,XX,XY}.{median,mad}.bw

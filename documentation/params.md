@@ -710,14 +710,14 @@ It runs in the sample QC image.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `denovo_label` 📄 | string | `"dnm_v1"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family, and is the only way a new mask bundle or a new version of the analysis reaches families already done. `dnm_v1` is the first version, with the mask bundle `denovo_masks_v1`. |
+| `denovo_label` 📄 | string | `"dnm_v2"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only. A new label reruns every family, and is the only way a new mask bundle or a new version of the analysis reaches families already done. `dnm_v1` was the first version (#62), with the mask bundle `denovo_masks_v1`; `dnm_v2`, with the same bundle, gives Unfazed BAM slices of the children's reads instead of their CRAMs, on which it ran out of memory or phased almost nothing. |
 | `denovo_masks` | dir | `""` | The mask bundle, built with `scripts/denovo/build_mask_bundle`: one bgzipped, indexed BED per flag listed in its `MANIFEST.tsv`, and their `union.bed.gz`. Read in place. **Required.** |
 | `denovo_wombat_config` | string | `"de_novo_mutations"` | The `wombat_config_list` entry, without `.yml`, whose Wombat table holds the candidates. Not in the list, the step warns and reads the tables on disk. |
 
 Also read: `vep_config_name` and `ref` (**required**), `ref_name` and `bin` (the CRAMs and
 bedgraphs), `sampleqc_label` (the cohort's sampleqc flags). The step is report-only: nothing is
 filtered, every candidate is kept with flags saying why it may be an artefact. Its evidence,
-family and cohort tasks run in the sample QC image; parent of origin in Unfazed's biocontainer.
+family and cohort tasks run in the sample QC image; parent of origin in `fcliquet/unfazed:1.1.0`.
 
 - **Candidates** are the rows of the family's Wombat de novo table, one per child and variant
   (Wombat writes one per consequence): pywombat stays the one definition of a candidate.
@@ -758,10 +758,13 @@ family and cohort tasks run in the sample QC image; parent of origin in Unfazed'
   is at least 15 and each parent's 10 (Zhou 2022), less the masks' union, since a masked
   candidate is never strict. Published counts are 60-90 de novo mutations per child genome-wide
   at 30-40x; the masks take a fifth of the genome away.
-- **Parent of origin**: Unfazed 1.0.2's read-backed phasing (Belyeu 2021) of the candidates of the
+- **Parent of origin**: Unfazed's read-backed phasing (Belyeu 2021) of the candidates of the
   children with a CRAM and both parents in the family BCF, from the family's biallelic SNVs
-  within 5 kb; a son's chrX and chrY are phased by his sex. Its pysam reads CRAM 3.0, not 3.1. A
-  failure is written as `origin_status` `error`, never a failed task.
+  within 5 kb; a son's chrX and chrY are phased by his sex. It runs the
+  [fcliquet/unfazed](https://github.com/fcliquet/unfazed) fork, 1.1.0: the calls of 1.0.2, on
+  pysam 0.24, which reads CRAM 3.1 (the biocontainer's pysam 0.16 does not), in seconds per
+  family instead of reopening the CRAM for every read's mate. A failure is written as
+  `origin_status` `error`, never a failed task.
 - **What reruns.** The label is the cache. The family tables are also checked against
   `inputs.tsv`: the family's pedigree rows, which members have a CRAM and a bedgraph, the Wombat
   table's name, the mask bundle's directory name, `ref_name` and `bin`. A family is also redone
