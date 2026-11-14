@@ -743,7 +743,7 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   | `INDEL_PROFILE_OUTLIER` | medium | the share of 1 bp indels, the share in tandem repeats and homopolymers, or the insertion/deletion ratio 5 scaled MADs away from the class, either side: a library or calling problem changes what the indels are, where ancestry mostly changes how many there are |
 
 - **What reruns.** The label is the cache for the sample tables. A family is redone when its
-  `inputs.tsv` (its pedigree rows and the TR BED's name) changes, or when its BCF is called in
+  `inputs.tsv` (its pedigree rows, the TR BED's name and the version of the table's columns) changes, or when its BCF is called in
   the run or is newer than its table. The cohort is redone when any sample or family is, when
   one is added or removed, or when `genomeqc_sample_info` or the flag rules (the checksum of
   `genomeqc_tables`) change. A member with no CRAM has no sample table.

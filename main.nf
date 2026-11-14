@@ -2370,7 +2370,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             if (!(fid in plan.deepvariant_family.existing) && !bcf_from_run) {
                 return
             }
-            def snapshot = InputsSnapshot.render([step: 'genomeqc', label: label, family: fid.toString(), tr_bed: tr_name],
+            // columns: the version of the family table's columns, so that a table written before
+            // het_low_gq_share is redone (seconds per family) rather than read without it
+            def snapshot = InputsSnapshot.render([step: 'genomeqc', label: label, family: fid.toString(), tr_bed: tr_name,
+                                                  columns: 'v2'],
                                                  rows_by_family[fid] ?: [])
             gq.snapshots[fid] = snapshot
             def fam_dir = Sharding.getFamilyDir(params.data, fid)
