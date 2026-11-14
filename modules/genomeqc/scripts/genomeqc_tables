@@ -22,9 +22,10 @@ family
     One family, from its norm.bcf. Writes <out>: one row per member, on the autosomes, counting
     the member's non-reference genotypes of GQ >= MIN_GQ and DP >= MIN_DP:
     - SNVs: heterozygous and homozygous counts and their ratio, Ti/Tv, the SNVs private to the
-      member in the family (no other member carries them; only meaningful with relatives), and
-      the share of heterozygous SNVs with an allele fraction below LOW_VAF, which contamination
-      and mosaicism raise;
+      member in the family (no other member carries them; only meaningful with relatives), the
+      share of heterozygous SNVs with an allele fraction below LOW_VAF, which contamination and
+      mosaicism raise, and the share of heterozygous SNVs of DP >= MIN_DP whose GQ is below
+      MIN_GQ (counted before the GQ filter), which a calling problem raises;
     - indels: count, insertion/deletion ratio, share of 1 bp indels, of insertions over 10 bp,
       and, with --tr-bed, of indels in tandem repeats and homopolymers. bcftools stats gives
       indel sizes for the whole family only, so they are counted here. Read length shows
@@ -38,7 +39,15 @@ cohort
     duplicate share of PCR and PCR-free 100 bp genomes overlaps). Every outlier test is made
     within the class, against the median and the scaled MAD of the class, only when the class has
     MIN_CLASS samples or more: an older 100 bp genome is compared with the other 100 bp genomes,
-    never flagged for being one.
+    never flagged for being one. A sample is flagged only when it is MAD_K scaled MADs away and
+    MIN_RELATIVE of the median away too, so that a class whose values are very tight does not turn
+    small differences into flags.
+
+    Counts are reported, never tested: the number of SNVs and indels, the het/hom ratio and the
+    private SNVs follow ancestry (African genomes carry about 22% more SNP sites and 14% more
+    indels than European ones, 1000 Genomes phase 3, Table 1), consanguinity and depth, and a
+    cohort's median is its majority ancestry's. The tests are on shares and compositions, which
+    do not: indel sizes and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv.
 
     The sample information table (--sample-info, optional) is a TSV with a 'sample' column and
     any of 'library' (pcr, pcr_free) and 'dna_source' (blood, saliva, cell_line, ...); empty or
@@ -62,11 +71,16 @@ Flags (column flags of samples.tsv; '.' when none). Report only: nothing is filt
         mismatch rate, indels in the reads' alignments, median insert size: MAD_K scaled MADs
         above (below for the insert) the class. READ_INDEL_EXCESS points to a PCR or damaged
         library
-    TITV_OUTLIER, HET_HOM_LOW, LOW_VAF_HET_EXCESS, INDEL_COUNT_OUTLIER (medium)
-        Ti/Tv below, heterozygous/homozygous ratio below, share of low-fraction heterozygotes
-        above, indel count away from (either side) the class by MAD_K scaled MADs. HET_HOM_LOW
-        catches heterozygous calls lost to low GQ, as in three 100 bp genomes of one family
-        (het/hom 0.6-0.9 against about 1.5), as well as inbreeding
+    TITV_OUTLIER, LOW_VAF_HET_EXCESS (medium)
+        Ti/Tv below, share of low-fraction heterozygotes above the class
+    LOW_GQ_HET_EXCESS (medium)
+        share of heterozygous SNVs with a low GQ above the class: heterozygous calls lost to the
+        GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5,
+        their hets of mean GQ about 20 at 65x)
+    INDEL_PROFILE_OUTLIER (medium)
+        share of 1 bp indels, share in tandem repeats and homopolymers, or insertion/deletion
+        ratio away from the class, either side: a library or calling problem changes what the
+        indels are, where ancestry mostly changes how many there are
 """
 
 import argparse
@@ -91,6 +105,7 @@ LOW_VAF = 0.3
 # Outliers within a seq_class
 MIN_CLASS = 20
 MAD_K = 5.0
+MIN_RELATIVE = 0.05
 MIN_DEPTH = 20.0
 # Read length classes: rl100 below, rl150 at or above
 SHORT_READS = 125
@@ -107,13 +122,15 @@ SAMPLE_COLUMNS = [
 FAMILY_COLUMNS = [
     "family_id", "sample",
     "n_snv", "n_snv_het", "n_snv_hom", "het_hom_ratio", "ti_tv", "private_snvs", "low_vaf_het_share",
+    "het_low_gq_share",
     "n_indel", "ins_del_ratio", "indel_1bp_share", "ins_over_10bp_share", "indel_tr_share",
 ]
 COHORT_COLUMNS = (["sample", "family_id", "seq_class", "library", "dna_source"] + SAMPLE_COLUMNS[1:] +
                   FAMILY_COLUMNS[2:] + ["flags"])
 FLAG_COLUMNS = ["sample", "family_id", "seq_class", "flag", "severity", "evidence"]
 
-# (column, side, flag): the tests made within a seq_class. side is 'high', 'low' or 'both'
+# (column, side, flag): the tests made within a seq_class. side is 'high', 'low' or 'both'.
+# Shares and compositions only: counts follow ancestry (see the docstring)
 CLASS_TESTS = [
     ("chr20_depth", "low", "LOW_DEPTH"),
     ("duplicate_share", "high", "HIGH_DUPLICATES"),
@@ -121,9 +138,11 @@ CLASS_TESTS = [
     ("read_indels_per_kb", "high", "READ_INDEL_EXCESS"),
     ("insert_median", "low", "SHORT_INSERT"),
     ("ti_tv", "low", "TITV_OUTLIER"),
-    ("het_hom_ratio", "low", "HET_HOM_LOW"),
     ("low_vaf_het_share", "high", "LOW_VAF_HET_EXCESS"),
-    ("n_indel", "both", "INDEL_COUNT_OUTLIER"),
+    ("het_low_gq_share", "high", "LOW_GQ_HET_EXCESS"),
+    ("indel_1bp_share", "both", "INDEL_PROFILE_OUTLIER"),
+    ("indel_tr_share", "both", "INDEL_PROFILE_OUTLIER"),
+    ("ins_del_ratio", "both", "INDEL_PROFILE_OUTLIER"),
 ]
 
 
@@ -296,6 +315,21 @@ def parse_genotype(field):
     return n_alt, ref_d, alt_d, len(alleles)
 
 
+def het_depth_gq(field):
+    """GT:GQ:DP:AD -> the GQ of a heterozygous call of DP >= MIN_DP, before the GQ filter, or None."""
+    parts = field.split(":")
+    if len(parts) < 3:
+        return None
+    alleles = parts[0].replace("|", "/").split("/")
+    if "." in alleles or len(set(alleles)) < 2:
+        return None
+    try:
+        gq, dp = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    return gq if dp >= MIN_DP else None
+
+
 def query(bcf, kind, tr_bed=None):
     targets = ["-T", tr_bed] if tr_bed else ["-t", ",".join(AUTOSOMES)]
     view = ["bcftools", "view", "-v", kind] + targets + ["-Ou", bcf]
@@ -313,7 +347,7 @@ def family_metrics(bcf, fid, tr_bed=None):
     samples = subprocess.run(["bcftools", "query", "-l", bcf], capture_output=True, text=True,
                              check=True).stdout.split()
     autosomes = set(AUTOSOMES)
-    m = {s: dict(het=0, hom=0, ti=0, tv=0, private=0, low_vaf=0, het_ad=0,
+    m = {s: dict(het=0, hom=0, ti=0, tv=0, private=0, low_vaf=0, het_ad=0, het_dp=0, het_low_gq=0,
                  indel=0, ins=0, dele=0, one=0, ins10=0, tr=0) for s in samples}
     for f in query(bcf, "snps"):
         if f[0] not in autosomes:
@@ -321,6 +355,11 @@ def family_metrics(bcf, fid, tr_bed=None):
         ref, alt = f[1], f[2]
         transition = {ref, alt} in TRANSITIONS
         calls = [parse_genotype(g) for g in f[3:]]
+        for i, g in enumerate(f[3:]):
+            gq = het_depth_gq(g)
+            if gq is not None:
+                m[samples[i]]["het_dp"] += 1
+                m[samples[i]]["het_low_gq"] += gq < MIN_GQ
         carriers = [i for i, c in enumerate(calls) if c and c[0] > 0]
         for i in carriers:
             n_alt, ref_d, alt_d, ploidy = calls[i]
@@ -369,6 +408,7 @@ def family_metrics(bcf, fid, tr_bed=None):
             "het_hom_ratio": ratio(s["het"], s["hom"]), "ti_tv": ratio(s["ti"], s["tv"]),
             "private_snvs": s["private"] if len(samples) > 1 else None,
             "low_vaf_het_share": ratio(s["low_vaf"], s["het_ad"]),
+            "het_low_gq_share": ratio(s["het_low_gq"], s["het_dp"]),
             "n_indel": s["indel"], "ins_del_ratio": ratio(s["ins"], s["dele"]),
             "indel_1bp_share": ratio(s["one"], s["indel"]),
             "ins_over_10bp_share": ratio(s["ins10"], s["indel"]),
@@ -430,6 +470,8 @@ def class_flags(rows):
                 continue
             for r, v in values:
                 z = (v - med) / mad
+                if abs(v - med) < MIN_RELATIVE * abs(med):
+                    continue
                 if (side == "high" and z >= MAD_K) or (side == "low" and z <= -MAD_K) or \
                         (side == "both" and abs(z) >= MAD_K):
                     out.append((r["sample"], flag,
@@ -496,7 +538,12 @@ def cmd_cohort(args):
         if depth is not None and depth < MIN_DEPTH:
             flags[r["sample"]].append(("LOW_DEPTH", "medium", f"chr20 depth {fmt(depth, 1)}, under {MIN_DEPTH:g}"))
     for sample, flag, evidence in class_flags(rows):
-        if flag not in [f for f, _, _ in flags[sample]]:
+        # A flag raised by several columns keeps every reason
+        for i, (f, severity, before) in enumerate(flags[sample]):
+            if f == flag:
+                flags[sample][i] = (f, severity, f"{before}; {evidence}")
+                break
+        else:
             flags[sample].append((flag, "medium", evidence))
 
     flag_rows = []

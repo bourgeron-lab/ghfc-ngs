@@ -693,7 +693,7 @@ modules/sampleqc/scripts/sampleqc_classify_test
 What kind of DNA and library each sample is, beside `sampleqc`'s relatedness and sex, in `fcliquet/genomeqc:1.0.0` (samtools, bcftools and htslib 1.24):
 1. **Sample** - From the CRAM, the reads of MAPQ 20 or more, primary and not duplicate, on chrEBV, chrM and chr20 (index jumps), and `samtools stats` of chr20, about 2% of the reads. chr20 stands for the genome: an EBV-transformed cell line carries tens of EBV genomes per cell, blood almost none. On one cohort's samples, blood read under 0.002 EBV genomes per cell and its cell lines 10-150
 2. **Family** - From the `norm.bcf`, each member's autosomal SNVs (het/hom, Ti/Tv, private SNVs, low-fraction hets) and indels by size and type, at GQ 20 and DP 10. `bcftools stats` gives indel sizes for the whole family only
-3. **Cohort** - The tables in one, with each sample's `seq_class` (read length, with `_pcr` from `genomeqc_sample_info`) and its flags: `CELL_LINE`, `EBV_TRACE`, and outliers of the class (5 scaled MADs, with 20 samples or more in it), so a 100 bp genome is compared with the other 100 bp genomes. The `denovo` step reads it: each child is held to its class, and a cell-line child is left out of the reference
+3. **Cohort** - The tables in one, with each sample's `seq_class` (read length, with `_pcr` from `genomeqc_sample_info`) and its flags: `CELL_LINE`, `EBV_TRACE`, and outliers of the class (5 scaled MADs and 5% of the median, with 20 samples or more in it), so a 100 bp genome is compared with the other 100 bp genomes. Only shares and compositions are tested: variant counts and the het/hom ratio follow ancestry, and are reported only. The `denovo` step reads it: each child is held to its class, and a cell-line child is left out of the reference
 
 The script ships with a self-contained test, which needs `python3` and `bcftools`:
 
@@ -1231,7 +1231,7 @@ Paths use `${L}` as shorthand for `${sampleqc_label}`. Missing values are `.`.
 Paths use `${G}` as shorthand for `${genomeqc_label}`. Missing values are `.`. Flags and thresholds are in [documentation/params.md](documentation/params.md#genome-qc).
 
 - **Sample metrics**: `${data}/samples/{S1}/{S2}/${barcode}/qc/genomeqc/${barcode}.${G}.tsv` - one row: `sample read_length mean_read_length chr20_reads chr20_depth ebv_reads ebv_copies_per_cell chrm_reads mt_copies_per_cell duplicate_share mapq0_share properly_paired_share error_rate mean_base_quality insert_median insert_mad read_indels_per_kb`, and `${barcode}.${G}.stats.txt`, `samtools stats` of chr20
-- **Family variants**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${G}.variants.tsv` - one row per member in the BCF: `family_id sample n_snv n_snv_het n_snv_hom het_hom_ratio ti_tv private_snvs low_vaf_het_share n_indel ins_del_ratio indel_1bp_share ins_over_10bp_share indel_tr_share`, and `${FID}.${G}.inputs.tsv` beside it
+- **Family variants**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${G}.variants.tsv` - one row per member in the BCF: `family_id sample n_snv n_snv_het n_snv_hom het_hom_ratio ti_tv private_snvs low_vaf_het_share het_low_gq_share n_indel ins_del_ratio indel_1bp_share ins_over_10bp_share indel_tr_share`, and `${FID}.${G}.inputs.tsv` beside it
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${G}.samples.tsv` - one row per sample: `sample family_id seq_class library dna_source`, the sample metrics, the member's variants and `flags`; `${cohort_name}.${G}.flags.tsv` - `sample family_id seq_class flag severity evidence`
 
 ### UPD Outputs

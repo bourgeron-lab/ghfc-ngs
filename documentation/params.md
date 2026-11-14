@@ -707,7 +707,8 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
 - **Per family:** `families/{S1}/{S2}/<FID>/qc/<FID>.<label>.{variants,inputs}.tsv`, for a
   family with a BCF. One row per member, from its autosomal non-reference genotypes of GQ ≥ 20
   and DP ≥ 10: heterozygous and homozygous SNVs and their ratio, Ti/Tv, the SNVs private to the
-  member in the family, the share of heterozygous SNVs under 0.3 of the reads, the indels with
+  member in the family, the share of heterozygous SNVs under 0.3 of the reads, the share of
+  heterozygous SNVs of DP ≥ 10 whose GQ is under 20 (before the GQ filter), the indels with
   their insertion/deletion ratio and the shares of 1 bp indels, of insertions over 10 bp and,
   with `genomeqc_tr_bed`, of indels in tandem repeats. `bcftools stats` gives indel sizes for
   the whole family only, hence a pass of the step's own.
@@ -718,7 +719,15 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
 - **`seq_class`** is the read length class, `rl100` under 125 bp and `rl150` above (150 and 151 bp alike), with `_pcr` for a PCR library. Every
   outlier test is made within the class, against its median and 1.4826 × its MAD, and only when
   it holds 20 samples or more: a 100 bp genome is compared with the other 100 bp genomes, never
-  flagged for being one. The `denovo` step holds each child to the children of its class.
+  flagged for being one. A sample is flagged only 5 scaled MADs and 5% of the median away, so a
+  very tight class does not turn small differences into flags. The `denovo` step holds each
+  child to the children of its class.
+- **Counts are reported, never tested.** The SNV and indel counts, the het/hom ratio and the
+  private SNVs follow ancestry: African genomes carry about 22% more SNP sites and 14% more
+  indels than European ones (1000 Genomes phase 3, Table 1), and a class's median is its majority
+  ancestry's, so a count test would flag African-ancestry samples for their ancestry. They also
+  follow consanguinity and depth. The tests are on shares and compositions instead: indel sizes
+  and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv.
 - **Flags.**
 
   | Flag | Severity | Raised when |
@@ -728,9 +737,10 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   | `LOW_DEPTH` | medium | chr20 depth under 20, or 5 scaled MADs under the class |
   | `HIGH_DUPLICATES`, `HIGH_ERROR_RATE`, `READ_INDEL_EXCESS` | medium | duplicates, mismatch rate, indels in the alignments 5 scaled MADs over the class. No fixed duplicate ceiling: 151 bp genomes run 10-15% on chr20 |
   | `SHORT_INSERT` | medium | median insert size 5 scaled MADs under the class |
-  | `TITV_OUTLIER`, `HET_HOM_LOW` | medium | Ti/Tv, het/hom ratio 5 scaled MADs under the class. Lost heterozygous calls (low GQ) show as `HET_HOM_LOW`, as does inbreeding |
+  | `TITV_OUTLIER` | medium | Ti/Tv 5 scaled MADs under the class |
   | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads 5 scaled MADs over the class: contamination, mosaicism |
-  | `INDEL_COUNT_OUTLIER` | medium | the indel count 5 scaled MADs away from the class, either side |
+  | `LOW_GQ_HET_EXCESS` | medium | the share of heterozygous SNVs with GQ under 20 5 scaled MADs over the class: heterozygous calls lost to the GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5, their hets of mean GQ about 20 at 65x) |
+  | `INDEL_PROFILE_OUTLIER` | medium | the share of 1 bp indels, the share in tandem repeats and homopolymers, or the insertion/deletion ratio 5 scaled MADs away from the class, either side: a library or calling problem changes what the indels are, where ancestry mostly changes how many there are |
 
 - **What reruns.** The label is the cache for the sample tables. A family is redone when its
   `inputs.tsv` (its pedigree rows and the TR BED's name) changes, or when its BCF is called in
