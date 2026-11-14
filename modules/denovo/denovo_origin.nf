@@ -12,13 +12,14 @@ process DENOVO_ORIGIN {
   /*
   Phase a family's de novo candidates to the parent they arose in
 
-  Unfazed 1.0.2 (Belyeu 2021) on the files DENOVO_EVIDENCE wrote: the candidates as a BED, the
-  family's biallelic SNVs within 5 kb of them as the informative sites, a PED of the trios, and
-  each child's CRAM. A son's chrX and chrY candidates are phased by his sex (-g 38). About a
+  Unfazed 1.1.0 (Belyeu 2021; the fcliquet/unfazed fork of 1.0.2, same calls) on the files
+  DENOVO_EVIDENCE wrote: the candidates as a BED, the family's biallelic SNVs within 5 kb of them
+  as the informative sites, a PED of the trios, and each child's CRAM. A son's chrX and chrY candidates are phased by his sex (-g 38). About a
   quarter to a third of the candidates of a 30x genome are phased; the others are unphased.
 
   A failure of Unfazed is written in the table (origin error for the family's children), never a
-  failed task: parent of origin is a bonus. Unfazed's pysam 0.16 reads CRAM 3.0, not 3.1.
+  failed task: parent of origin is a bonus. The fork reads CRAM 3.1 (pysam 0.24), keeps one open
+  CRAM per thread, and exits non-zero when a candidate's phasing fails, where 1.0.2 dropped it.
 
   Parameters
   ----------
