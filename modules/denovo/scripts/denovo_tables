@@ -34,6 +34,24 @@ cohort
     a count out of range with a sampleqc flag is explained (a parent who is not the parent, a
     contaminated sample), one with a clean sampleqc is what the count is there to catch.
 
+    With the genome QC samples table, each child is held to the children of its own seq_class
+    (read length, PCR), and a CELL_LINE child is left out of every reference: its clonal somatic
+    mutations read as hundreds of extra de novo calls. Each child also gets what tells germline
+    mutations from others, against the reference children of its class:
+    - the paternal share of its phased strict SNVs, with a two-sided binomial p against the
+      reference's pooled share (about 0.77; a cell line's somatic calls phase half and half);
+    - the six-class spectrum of its strict SNVs (C>A, C>G, C>T, T>A, T>C, T>G, strand-collapsed)
+      and its cosine similarity to the reference's pooled spectrum;
+    - the indel profile of all its candidates, strict or not (a child has a few strict indels):
+      indels per SNV, 1 bp, insertion and TR_HOMOPOLYMER shares. It depends on read length, so
+      it means something against the child's class only;
+    - an expected germline share: the reference's median strict count over the child's, at most
+      1; the share of its strict candidates that can be germline when its count is high.
+    qc_flags: CELL_LINE (from the genome QC), NOT_GERMLINE_LIKE (a high count whose paternal
+    share differs from the reference's with p < NOT_GERMLINE_P over MIN_PHASED phased SNVs or
+    more), SPECTRUM_OFF (cosine under SPECTRUM_COSINE_MIN over SPECTRUM_MIN_SNV strict SNVs or
+    more).
+
 Flags (column flags, comma-separated; '.' when none)
     LCR, TR_HOMOPOLYMER, SEGDUP, SATELLITE, LOWMAP, BLACKLIST, CENTROMERE
         the candidate overlaps that mask of the bundle (one flag per MANIFEST.tsv row)
@@ -106,6 +124,13 @@ CALLABLE_PARENT_DP = 10
 QC_MIN_CHILDREN = 20
 QC_MAD_K = 4.0
 QC_RATE_RANGE = (15.0, 40.0)
+# Germline-likeness of a child's strict candidates, against the reference children of its class
+NOT_GERMLINE_P = 1e-3
+MIN_PHASED = 20
+SPECTRUM_MIN_SNV = 30
+SPECTRUM_COSINE_MIN = 0.85
+SPECTRUM = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
+SPECTRUM_COLUMNS = ["snv_c_a", "snv_c_g", "snv_c_t", "snv_t_a", "snv_t_c", "snv_t_g"]
 
 AUTOSOMES = {f"chr{i}" for i in range(1, 23)}
 # GRCh38, 1-based inclusive, as pywombat's de novo config
@@ -136,7 +161,12 @@ QC_COLUMNS = [
     "n_parent_alt", "n_child_mosaic", "n_sib_shared", "n_paternal", "n_maternal",
     "callable_bp", "callable_unmasked_bp", "rate_per_gb", "callable_status",
 ]
-COHORT_QC_COLUMNS = QC_COLUMNS + ["sampleqc_flags", "qc_reference", "qc_low", "qc_high", "qc"]
+COHORT_QC_COLUMNS = QC_COLUMNS + [
+    "sampleqc_flags", "seq_class", "genomeqc_flags", "qc_reference", "qc_low", "qc_high", "qc",
+    "n_phased_strict_snv", "paternal_share", "paternal_p", *SPECTRUM_COLUMNS, "spectrum_cosine",
+    "n_indel_candidates", "indel_per_snv", "indel_1bp_share", "indel_ins_share", "indel_tr_share",
+    "expected_germline_share", "qc_flags",
+]
 COHORT_DNM_COLUMNS = DNM_COLUMNS + ["recurrence_families"]
 
 
@@ -910,6 +940,59 @@ def cmd_family(args):
 # cohort
 # ---------------------------------------------------------------------------------------------
 
+COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A"}
+
+
+def spectrum_class(ref, alt):
+    """C>A ... T>G, on the pyrimidine strand; None for anything but a single-base change."""
+    ref, alt = ref.upper(), alt.upper()
+    if len(ref) != 1 or len(alt) != 1 or ref not in COMPLEMENT or alt not in COMPLEMENT:
+        return None
+    if ref in "GA":
+        ref, alt = COMPLEMENT[ref], COMPLEMENT[alt]
+    return f"{ref}>{alt}"
+
+
+def cosine(a, b):
+    na, nb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(x * x for x in b))
+    return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else None
+
+
+def child_profiles(dnm):
+    """(family, child) -> counts of its strict SNVs by class and origin, and of its candidates."""
+    out = {}
+    for r in dnm:
+        if r["chrom"] not in AUTOSOMES:
+            continue
+        p = out.setdefault((r["family_id"], r["child"]), {
+            "spectrum": {k: 0 for k in SPECTRUM}, "paternal": 0, "maternal": 0,
+            "snv": 0, "indel": 0, "indel_1bp": 0, "indel_ins": 0, "indel_tr": 0})
+        if r["var_type"] == "SNV":
+            p["snv"] += 1
+            if r["strict"] == "yes":
+                cls = spectrum_class(r["ref"], r["alt"])
+                if cls:
+                    p["spectrum"][cls] += 1
+                if r.get("origin") in ("paternal", "maternal"):
+                    p[r["origin"]] += 1
+        else:
+            d = len(r["alt"]) - len(r["ref"])
+            p["indel"] += 1
+            p["indel_1bp"] += abs(d) == 1
+            p["indel_ins"] += d > 0
+            p["indel_tr"] += "TR_HOMOPOLYMER" in r["flags"].split(",")
+    return out
+
+
+def read_genomeqc(path):
+    """sample -> (seq_class, flags) from the genome QC samples table."""
+    if not path:
+        return {}
+    return {r["sample"]: (r.get("seq_class") or "unknown",
+                          [f for f in (r.get("flags") or ".").split(",") if f and f != "."])
+            for r in read_tsv(path)[1]}
+
+
 def cmd_cohort(args):
     dnm, qc = [], []
     for path in sorted(args.dnm):
@@ -936,26 +1019,93 @@ def cmd_cohort(args):
         unmasked = as_int(q.get("callable_unmasked_bp"))
         q["n_strict"] = n
         q["rate_per_gb"] = n / (unmasked / 1e9) if unmasked else None
-    rates = [q["rate_per_gb"] for q in qc if q["rate_per_gb"] is not None]
-    if len(rates) >= QC_MIN_CHILDREN:
-        med = statistics.median(rates)
-        mad = 1.4826 * statistics.median([abs(x - med) for x in rates])
-        low, high, reference = max(0.0, med - QC_MAD_K * mad), med + QC_MAD_K * mad, "cohort"
-    else:
-        (low, high), reference = QC_RATE_RANGE, "fixed"
+    genomeqc = read_genomeqc(args.genomeqc_samples)
+    profiles = child_profiles(dnm)
+    for q in qc:
+        cls, gflags = genomeqc.get(q["child"], ("unknown" if genomeqc else None, []))
+        q["seq_class"] = cls
+        q["genomeqc_flags"] = ",".join(gflags) or None
+        q["_profile"] = profiles.get((q["family_id"], q["child"]))
+        q["_cell_line"] = "CELL_LINE" in gflags
+
+    # The reference of each class: its children with a rate, not from a cell line. A class too
+    # small for its own is held to the fixed range, and its germline profile is the cohort's
+    def reference_of(children):
+        rates = [q["rate_per_gb"] for q in children if q["rate_per_gb"] is not None]
+        ref = {"n": len(rates)}
+        if len(rates) >= QC_MIN_CHILDREN:
+            med = statistics.median(rates)
+            mad = 1.4826 * statistics.median([abs(x - med) for x in rates])
+            ref.update(low=max(0.0, med - QC_MAD_K * mad), high=med + QC_MAD_K * mad)
+        pat = sum(q["_profile"]["paternal"] for q in children if q["_profile"])
+        mat = sum(q["_profile"]["maternal"] for q in children if q["_profile"])
+        ref["paternal_share"] = pat / (pat + mat) if pat + mat else None
+        ref["spectrum"] = [sum(q["_profile"]["spectrum"][k] for q in children if q["_profile"]) for k in SPECTRUM]
+        counts = [q["n_strict"] for q in children if q["rate_per_gb"] is not None]
+        ref["median_strict"] = statistics.median(counts) if counts else None
+        return ref
+    clean = [q for q in qc if not q["_cell_line"]]
+    whole = reference_of(clean)
+    by_class = {}
+    for q in clean:
+        by_class.setdefault(q["seq_class"], []).append(q)
+    references = {cls: reference_of(children) for cls, children in by_class.items()}
+
     sampleqc_flags = read_tsv(args.sampleqc_flags)[1] if args.sampleqc_flags else []
     for q in qc:
         trio = {q["child"], q["father"], q["mother"]}
         q["sampleqc_flags"] = ";".join(sorted({f"{f['flag']}({f['sample_a']},{f['sample_b']})" for f in sampleqc_flags
                                                if f.get("sample_a") in trio or f.get("sample_b") in trio})) or None
+        own = references.get(q["seq_class"], {"n": 0})
+        if "low" in own:
+            low, high = own["low"], own["high"]
+            reference = f"cohort:{q['seq_class']}" if q["seq_class"] is not None else "cohort"
+            germline = own
+        else:
+            (low, high), reference = QC_RATE_RANGE, "fixed"
+            germline = whole if whole["n"] else own
         rate = q["rate_per_gb"]
         q.update(qc_reference=reference, qc_low=low, qc_high=high)
         q["qc"] = ("no_callable" if rate is None else "high" if rate > high else
                    "low" if rate < low else "ok")
+
+        qflags = ["CELL_LINE"] if q["_cell_line"] else []
+        p = q.pop("_profile")
+        q.pop("_cell_line")
+        if p:
+            phased = p["paternal"] + p["maternal"]
+            q["n_phased_strict_snv"] = phased
+            q["paternal_share"] = p["paternal"] / phased if phased else None
+            share = germline.get("paternal_share")
+            if phased and share:
+                q["paternal_p"] = binom_two_sided(p["paternal"], phased, share)
+                if (q["qc"] == "high" and phased >= MIN_PHASED and q["paternal_p"] < NOT_GERMLINE_P and
+                        q["paternal_share"] < share):
+                    qflags.append("NOT_GERMLINE_LIKE")
+            n_snv = sum(p["spectrum"].values())
+            for column, k in zip(SPECTRUM_COLUMNS, SPECTRUM):
+                q[column] = p["spectrum"][k] / n_snv if n_snv else None
+            if n_snv:
+                q["spectrum_cosine"] = cosine([p["spectrum"][k] for k in SPECTRUM], germline["spectrum"])
+                if (n_snv >= SPECTRUM_MIN_SNV and q["spectrum_cosine"] is not None and
+                        q["spectrum_cosine"] < SPECTRUM_COSINE_MIN):
+                    qflags.append("SPECTRUM_OFF")
+            q["n_indel_candidates"] = p["indel"]
+            q["indel_per_snv"] = p["indel"] / p["snv"] if p["snv"] else None
+            if p["indel"]:
+                q["indel_1bp_share"] = p["indel_1bp"] / p["indel"]
+                q["indel_ins_share"] = p["indel_ins"] / p["indel"]
+                q["indel_tr_share"] = p["indel_tr"] / p["indel"]
+        median_strict = germline.get("median_strict")
+        if median_strict and q["n_strict"]:
+            q["expected_germline_share"] = min(1.0, median_strict / q["n_strict"])
+        q["qc_flags"] = ",".join(qflags) or None
     write_tsv(f"{args.out_prefix}.dnm.tsv", COHORT_DNM_COLUMNS, dnm)
     write_tsv(f"{args.out_prefix}.qc.tsv", COHORT_QC_COLUMNS, qc)
-    print(f"{len(dnm)} candidates, {len(qc)} children, QC range {low:.1f}-{high:.1f} per Gb ({reference})",
-          file=sys.stderr)
+    ranges = ", ".join(f"{cls}: {ref['low']:.1f}-{ref['high']:.1f} per Gb over {ref['n']}"
+                       for cls, ref in sorted(references.items(), key=lambda kv: str(kv[0])) if "low" in ref)
+    print(f"{len(dnm)} candidates, {len(qc)} children, {sum(1 for q in qc if q['qc_flags'])} with a QC flag; "
+          f"QC ranges {ranges or 'fixed ' + '-'.join(f'{x:g}' for x in QC_RATE_RANGE)}", file=sys.stderr)
 
 
 def main():
@@ -995,6 +1145,7 @@ def main():
     p.add_argument("--dnm", nargs="+", required=True)
     p.add_argument("--qc", nargs="+", required=True)
     p.add_argument("--sampleqc-flags", default=None, help="the cohort's sampleqc flags table, if any")
+    p.add_argument("--genomeqc-samples", default=None, help="the cohort's genome QC samples table, if any")
     p.add_argument("--out-prefix", required=True)
     p.set_defaults(func=cmd_cohort)
 

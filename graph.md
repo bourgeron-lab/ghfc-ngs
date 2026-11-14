@@ -163,6 +163,18 @@ flowchart TB
         sqc_sample --> sqc_cohort_relate
     end
 
+    subgraph genomeqc [**Genome QC**]
+        direction TB
+        gqc_sample_call["samtools view -c chrEBV, chrM, chr20 + samtools stats chr20"]
+        gqc_sample["samples/**{barcode}**/qc/genomeqc/**{barcode}**.**{label}**.{tsv,stats.txt}"]:::os
+        gqc_family_call["genomeqc_tables family (SNV and indel profile per member)"]
+        gqc_family["families/**{FID}**/qc/**{FID}**.**{label}**.{variants,inputs}.tsv"]:::of
+        gqc_cohort_call["genomeqc_tables cohort (seq_class, CELL_LINE, outliers of the class)"]
+        gqc_cohort["cohorts/**{cohort}**/qc/**{cohort}**.**{label}**.{samples,flags,inputs}.tsv"]:::oc
+        gqc_sample_call --> gqc_sample --> gqc_cohort_call --> gqc_cohort
+        gqc_family_call --> gqc_family --> gqc_cohort_call
+    end
+
     subgraph upd [**UPD**]
         direction TB
         upd_family_call["gnomAD AF + upd_segments family (trio/duo HMM, solo from ROH)"]
@@ -178,7 +190,7 @@ flowchart TB
         dnm_evidence["masks + clusters + bcftools mpileup of every member + callable genome"]
         dnm_origin["Unfazed parent of origin"]
         dnm_family["families/**{FID}**/denovo/**{FID}**.**{label}**.{dnm,qc,inputs}.tsv"]:::of
-        dnm_concat["concatenate family tables + recurrence + QC range + sampleqc flags"]
+        dnm_concat["concatenate family tables + recurrence + QC range per seq_class + sampleqc and genome QC flags"]
         dnm_cohort["cohorts/**{cohort}**/denovo/**{cohort}**.**{label}**.{dnm,qc,inputs}.tsv"]:::oc
         dnm_wombat --> dnm_evidence --> dnm_origin --> dnm_family --> dnm_concat --> dnm_cohort
     end
@@ -195,6 +207,9 @@ flowchart TB
     alignment ==> melt
     alignment ==> cnvcoverage
     alignment ==> sampleqc
+    alignment ==> gqc_sample_call
+    glnexus_vcf ==> gqc_family_call
+    gqc_cohort -.-> dnm_concat
     cnv_sample -.-> sqc_family_relate
     glnexus_vcf -.-> sqc_family_relate
     glnexus_vcf ==> upd_family_call

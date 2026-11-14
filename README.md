@@ -348,6 +348,7 @@ The pipeline supports seventeen main steps that must be explicitly listed in the
 - **`cnv_coverage`**: Normalised coverage of each sample's CRAM on a fixed bin grid, as a bigWig for [genetics-viz](https://github.com/bourgeron-lab/genetics-viz) to show CNVs and SVs, with a JSON of its autosomal depth and sex-chromosome ratios. With `cnv_panel_dir`, also fits every sample of the cohort against a control panel.
 - **`cnv_panel`**: Builds a versioned control panel - per-bin median and MAD of the controls' normalised coverage, for the autosomes, XX and XY - from every sample of a dedicated controls cohort.
 - **`sampleqc`**: Sample and family QC with [somalier](https://github.com/brentp/somalier). Extracts each sample's allele counts at somalier's sites from its CRAM, checks every pair of a family against the relationship its pedigree gives them, infers every member's sex and karyotype, counts the Mendelian errors of each trio, then relates every sample of the cohort to find relatives, duplicates and swaps across families. Report-only: it flags, and blocks nothing.
+- **`genomeqc`**: What kind of DNA and library each sample is, which `sampleqc` cannot tell. From each CRAM: the EBV genomes per cell (a genome from an EBV-transformed cell line passes every relatedness and Mendelian check, but its clonal somatic mutations come out as hundreds of extra de novo calls), the mtDNA copies, and `samtools stats` of chr20 (read length, duplicates, mismatches, insert size, indels in the alignments). From each family BCF: every member's SNV and indel profile. Each sample gets a `seq_class` (read length, PCR) and is flagged only against its class. Report-only.
 - **`upd`**: Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy or mixed), parent of origin and a likelihood score with its supporting sites, from the family `norm.bcf`: an HMM of the child's genotypes given both parents (trio), or one parent and the gnomAD frequency of the missing one's allele (duo), and for a member with no parent in the BCF, the `roh` step's ROH segments (isodisomy only). Report-only.
 - **`denovo`**: Evidence on every de novo candidate of the Wombat de novo table: region masks (LCR, tandem repeats, segmental duplications, satellites, low mappability, ENCODE blacklist, centromeres), clusters, a pileup of every family member's CRAM (parental and sibling reads, mosaic child, strand, read quality), parent of origin with [Unfazed](https://github.com/jbelyeu/unfazed), and a per-child count against the callable genome. Report-only: every candidate is kept, with flags.
 
@@ -368,6 +369,7 @@ The pipeline supports seventeen main steps that must be explicitly listed in the
 - `cnv_coverage` requires CRAM files, and treats a sample with none as `expansionhunter` does
 - `cnv_panel` requires every sample's coverage files (needs `cnv_coverage` in `steps` if any is missing)
 - `sampleqc` requires CRAM files, and treats a sample with none as `expansionhunter` does. It reads the `cnv_coverage` JSONs and the family `norm.bcf` when they exist or are made in the run, and does without them otherwise
+- `genomeqc` requires CRAM files, and treats a sample with none as `expansionhunter` does. It profiles the families whose `norm.bcf` exists or is made in the run, and does without the others
 - `upd` requires normalized family BCF files (needs `deepvariant_family` in `steps` if they are missing) and `gnomad_file`. It reads the `cnv_coverage` JSONs and the `roh` tables when they exist or are made in the run; without roh tables, a member with no parent in its family's BCF gets no isodisomy calls. Its mask is the roh panel of `ancestry_reference`, without which it warns
 - `denovo` requires normalized family BCF files (needs `deepvariant_family` in `steps` if they are missing), the Wombat table of `denovo_wombat_config` (a family whose table is due without `wombat` in `steps` waits, with a warning) and the mask bundle of `denovo_masks`. It reads the CRAMs and coverage bedgraphs, on disk or made in the run
 - The pipeline will error if required steps are not listed in parameters
@@ -686,6 +688,21 @@ modules/sampleqc/scripts/sampleqc_classify_test
 
 **Outputs:** Per sample: the `.somalier` extract. Per family: the samples, pairs and flags tables and the inputs snapshot. Per cohort: the same tables, somalier's HTML and the snapshot.
 
+#### Genome QC Workflow
+
+What kind of DNA and library each sample is, beside `sampleqc`'s relatedness and sex, in `fcliquet/genomeqc:1.0.0` (samtools, bcftools and htslib 1.24):
+1. **Sample** - From the CRAM, the reads of MAPQ 20 or more, primary and not duplicate, on chrEBV, chrM and chr20 (index jumps), and `samtools stats` of chr20, about 2% of the reads. chr20 stands for the genome: an EBV-transformed cell line carries tens of EBV genomes per cell, blood almost none. On one cohort's samples, blood read under 0.002 EBV genomes per cell and its cell lines 10-150
+2. **Family** - From the `norm.bcf`, each member's autosomal SNVs (het/hom, Ti/Tv, private SNVs, low-fraction hets) and indels by size and type, at GQ 20 and DP 10. `bcftools stats` gives indel sizes for the whole family only
+3. **Cohort** - The tables in one, with each sample's `seq_class` (read length, with `_pcr` from `genomeqc_sample_info`) and its flags: `CELL_LINE`, `EBV_TRACE`, and outliers of the class (5 scaled MADs, with 20 samples or more in it), so a 100 bp genome is compared with the other 100 bp genomes. The `denovo` step reads it: each child is held to its class, and a cell-line child is left out of the reference
+
+The script ships with a self-contained test, which needs `python3` and `bcftools`:
+
+```bash
+modules/genomeqc/scripts/genomeqc_tables_test
+```
+
+**Outputs:** Per sample: the metrics table and samtools' stats. Per family: the variants table and the inputs snapshot. Per cohort: the samples and flags tables and the snapshot.
+
 #### UPD Workflow
 
 Uniparental disomy segments, per family and then per cohort. sampleqc's `UPD_CANDIDATE` and roh's `upd_candidate_chrom` say that a parent and child, or a chromosome, look uniparental; this step gives the segments, their type, parent of origin and score:
@@ -798,6 +815,9 @@ The pipeline automatically detects existing files and skips unnecessary work. Al
 - **Sample QC extract (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/qc/somalier/${barcode}.${sampleqc_label}.somalier` (non-empty)
 - **Sample QC tables (family)**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${sampleqc_label}.{samples,pairs,flags}.tsv`, and `${FID}.${sampleqc_label}.inputs.tsv` identical to the snapshot the run builds from the pedigree
 - **Sample QC tables (cohort)**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${sampleqc_label}.{samples.tsv,pairs.tsv,flags.tsv,html}`, and its `inputs.tsv` identical to the cohort's snapshot
+- **Genome QC metrics (sample)**: `${data}/samples/{S1}/{S2}/${barcode}/qc/genomeqc/${barcode}.${genomeqc_label}.tsv` (non-empty)
+- **Genome QC variants (family)**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${genomeqc_label}.variants.tsv`, its `inputs.tsv` identical to the run's snapshot, and the family's `norm.bcf` neither called in the run nor newer
+- **Genome QC tables (cohort)**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${genomeqc_label}.{samples,flags}.tsv`, and its `inputs.tsv` identical to the cohort's snapshot
 - **UPD tables (family)**: `${data}/families/{S1}/{S2}/${FID}/upd/${FID}.${upd_label}.{segments,events,members,windows}.tsv` (non-empty), and `${FID}.${upd_label}.inputs.tsv` identical to the snapshot the run builds; and the family's BCF, roh tables and coverage JSONs not made in the run
 - **UPD tables (cohort)**: `${data}/cohorts/${cohort_name}/upd/${cohort_name}.${upd_label}.{segments,events,members}.tsv`, and its `inputs.tsv` identical to the cohort's snapshot
 - **De novo tables (family)**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${denovo_label}.{dnm,qc}.tsv` (non-empty), and `${FID}.${denovo_label}.inputs.tsv` identical to the snapshot the run builds; and the family's BCF and Wombat table neither made in the run nor newer than them
@@ -1206,6 +1226,14 @@ Paths use `${L}` as shorthand for `${sampleqc_label}`. Missing values are `.`.
 - **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.{samples,pairs,flags}.tsv` - the family tables concatenated, the pairs of different families related at the third degree or closer added to `pairs.tsv` (but those of a sample with CHARR of 0.05 or more), and the flags at `level` `cohort` (`CRYPTIC_RELATED`, `DUPLICATE_OR_MZ`, `SAMPLE_SWAP_CANDIDATE`, `RELATEDNESS_UNRELIABLE`) added to `flags.tsv` and to each sample's `flags`
 - **Cohort HTML**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${L}.html` - somalier's interactive plot of every pair; past 200,000 pairs, the unrelated ones are subsampled
 
+### Genome QC Outputs
+
+Paths use `${G}` as shorthand for `${genomeqc_label}`. Missing values are `.`. Flags and thresholds are in [documentation/params.md](documentation/params.md#genome-qc).
+
+- **Sample metrics**: `${data}/samples/{S1}/{S2}/${barcode}/qc/genomeqc/${barcode}.${G}.tsv` - one row: `sample read_length mean_read_length chr20_reads chr20_depth ebv_reads ebv_copies_per_cell chrm_reads mt_copies_per_cell duplicate_share mapq0_share properly_paired_share error_rate mean_base_quality insert_median insert_mad read_indels_per_kb`, and `${barcode}.${G}.stats.txt`, `samtools stats` of chr20
+- **Family variants**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${G}.variants.tsv` - one row per member in the BCF: `family_id sample n_snv n_snv_het n_snv_hom het_hom_ratio ti_tv private_snvs low_vaf_het_share n_indel ins_del_ratio indel_1bp_share ins_over_10bp_share indel_tr_share`, and `${FID}.${G}.inputs.tsv` beside it
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${G}.samples.tsv` - one row per sample: `sample family_id seq_class library dna_source`, the sample metrics, the member's variants and `flags`; `${cohort_name}.${G}.flags.tsv` - `sample family_id seq_class flag severity evidence`
+
 ### UPD Outputs
 
 Paths use `${U}` as shorthand for `${upd_label}`. Missing values are `.`. Columns, modes and thresholds are in [documentation/params.md](documentation/params.md#upd).
@@ -1224,7 +1252,7 @@ Paths use `${D}` as shorthand for `${denovo_label}`. Missing values are `.`. Fla
 - **Family candidates**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${D}.dnm.tsv` - one row per child and candidate: `family_id child father mother child_sex chrom pos ref alt var_type inheritance_model genes consequences wombat_child_gt wombat_child_dp wombat_child_gq wombat_child_vaf cluster_n nearby_calls child_ref child_alt child_alt_fwd child_alt_rev child_ref_fwd child_ref_rev child_alt_raw child_vaf child_binom_p strand_p father_ref father_alt father_alt_raw mother_ref mother_alt mother_alt_raw sibs_called sibs_with_alt origin origin_evidence origin_status flags strict`. Read counts are at mapping and base quality 20, `*_raw` of every read; `origin` is `paternal` or `maternal` when phased, `origin_status` `phased`, `unphased`, `not_run` or `error`
 - **Family QC**: `${data}/families/{S1}/{S2}/${FID}/denovo/${FID}.${D}.qc.tsv` - one row per child whose two parents have a CRAM: `family_id child father mother child_sex n_candidates n_strict n_strict_snv n_strict_indel ti_fraction median_vaf_strict n_parent_alt n_child_mosaic n_sib_shared n_paternal n_maternal callable_bp callable_unmasked_bp rate_per_gb callable_status`, the strict counts on the autosomes
 - **Inputs snapshot**: `${FID}.${D}.inputs.tsv` beside them - `#` header lines, then `family_id sample father mother sex cram bedgraph` per member
-- **Cohort tables**: `${data}/cohorts/${cohort_name}/denovo/${cohort_name}.${D}.{dnm,qc}.tsv` - the family tables concatenated; `dnm.tsv` adds `recurrence_families` (and the flag `RECURRENT`), `qc.tsv` recomputes the strict counts with it and adds `sampleqc_flags qc_reference qc_low qc_high qc`
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/denovo/${cohort_name}.${D}.{dnm,qc}.tsv` - the family tables concatenated; `dnm.tsv` adds `recurrence_families` (and the flag `RECURRENT`), `qc.tsv` recomputes the strict counts with it and adds `sampleqc_flags seq_class genomeqc_flags qc_reference qc_low qc_high qc n_phased_strict_snv paternal_share paternal_p snv_c_a snv_c_g snv_c_t snv_t_a snv_t_c snv_t_g spectrum_cosine n_indel_candidates indel_per_snv indel_1bp_share indel_ins_share indel_tr_share expected_germline_share qc_flags`: with the cohort's genome QC table, each child is held to the children of its `seq_class`, a cell-line child left out
 
 ### Pipeline Reports
 
@@ -1306,7 +1334,7 @@ The pipeline validates dependencies and will stop with clear error messages:
 ERROR: DeepVariant sample step is required for 3 individuals but not included in steps parameter
 
 Please add the required steps to your parameters or ensure all required files exist.
-Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
+Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, genomeqc, upd, denovo
 ```
 
 ### Custom Configuration
@@ -1346,6 +1374,7 @@ The pipeline uses the following containers by default:
 - **SAMtools**: `biocontainers/samtools:1.19.2--h50ea8bc_1`
 - **MELT**: `fcliquet/melt-deps:1.0.0` (OpenJDK 11, samtools, bowtie2, bcftools; MELT itself is staged from `melt_dir`, see `containers/melt/Dockerfile`)
 - **Sample QC**: `fcliquet/sampleqc:1.0.0` (somalier 0.3.5, bcftools 1.24, python3; see `containers/sampleqc/Dockerfile`)
+- **Genome QC**: `fcliquet/genomeqc:1.0.0` (samtools, bcftools and htslib 1.24, python3; see `containers/genomeqc/Dockerfile`)
 - **UPD**: `fcliquet/sampleqc:1.0.0`, for its bcftools 1.24 and python3
 
 ### Container Profiles

@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+
+# Self-contained check of genomeqc_tables. Needs python3, bcftools and bgzip.
+#
+# Asserts that:
+#   - sample: EBV and mtDNA copies per cell are 2 x (contig reads per base) / (chr20 reads per
+#     base); the duplicate, MAPQ0 and properly paired shares, the median insert (the last
+#     samtools stats bin, every larger insert, left out) and the read indels per kb come out of a
+#     samtools stats file; a missing chrEBV in the header is '.', not 0;
+#   - family: on a three-member BCF, het and hom SNVs, Ti/Tv, private SNVs (one carrier, every
+#     other member called reference), the share of hets under 0.3, the indel shares by size and
+#     in a TR BED; a genotype of GQ < 20 or DP < 10 and a chrX site are not counted;
+#   - cohort: CELL_LINE from the EBV copies and from a dna_source of cell_line, EBV_TRACE, a
+#     within-class outlier on 25 rl150 samples (151 bp reads), none in a class under 20 (rl100), '_pcr' added to
+#     the class of a PCR library, and the family of a sample from the pedigree.
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="${here}/genomeqc_tables"
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}"
+
+for tool in python3 bcftools bgzip; do
+    command -v "${tool}" > /dev/null || { echo "SKIP: ${tool} not on PATH" >&2; exit 1; }
+done
+
+python3 - "${script}" <<'EOF'
+import csv, subprocess, sys
+
+script = sys.argv[1]
+failures = []
+
+
+def check(what, got, want, tol=1e-3):
+    ok = (abs(float(got) - want) <= tol) if isinstance(want, float) else (got == want)
+    if not ok:
+        failures.append(f"{what}: got {got!r}, want {want!r}")
+
+
+def rows(path):
+    with open(path) as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+
+
+def run(*args):
+    subprocess.run(["python3", script, *args], check=True)
+
+
+# --- sample -----------------------------------------------------------------------------------
+CHR20 = 63944257
+with open("S1.counts.tsv", "w") as fh:
+    fh.write(f"chrEBV\t171823\nchrM\t16569\nchr20\t{CHR20}\n")
+with open("S2.counts.tsv", "w") as fh:
+    fh.write(f"chrEBV\tNA\nchrM\t0\nchr20\t{CHR20}\n")
+stats = """# samtools stats
+SN\traw total sequences:\t1000
+SN\treads mapped:\t800
+SN\treads duplicated:\t80
+SN\treads MQ0:\t40
+SN\tbases mapped (cigar):\t100000
+SN\terror rate:\t5.000000e-03
+SN\taverage length:\t150
+SN\tmaximum length:\t151
+SN\taverage quality:\t36.5
+SN\tpercentage of properly paired reads (%):\t95.0
+IS\t300\t10\t10\t0\t0
+IS\t350\t10\t10\t0\t0
+IS\t400\t10\t10\t0\t0
+IS\t8000\t1000\t1000\t0\t0
+ID\t1\t30\t40
+ID\t2\t10\t20
+"""
+open("S1.stats.txt", "w").write(stats)
+run("sample", "--barcode", "S1", "--counts", "S1.counts.tsv", "--stats", "S1.stats.txt", "--out", "S1.tsv")
+run("sample", "--barcode", "S2", "--counts", "S2.counts.tsv", "--stats", "S1.stats.txt", "--out", "S2.tsv")
+s1, s2 = rows("S1.tsv")[0], rows("S2.tsv")[0]
+check("EBV copies (1 read per base against 1 on chr20)", s1["ebv_copies_per_cell"], 2.0)
+check("mt copies", s1["mt_copies_per_cell"], 2.0)
+check("chr20 depth", s1["chr20_depth"], 150.0)
+check("duplicate share", s1["duplicate_share"], 0.1)
+check("MAPQ0 share", s1["mapq0_share"], 0.05)
+check("properly paired", s1["properly_paired_share"], 0.95)
+check("insert median, last bin left out", s1["insert_median"], 350.0)
+check("insert MAD", s1["insert_mad"], 50.0)
+check("read indels per kb", s1["read_indels_per_kb"], 1.0)
+check("read length", s1["read_length"], "151")
+check("no chrEBV in the header", s2["ebv_copies_per_cell"], ".")
+
+# --- family -----------------------------------------------------------------------------------
+header = """##fileformat=VCFv4.2
+##contig=<ID=chr1,length=100000>
+##contig=<ID=chrX,length=100000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="DP">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tF\tM\tC
+"""
+ok_het, ok_hom, ref = "0/1:40:30:15,15", "1/1:40:30:0,30", "0/0:40:30:30,0"
+records = [
+    # A>G transition: F het, C het, M ref
+    ("chr1", 100, "A", "G", [ok_het, ref, ok_het]),
+    # C>A transversion: C hom only, F and M ref: private to C
+    ("chr1", 200, "C", "A", [ref, ref, ok_hom]),
+    # T>C: F het at a low fraction (5 of 25)
+    ("chr1", 300, "T", "C", ["0/1:40:25:20,5", ref, ref]),
+    # G>T: M het of GQ 10 and C het of DP 5, neither counted
+    ("chr1", 400, "G", "T", [ref, "0/1:10:30:15,15", "0/1:40:5:3,2"]),
+    # Indels: a 1 bp deletion in the TR BED (C), a 12 bp insertion (C), a 2 bp deletion (F)
+    ("chr1", 500, "AT", "A", [ref, ref, ok_het]),
+    ("chr1", 600, "A", "A" + "C" * 12, [ref, ref, ok_het]),
+    ("chr1", 700, "ACG", "A", [ok_het, ref, ref]),
+    # chrX: never counted
+    ("chrX", 100, "A", "G", [ok_het, ok_het, ok_het]),
+]
+with open("fam.vcf", "w") as fh:
+    fh.write(header)
+    for chrom, pos, r, a, gts in records:
+        fh.write("\t".join([chrom, str(pos), ".", r, a, "50", "PASS", ".", "GT:GQ:DP:AD", *gts]) + "\n")
+subprocess.run(["bcftools", "view", "-Ob", "-o", "fam.bcf", "fam.vcf"], check=True)
+subprocess.run(["bcftools", "index", "fam.bcf"], check=True)
+open("tr.bed", "w").write("chr1\t495\t505\n")
+subprocess.run(["bgzip", "-f", "tr.bed"], check=True)
+subprocess.run(["tabix", "-p", "bed", "tr.bed.gz"], check=False)
+run("family", "--family", "FAM", "--bcf", "fam.bcf", "--tr-bed", "tr.bed.gz", "--out", "fam.tsv")
+fam = {r["sample"]: r for r in rows("fam.tsv")}
+check("F SNVs", fam["F"]["n_snv"], "2")
+check("F hets", fam["F"]["n_snv_het"], "2")
+check("F Ti/Tv: two transitions, no transversion", fam["F"]["ti_tv"], ".")
+check("F low-VAF het share", fam["F"]["low_vaf_het_share"], 0.5)
+check("F private (the low-VAF T>C)", fam["F"]["private_snvs"], "1")
+check("C SNVs (low DP left out)", fam["C"]["n_snv"], "2")
+check("C het/hom", fam["C"]["het_hom_ratio"], 1.0)
+check("C Ti/Tv", fam["C"]["ti_tv"], 1.0)
+check("C private (the hom C>A)", fam["C"]["private_snvs"], "1")
+check("M SNVs (low GQ left out)", fam["M"]["n_snv"], "0")
+check("C indels", fam["C"]["n_indel"], "2")
+check("C ins/del", fam["C"]["ins_del_ratio"], 1.0)
+check("C 1 bp share", fam["C"]["indel_1bp_share"], 0.5)
+check("C insertions over 10 bp", fam["C"]["ins_over_10bp_share"], 0.5)
+check("C indels in TR", fam["C"]["indel_tr_share"], 0.5)
+check("F indels in TR", fam["F"]["indel_tr_share"], 0.0)
+
+# --- cohort -----------------------------------------------------------------------------------
+cols = ["sample", "read_length", "chr20_depth", "ebv_copies_per_cell", "ebv_reads", "duplicate_share",
+        "error_rate", "read_indels_per_kb", "insert_median"]
+samples = []
+for i in range(25):
+    samples.append(dict(sample=f"A{i:02d}", read_length="151", chr20_depth=f"{35 + i % 5}",
+                        ebv_copies_per_cell="0.001", ebv_reads="10", duplicate_share=f"{0.10 + 0.002 * (i % 5)}",
+                        error_rate="0.007", read_indels_per_kb="0.1", insert_median="350"))
+samples[3]["duplicate_share"] = "0.40"          # an outlier of its class
+samples[4]["ebv_copies_per_cell"] = "50.0"      # a cell line
+samples[5]["ebv_copies_per_cell"] = "0.05"      # a trace
+for i in range(5):                               # a class too small for outliers
+    samples.append(dict(sample=f"B{i}", read_length="100", chr20_depth="50", ebv_copies_per_cell="0.001",
+                        ebv_reads="10", duplicate_share="0.9" if i == 0 else "0.05", error_rate="0.007",
+                        read_indels_per_kb="0.1", insert_median="300"))
+paths = []
+for s in samples:
+    path = f"{s['sample']}.tsv"
+    with open(path, "w") as fh:
+        fh.write("\t".join(cols) + "\n" + "\t".join(s[c] for c in cols) + "\n")
+    paths.append(path)
+open("info.tsv", "w").write("sample\tlibrary\tdna_source\nB1\tpcr\t.\nA06\tpcr_free\tcell_line\n")
+open("ped.tsv", "w").write("FAM9\tA00\t0\t0\t1\t1\n")
+run("cohort", "--samples", *paths, "--families", "fam.tsv", "--pedigree", "ped.tsv", "--sample-info", "info.tsv",
+    "--out-prefix", "C")
+out = {r["sample"]: r for r in rows("C.samples.tsv")}
+flags = {(r["sample"], r["flag"]) for r in rows("C.flags.tsv")}
+check("outlier of its class", ("A03", "HIGH_DUPLICATES") in flags, True)
+check("no outlier in a small class", ("B0", "HIGH_DUPLICATES") in flags, False)
+check("CELL_LINE from EBV", ("A04", "CELL_LINE") in flags, True)
+check("CELL_LINE from dna_source", ("A06", "CELL_LINE") in flags, True)
+check("EBV_TRACE", ("A05", "EBV_TRACE") in flags, True)
+check("no flag on a clean sample", out["A01"]["flags"], ".")
+check("PCR class", out["B1"]["seq_class"], "rl100_pcr")
+check("library copied", out["B1"]["library"], "pcr")
+check("class from read length", out["A00"]["seq_class"], "rl150")
+check("family from the pedigree", out["A00"]["family_id"], "FAM9")
+check("family from the family table", out["C"]["family_id"], "FAM")
+check("member with no sample table", out["C"]["seq_class"], "unknown")
+
+if failures:
+    print("\n".join(failures))
+    sys.exit(1)
+print("genomeqc_tables: all checks passed")
+EOF

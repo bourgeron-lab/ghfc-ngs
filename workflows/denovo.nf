@@ -25,6 +25,7 @@ workflow DENOVO {
     new_crams         // channel: [barcode, cram, crai] - CRAMs aligned in this run
     new_bedgraphs     // channel: [barcode, bedgraph, tbi] - coverage bedgraphs made in this run
     new_sampleqc      // channel: flags.tsv - the cohort's sampleqc flags table, when this run writes it
+    new_genomeqc      // channel: samples.tsv - the cohort's genome QC samples table, when this run writes it
     family_members    // map: [barcode: fid]
     denovo            // map: the plan's denovo entry; see createAnalysisPlan
 
@@ -134,6 +135,11 @@ workflow DENOVO {
         if (!denovo.sampleqc_from_run) {
             flags = channel.value(disk_flags)
         }
+        def disk_genomeqc = denovo.genomeqc_samples ? [file(denovo.genomeqc_samples)] : []
+        def genomeqc = new_genomeqc.toList().map { files -> files.take(1) }
+        if (!denovo.genomeqc_from_run) {
+            genomeqc = channel.value(disk_genomeqc)
+        }
 
         // Concat, then a single collect, so the cohort waits for this run's own families.
         // Never publish cohort tables built from part of the cohort.
@@ -153,9 +159,10 @@ workflow DENOVO {
             // Both sides wrapped: combine spreads a list's items
             .map { rows -> [rows] }
             .combine(flags.map { files -> [files] })
-            .map { rows, qc_flags ->
-                tuple(params.cohort_name, rows.collectMany { row -> row[1] }, qc_flags, denovo.cohort_snapshot,
-                      label, tables_script)
+            .combine(genomeqc.map { files -> [files] })
+            .map { rows, qc_flags, gq_samples ->
+                tuple(params.cohort_name, rows.collectMany { row -> row[1] }, qc_flags, gq_samples,
+                      denovo.cohort_snapshot, label, tables_script)
             }
 
         DENOVO_COHORT(cohort_input)

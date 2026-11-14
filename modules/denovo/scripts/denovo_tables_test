@@ -23,7 +23,9 @@
 #     masked bases, and the QC counts strict autosomal candidates per callable unmasked Gb;
 #   - a failed Unfazed leaves origin_status error and still writes the tables;
 #   - the cohort marks a candidate two families share RECURRENT, no longer strict, holds a
-#     small cohort to the fixed range, and gives each child the sampleqc flags of its trio;
+#     small cohort to the fixed range, and gives each child the sampleqc flags of its trio; with
+#     the genome QC samples table, it copies seq_class, leaves a CELL_LINE child out of the
+#     reference and gives each child its spectrum, indel profile and expected germline share;
 #   - the hemizygous rules: a son's chrX outside the PARs is judged on the mother only, chrY on
 #     the father only, a PAR on both.
 
@@ -328,6 +330,29 @@ for q in qc:
     if q["sampleqc_flags"] != "NOT_PARENT(C1,F)":
         sys.exit(f"FAIL: sampleqc flags {q['family_id']} {q['child']} {q['sampleqc_flags']}")
 print("cohort: ok")
+EOF
+
+# The cohort with the genome QC samples table: C1 from a cell line, C2 not. C1 keeps its rows but
+# leaves the reference, so C2's expected germline share is its own count over itself
+printf 'sample\tseq_class\tflags\nC1\trl151\tCELL_LINE\nC2\trl151\t.\n' > gq.tsv
+python3 "${script}" cohort --dnm FAM1.t.dnm.tsv --qc FAM1.t.qc.tsv --genomeqc-samples gq.tsv \
+    --out-prefix COHG 2> /dev/null
+python3 - <<'EOF'
+import csv, sys
+qc = {q["child"]: q for q in csv.DictReader(open("COHG.qc.tsv"), delimiter="\t")}
+c1, c2 = qc["C1"], qc["C2"]
+if c1["seq_class"] != "rl151" or c1["genomeqc_flags"] != "CELL_LINE" or "CELL_LINE" not in c1["qc_flags"]:
+    sys.exit(f"FAIL: C1 genome QC columns {c1}")
+if c2["qc_flags"] != "." or c2["qc_reference"] != "fixed":
+    sys.exit(f"FAIL: C2 genome QC columns {c2}")
+spectrum = [float(c1[k]) for k in ("snv_c_a", "snv_c_g", "snv_c_t", "snv_t_a", "snv_t_c", "snv_t_g")]
+if abs(sum(spectrum) - 1) > 1e-3 or c1["spectrum_cosine"] == ".":
+    sys.exit(f"FAIL: C1 spectrum {spectrum} cosine {c1['spectrum_cosine']}")
+if int(c1["n_indel_candidates"]) < 1 or c1["indel_1bp_share"] != "1.0000":
+    sys.exit(f"FAIL: C1 indel profile {c1['n_indel_candidates']} {c1['indel_1bp_share']}")
+if c2["n_strict"] != "0" and c2["expected_germline_share"] != "1.0000":
+    sys.exit(f"FAIL: C2 expected germline share {c2['expected_germline_share']}")
+print("cohort with genome QC: ok")
 EOF
 
 # The sex-chromosome rules

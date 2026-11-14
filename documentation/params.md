@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-78 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+81 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -97,6 +97,9 @@ program can see is in this table. A key that is not here is not read by anything
 | `expansionhunter_thresholds` | `expansionhunter` | [ExpansionHunter](#expansionhunter) |
 | `extractor_tsvs_list` | `extractor` | [Extractor](#extractor) |
 | `fastq_pattern` | `alignment` | [Input discovery](#input-discovery) |
+| `genomeqc_label` 📄 | `genomeqc`; `denovo`, to find the cohort's genome QC table | [Genome QC](#genome-qc) |
+| `genomeqc_sample_info` | `genomeqc` | [Genome QC](#genome-qc) |
+| `genomeqc_tr_bed` | `genomeqc` | [Genome QC](#genome-qc) |
 | `glnexus_bed` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `glnexus_config` | `deepvariant_family` | [DeepVariant and GLnexus](#deepvariant-and-glnexus) |
 | `gnomad_file` | `annotation`; `upd` — **required** | [Annotation](#annotation) |
@@ -129,7 +132,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `sambamba` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `samblaster` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `sampleqc_hom_cutoff` | `sampleqc` | [Sample QC](#sample-qc) |
-| `sampleqc_label` 📄 | `sampleqc` — **required**; `denovo`, to find the cohort's flags | [Sample QC](#sample-qc) |
+| `sampleqc_label` 📄 | `sampleqc` — **required**; `denovo`, to find the cohort's flags; `genomeqc`, which refuses the same label | [Sample QC](#sample-qc) |
 | `samtools` | `alignment` | [Alignment tools and coverage](#alignment-tools-and-coverage) |
 | `scratch` | `alignment` | [Core paths and identity](#core-paths-and-identity) |
 | `singularity_cache` | always, at config-parse time | [Containers and resources](#containers-and-resources) |
@@ -231,6 +234,7 @@ the command line. Every entry must be one of these seventeen:
 | `cnv_coverage` | Normalised coverage per sample on a fixed bin grid, as a bigWig for genetics-viz, and with `cnv_panel_dir` the cohort's fit against a control panel |
 | `cnv_panel` | A versioned control panel, per-bin median and MAD of the controls' normalised coverage, built once from a dedicated controls cohort |
 | `sampleqc` | Relatedness (IBS0, IBS2, KING kinship) against the pedigree within each family and between families, sex and sex-chromosome karyotype, and Mendelian errors, as per-family and cohort tables of flags |
+| `genomeqc` | What kind of DNA and library each sample is: EBV genomes per cell (cell lines), read length and PCR (`seq_class`), duplicates, mismatches, insert size and indels in the alignments, from each CRAM's chr20; each member's SNV and indel profile from the family BCF; per sample, per family and per cohort with flags against each `seq_class` |
 | `denovo` | Evidence on every de novo candidate of the Wombat de novo table: region masks, clusters, a pileup of every family member (parental and sibling reads, mosaic child, strand, read quality), parent of origin with Unfazed, and a per-child count against the callable genome, per family and per cohort with recurrence |
 | `upd` | Uniparental disomy segments of every member, with coordinates, type (isodisomy, heterodisomy or mixed), parent of origin and a score, from the family BCF with both parents, one, or none (isodisomy only, from the `roh` tables), per family and per cohort |
 
@@ -310,6 +314,10 @@ holds for `steps: ["ancestry", "roh"]`, since `roh` reads only what `ancestry` w
 | `ERROR: the 'sampleqc' step requires ...` | `sampleqc` listed without `somalier_sites`, `sampleqc_label` or `ref` |
 | `ERROR: the 'sampleqc' step cannot find ...` | the sites VCF, the reference or its `.fai` does not exist |
 | `ERROR: sampleqc_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: the 'genomeqc' step requires ...` | `genomeqc` listed without `genomeqc_label` or `ref` |
+| `ERROR: the 'genomeqc' step cannot find ...` | the reference, its `.fai`, `genomeqc_tr_bed` or `genomeqc_sample_info` does not exist |
+| `ERROR: genomeqc_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
+| `ERROR: genomeqc_label and sampleqc_label are both '...'` | the two steps write to the same `qc/` directories, so their labels must differ |
 | `ERROR: the 'upd' step requires ...` | `upd` listed without `upd_label`, `upd_af_field` or `gnomad_file` |
 | `ERROR: upd_label '...' may only hold ...` | as for `expansionhunter_catalog_name` |
 | `ERROR: upd_af_field '...' is not an INFO field name` | a field name with a character other than letters, digits and `_` |
@@ -673,6 +681,63 @@ pedigree, and the next run redoes the families that changed.
 - **Mendelian errors** are counted from the family's `norm.bcf` when it has a parent and child: biallelic autosomal SNVs, genotypes of GQ ≥ 20 and DP ≥ 10.
 - **What reruns.** The label is the cache for the extracts. The family and cohort tables are also checked against `inputs.tsv`, the snapshot of what they were built from: the family's pedigree rows (without the phenotype), which members have an extract and a coverage JSON, and whether the BCF was read. A family is redone when its snapshot changes, so a corrected parent or sex reruns it even though every file is in place. The cohort is redone when any family is, or when a family is added or removed. A member with no CRAM is left out, with a warning.
 
+### Genome QC
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `genomeqc_label` 📄 | string | `"gqc_v1"` | Label for the tables in every output file name. Letters, digits, `.`, `_` and `-` only, and not `sampleqc_label`: both steps write to the same `qc/` directories. A new label measures every sample again. |
+| `genomeqc_tr_bed` | file | `""` | Tandem repeats and homopolymers, a bgzipped BED (e.g. the mask bundle's `tr_homopolymer.bed.gz`), for the share of each member's indels in them. Empty leaves `indel_tr_share` empty. Its file name is in the family snapshot. |
+| `genomeqc_sample_info` | file | `""` | A TSV with a `sample` column and any of `library` (`pcr`, `pcr_free`) and `dna_source` (`blood`, `saliva`, `cell_line`, ...); empty or `.` for unknown. `library` sets the `_pcr` of `seq_class`, which the data cannot tell (the duplicate shares of PCR and PCR-free 100 bp genomes overlap); a `dna_source` of `cell_line` is flagged `CELL_LINE` whatever the EBV count. Its checksum is in the cohort snapshot, so an edit regathers the cohort tables. |
+
+Also read: `ref` (**required**, the reference the CRAMs were aligned to, with its `.fai`). The
+step is report-only. Every task runs in `fcliquet/genomeqc:1.0.0` (samtools, bcftools and
+htslib 1.24, Python). It answers what kind of DNA and library a sample is, which `sampleqc`
+does not: a genome from an EBV-transformed cell line has the person's genotypes, so every
+relatedness, sex and Mendelian check passes, while its clonal somatic mutations come out as
+hundreds of extra de novo calls, and culture can make CNVs and isodisomies of its own.
+
+- **Per sample:** `samples/{S1}/{S2}/<ID>/qc/genomeqc/<ID>.<label>.tsv` and `.stats.txt`. From
+  the CRAM: the reads of MAPQ 20 or more, primary and not duplicate, on chrEBV, chrM and chr20
+  (index jumps), and `samtools stats` of the reads on chr20, about 2% of the genome. The table
+  has the read length, the chr20 depth, `ebv_copies_per_cell` and `mt_copies_per_cell` (2 × the
+  contig's reads per base over chr20's), the duplicate, MAPQ0 and properly paired shares, the
+  mismatch rate, the mean base quality, the median insert size and its MAD, and the indels in
+  the reads' alignments per kb mapped, which polymerase slippage in PCR libraries raises. The
+  `.stats.txt` is samtools' own output, which MultiQC reads. A sample is measured once.
+- **Per family:** `families/{S1}/{S2}/<FID>/qc/<FID>.<label>.{variants,inputs}.tsv`, for a
+  family with a BCF. One row per member, from its autosomal non-reference genotypes of GQ ≥ 20
+  and DP ≥ 10: heterozygous and homozygous SNVs and their ratio, Ti/Tv, the SNVs private to the
+  member in the family, the share of heterozygous SNVs under 0.3 of the reads, the indels with
+  their insertion/deletion ratio and the shares of 1 bp indels, of insertions over 10 bp and,
+  with `genomeqc_tr_bed`, of indels in tandem repeats. `bcftools stats` gives indel sizes for
+  the whole family only, hence a pass of the step's own.
+- **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,flags,inputs}.tsv`:
+  every sample's metrics and its members' row, its `family_id`, `library`, `dna_source`,
+  `seq_class` and `flags`, and one row per flag (`sample, family_id, seq_class, flag, severity,
+  evidence`).
+- **`seq_class`** is the read length class, `rl100` under 125 bp and `rl150` above (150 and 151 bp alike), with `_pcr` for a PCR library. Every
+  outlier test is made within the class, against its median and 1.4826 × its MAD, and only when
+  it holds 20 samples or more: a 100 bp genome is compared with the other 100 bp genomes, never
+  flagged for being one. The `denovo` step holds each child to the children of its class.
+- **Flags.**
+
+  | Flag | Severity | Raised when |
+  |---|---|---|
+  | `CELL_LINE` | high | 1 EBV genome per cell or more, or a `dna_source` of `cell_line`: DNA from an EBV-transformed cell line. Its de novo calls, UPD isodisomies and CNVs need confirmation on primary DNA. Measured on one cohort: blood under 0.002, cell lines 10-150 |
+  | `EBV_TRACE` | low | 0.01 to 1 EBV genome per cell: EBV in blood or saliva, or a trace of cell-line DNA |
+  | `LOW_DEPTH` | medium | chr20 depth under 20, or 5 scaled MADs under the class |
+  | `HIGH_DUPLICATES`, `HIGH_ERROR_RATE`, `READ_INDEL_EXCESS` | medium | duplicates, mismatch rate, indels in the alignments 5 scaled MADs over the class. No fixed duplicate ceiling: 151 bp genomes run 10-15% on chr20 |
+  | `SHORT_INSERT` | medium | median insert size 5 scaled MADs under the class |
+  | `TITV_OUTLIER`, `HET_HOM_LOW` | medium | Ti/Tv, het/hom ratio 5 scaled MADs under the class. Lost heterozygous calls (low GQ) show as `HET_HOM_LOW`, as does inbreeding |
+  | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads 5 scaled MADs over the class: contamination, mosaicism |
+  | `INDEL_COUNT_OUTLIER` | medium | the indel count 5 scaled MADs away from the class, either side |
+
+- **What reruns.** The label is the cache for the sample tables. A family is redone when its
+  `inputs.tsv` (its pedigree rows and the TR BED's name) changes, or when its BCF is called in
+  the run or is newer than its table. The cohort is redone when any sample or family is, when
+  one is added or removed, or when `genomeqc_sample_info` or the flag rules (the checksum of
+  `genomeqc_tables`) change. A member with no CRAM has no sample table.
+
 ### UPD
 
 | Key | Type | Default | Effect |
@@ -715,7 +780,8 @@ It runs in the sample QC image.
 | `denovo_wombat_config` | string | `"de_novo_mutations"` | The `wombat_config_list` entry, without `.yml`, whose Wombat table holds the candidates. Not in the list, the step warns and reads the tables on disk. |
 
 Also read: `vep_config_name` and `ref` (**required**), `ref_name` and `bin` (the CRAMs and
-bedgraphs), `sampleqc_label` (the cohort's sampleqc flags). The step is report-only: nothing is
+bedgraphs), `sampleqc_label` (the cohort's sampleqc flags), `genomeqc_label` (the cohort's
+genome QC samples table). The step is report-only: nothing is
 filtered, every candidate is kept with flags saying why it may be an artefact. Its evidence,
 family and cohort tasks run in the sample QC image; parent of origin in `fcliquet/unfazed:1.1.0`.
 
@@ -738,6 +804,22 @@ family and cohort tasks run in the sample QC image; parent of origin in `fclique
   when there is one, and `qc` (`ok`, `low`, `high` or `no_callable`) against `qc_low` and
   `qc_high`: median ± 4 scaled MADs of `rate_per_gb` with 20 children or more, a fixed 15-40 per
   Gb below.
+  - With the cohort's genome QC samples table, each child gets its `seq_class` and
+    `genomeqc_flags`, and is held to the children of its class (`qc_reference` `cohort:rl150`);
+    a `CELL_LINE` child is left out of every reference.
+  - What tells germline mutations from others, against the reference of the child's class:
+    `paternal_share` of its phased strict SNVs (`n_phased_strict_snv`) with `paternal_p`, a
+    two-sided binomial p against the reference's pooled share (about 0.77; a cell line's
+    somatic calls phase half and half); the six-class spectrum of its strict SNVs (`snv_c_a`
+    ... `snv_t_g`) and its `spectrum_cosine` to the reference's; the indel profile of all its
+    candidates (`n_indel_candidates`, `indel_per_snv`, `indel_1bp_share`, `indel_ins_share`,
+    `indel_tr_share`), which depends on read length; and `expected_germline_share`, the
+    reference's median strict count over the child's, at most 1.
+  - `qc_flags`: `CELL_LINE`; `NOT_GERMLINE_LIKE`, a `high` child whose paternal share is below
+    the reference's with p < 0.001 over 20 phased SNVs or more; `SPECTRUM_OFF`, a cosine under
+    0.85 over 30 strict SNVs or more. On dataset_paper_20251010 the spectrum is a weak signal
+    (the clean children's 1st percentile is 0.90; the most extreme cell line reads 0.88), the
+    paternal share a strong one.
 - **Flags.** One per mask of the bundle: `LCR`, `TR_HOMOPOLYMER`, `SEGDUP`, `SATELLITE`,
   `LOWMAP`, `BLACKLIST`, `CENTROMERE`. `CLUSTER`: another candidate of the child within 20 bp.
   `PARENT_ALT_POSSIBLE` (one alternate read) and `PARENT_ALT_LIKELY` (two or more) in an
@@ -770,7 +852,7 @@ family and cohort tasks run in the sample QC image; parent of origin in `fclique
   table's name, the mask bundle's directory name, `ref_name` and `bin`. A family is also redone
   when its BCF or Wombat table is made in the run, or is newer on disk than its tables. The
   cohort is redone when any family is, when a family is added or removed, or when the cohort's
-  sampleqc flags table changes.
+  sampleqc flags table or genome QC samples table changes.
 
 ### Containers and resources
 
@@ -936,8 +1018,8 @@ made with the old catalog, and mixes in new ones made with the new catalog. **`m
 does the same for the MELT calls. **`cnv_cov_bin`** and **`cnv_cov_mapq`** make the tag
 `cov_b<bin>q<mapq>` of every CNV coverage file, and **`cnv_panel_version`** the directory of a
 panel, which is built once and never rebuilt under the same version. **`sampleqc_label`** does
-the same for the somalier extracts, **`upd_label`** for the UPD tables, and **`denovo_label`**
-for the de novo tables. The sample QC, UPD and de novo tables are the exception to the rule:
+the same for the somalier extracts, **`genomeqc_label`** for the genome QC sample tables,
+**`upd_label`** for the UPD tables, and **`denovo_label`** for the de novo tables. The sample QC, UPD and de novo tables are the exception to the rule:
 they are also rebuilt when the pedigree or the settings they were built from change, see
 [Sample QC](#sample-qc), [UPD](#upd) and [De novo](#de-novo).
 

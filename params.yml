@@ -17,9 +17,10 @@ steps: [
     # "cnv_coverage",
     # "cnv_panel", # only in the controls cohort's file
     # "sampleqc",
+    # "genomeqc",
     # "upd",
     # "denovo",
-  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
+  ] # Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, genomeqc, upd, denovo
 
 # Input/Output paths
 data: "/pasteur/helix/projects/ghfc_wgs/WGS/test-GRCh38/"
@@ -188,6 +189,16 @@ cnv_panel_dir: "" # e.g. /pasteur/helix/projects/ghfc_wgs/WGS/GHFC-GRCh38/cohort
 # A family is redone when its pedigree rows change, and the cohort when any family is.
 somalier_sites: "/pasteur/helix/projects/ghfc_wgs/references/GRCh38/somalier/sites.hg38.vcf.gz" # TODO: somalier's sites.hg38.vcf.gz (see its README); required by sampleqc
 sampleqc_label: "somalier_hg38" # Label baked into output file names; one per sites file
+
+# Genome QC (step "genomeqc")
+# What kind of DNA and library each sample is: EBV genomes per cell (cell lines), mtDNA, read length,
+# duplicates, mismatches, insert size and indels in the alignments from each CRAM's chr20; each
+# member's SNV and indel profile from the family norm.bcf; a seq_class (read length, PCR) per sample
+# and flags against it. Report-only: read cohorts/<cohort>/qc/<cohort>.<label>.flags.tsv. The denovo
+# step reads its samples table.
+genomeqc_label: "gqc_v1" # Label baked into output file names; must differ from sampleqc_label (default: gqc_v1)
+genomeqc_tr_bed: "" # Tandem repeats and homopolymers, bgzipped BED, e.g. the denovo mask bundle's tr_homopolymer.bed.gz; empty = none
+genomeqc_sample_info: "" # TSV of sample, library (pcr, pcr_free), dna_source; sets the _pcr of seq_class; empty = none
 
 # UPD (step "upd")
 # Uniparental disomy segments of every member, from the family norm.bcf: with both parents in it, one
