@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+
+"""Genome QC: what kind of DNA and library each sample is, beside sampleqc's relatedness and sex.
+
+Three subcommands, one for each process of the genomeqc step. Python 3.8 or newer, standard
+library only; bcftools on the PATH for family.
+
+sample
+    One sample, from the counts and the samtools stats output GENOMEQC_SAMPLE writes from its
+    CRAM. Writes <out>: one row of metrics.
+    - Reads of MAPQ >= 20, primary, not duplicate, on chrEBV, chrM and chr20. chr20 stands for
+      the genome: the EBV and mtDNA copies per cell are 2 x (contig reads per base) / (chr20 reads
+      per base). An EBV-transformed lymphoblastoid cell line (LCL) carries tens of EBV genomes per
+      cell; blood carries almost none (under 0.002 copies per cell measured on dataset_paper_20251010,
+      against 10-150 in its LCLs).
+    - samtools stats of the reads on chr20, about 2% of the genome: read length, duplicate,
+      MAPQ0 and properly paired shares, mismatch rate, mean base quality, median insert size and
+      its MAD, and the rate of indels in the reads' alignments (per kb mapped), which rises with
+      polymerase slippage in PCR libraries.
+
+family
+    One family, from its norm.bcf. Writes <out>: one row per member, on the autosomes, counting
+    the member's non-reference genotypes of GQ >= MIN_GQ and DP >= MIN_DP:
+    - SNVs: heterozygous and homozygous counts and their ratio, Ti/Tv, the SNVs private to the
+      member in the family (no other member carries them; only meaningful with relatives), and
+      the share of heterozygous SNVs with an allele fraction below LOW_VAF, which contamination
+      and mosaicism raise;
+    - indels: count, insertion/deletion ratio, share of 1 bp indels, of insertions over 10 bp,
+      and, with --tr-bed, of indels in tandem repeats and homopolymers. bcftools stats gives
+      indel sizes for the whole family only, so they are counted here. Read length shows
+      strongly: 100 bp genomes call about 40% fewer indels, with fewer long insertions.
+
+cohort
+    The sample and family tables gathered into <prefix>.samples.tsv (one row per sample) and
+    <prefix>.flags.tsv (one row per flag). Each sample gets a seq_class: its read length class
+    (rl100 under SHORT_READS bp, rl150 above, which holds 150 and 151 bp libraries alike), with
+    '_pcr' for a PCR library, which only the sample information table says (the
+    duplicate share of PCR and PCR-free 100 bp genomes overlaps). Every outlier test is made
+    within the class, against the median and the scaled MAD of the class, only when the class has
+    MIN_CLASS samples or more: an older 100 bp genome is compared with the other 100 bp genomes,
+    never flagged for being one.
+
+    The sample information table (--sample-info, optional) is a TSV with a 'sample' column and
+    any of 'library' (pcr, pcr_free) and 'dna_source' (blood, saliva, cell_line, ...); empty or
+    '.' for unknown. Both are copied to samples.tsv; a dna_source of cell_line is flagged
+    CELL_LINE whatever the EBV count.
+
+Flags (column flags of samples.tsv; '.' when none). Report only: nothing is filtered.
+    CELL_LINE (high)
+        EBV_CELL_LINE or more EBV genomes per cell: DNA from an EBV-transformed cell line. Its
+        germline genotypes are sound; its de novo calls, UPD isodisomies and CNVs may come from
+        the culture and need confirmation on primary DNA
+    EBV_TRACE (low)
+        EBV_TRACE or more, under EBV_CELL_LINE: EBV DNA in blood or saliva, or a trace of
+        cell-line DNA
+    LOW_DEPTH (medium)
+        chr20 depth below MIN_DEPTH, or MAD_K scaled MADs below its class
+    HIGH_DUPLICATES (medium)
+        duplicate share MAD_K scaled MADs above its class. No fixed ceiling: the 151 bp genomes
+        run 10-15% on chr20, as samblaster marks them
+    HIGH_ERROR_RATE, READ_INDEL_EXCESS, SHORT_INSERT (medium)
+        mismatch rate, indels in the reads' alignments, median insert size: MAD_K scaled MADs
+        above (below for the insert) the class. READ_INDEL_EXCESS points to a PCR or damaged
+        library
+    TITV_OUTLIER, HET_HOM_LOW, LOW_VAF_HET_EXCESS, INDEL_COUNT_OUTLIER (medium)
+        Ti/Tv below, heterozygous/homozygous ratio below, share of low-fraction heterozygotes
+        above, indel count away from (either side) the class by MAD_K scaled MADs. HET_HOM_LOW
+        catches heterozygous calls lost to low GQ, as in three 100 bp genomes of one family
+        (het/hom 0.6-0.9 against about 1.5), as well as inbreeding
+"""
+
+import argparse
+import csv
+import math
+import os
+import statistics
+import subprocess
+import sys
+
+# EBV copies per cell
+EBV_CELL_LINE = 1.0
+EBV_TRACE = 0.01
+EBV_LENGTH = 171823
+CHRM_LENGTH = 16569
+# GRCh38 chr20, without its N bases
+CHR20_LENGTH = 63944257
+# Genotypes counted in the family metrics
+MIN_GQ = 20
+MIN_DP = 10
+LOW_VAF = 0.3
+# Outliers within a seq_class
+MIN_CLASS = 20
+MAD_K = 5.0
+MIN_DEPTH = 20.0
+# Read length classes: rl100 below, rl150 at or above
+SHORT_READS = 125
+
+# Both namings, so a reference without the chr prefix is not read as empty
+AUTOSOMES = [f"chr{i}" for i in range(1, 23)] + [str(i) for i in range(1, 23)]
+
+SAMPLE_COLUMNS = [
+    "sample", "read_length", "mean_read_length", "chr20_reads", "chr20_depth",
+    "ebv_reads", "ebv_copies_per_cell", "chrm_reads", "mt_copies_per_cell",
+    "duplicate_share", "mapq0_share", "properly_paired_share", "error_rate", "mean_base_quality",
+    "insert_median", "insert_mad", "read_indels_per_kb",
+]
+FAMILY_COLUMNS = [
+    "family_id", "sample",
+    "n_snv", "n_snv_het", "n_snv_hom", "het_hom_ratio", "ti_tv", "private_snvs", "low_vaf_het_share",
+    "n_indel", "ins_del_ratio", "indel_1bp_share", "ins_over_10bp_share", "indel_tr_share",
+]
+COHORT_COLUMNS = (["sample", "family_id", "seq_class", "library", "dna_source"] + SAMPLE_COLUMNS[1:] +
+                  FAMILY_COLUMNS[2:] + ["flags"])
+FLAG_COLUMNS = ["sample", "family_id", "seq_class", "flag", "severity", "evidence"]
+
+# (column, side, flag): the tests made within a seq_class. side is 'high', 'low' or 'both'
+CLASS_TESTS = [
+    ("chr20_depth", "low", "LOW_DEPTH"),
+    ("duplicate_share", "high", "HIGH_DUPLICATES"),
+    ("error_rate", "high", "HIGH_ERROR_RATE"),
+    ("read_indels_per_kb", "high", "READ_INDEL_EXCESS"),
+    ("insert_median", "low", "SHORT_INSERT"),
+    ("ti_tv", "low", "TITV_OUTLIER"),
+    ("het_hom_ratio", "low", "HET_HOM_LOW"),
+    ("low_vaf_het_share", "high", "LOW_VAF_HET_EXCESS"),
+    ("n_indel", "both", "INDEL_COUNT_OUTLIER"),
+]
+
+
+# ---------------------------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------------------------
+
+def die(msg):
+    print(f"genomeqc_tables: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fmt(value, digits=4):
+    if value is None:
+        return "."
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return "."
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def write_tsv(path, columns, rows):
+    with open(path, "w", newline="") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for row in rows:
+            fh.write("\t".join(fmt(row.get(c)) for c in columns) + "\n")
+
+
+def read_tsv(path):
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        return reader.fieldnames or [], list(reader)
+
+
+def as_float(text):
+    if text in (None, "", ".", "NA", "nan"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def ratio(a, b):
+    return a / b if b else None
+
+
+def weighted_median(pairs):
+    """Median of (value, weight) pairs, and the median absolute deviation from it."""
+    pairs = sorted((v, w) for v, w in pairs if w > 0)
+    total = sum(w for _, w in pairs)
+    if not total:
+        return None, None
+
+    def median_of(items):
+        half, seen = total / 2.0, 0
+        for v, w in items:
+            seen += w
+            if seen >= half:
+                return v
+        return items[-1][0]
+    med = median_of(pairs)
+    mad = median_of(sorted((abs(v - med), w) for v, w in pairs))
+    return float(med), float(mad)
+
+
+# ---------------------------------------------------------------------------------------------
+# sample
+# ---------------------------------------------------------------------------------------------
+
+def read_counts(path):
+    """contig<TAB>reads lines, 'NA' for a contig the CRAM's header lacks."""
+    counts = {}
+    with open(path) as fh:
+        for line in fh:
+            fields = line.split()
+            if len(fields) == 2:
+                counts[fields[0]] = None if fields[1] == "NA" else int(fields[1])
+    return counts
+
+
+def read_samtools_stats(path):
+    sn, insert, indels = {}, [], 0
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("SN\t"):
+                _, key, value = line.rstrip("\n").split("\t")[:3]
+                sn[key.rstrip(":")] = value
+            elif line.startswith("IS\t"):
+                fields = line.split("\t")
+                insert.append((int(fields[1]), int(fields[2])))
+            elif line.startswith("ID\t"):
+                fields = line.split("\t")
+                indels += int(fields[2]) + int(fields[3])
+    return sn, insert, indels
+
+
+def sample_metrics(barcode, counts, stats_path):
+    sn, insert, indels = read_samtools_stats(stats_path)
+
+    def sn_float(key):
+        return as_float(sn.get(key))
+    mapped = sn_float("reads mapped")
+    bases = sn_float("bases mapped (cigar)")
+    mean_len = sn_float("average length")
+    chr20 = counts.get("chr20")
+    per_base = (chr20 / CHR20_LENGTH) if chr20 else None
+
+    def copies(contig, length):
+        n = counts.get(contig)
+        if n is None or not per_base:
+            return None
+        return 2.0 * (n / length) / per_base
+    # The last bin of samtools stats' insert sizes holds every larger insert: left out
+    med, mad = weighted_median(insert[:-1] if len(insert) > 1 else insert)
+    return {
+        "sample": barcode,
+        "read_length": int(sn_float("maximum length")) if sn_float("maximum length") is not None else None,
+        "mean_read_length": mean_len,
+        "chr20_reads": chr20,
+        "chr20_depth": (chr20 * mean_len / CHR20_LENGTH) if chr20 and mean_len else None,
+        "ebv_reads": counts.get("chrEBV"), "ebv_copies_per_cell": copies("chrEBV", EBV_LENGTH),
+        "chrm_reads": counts.get("chrM"), "mt_copies_per_cell": copies("chrM", CHRM_LENGTH),
+        "duplicate_share": ratio(sn_float("reads duplicated"), mapped),
+        "mapq0_share": ratio(sn_float("reads MQ0"), mapped),
+        "properly_paired_share": (sn_float("percentage of properly paired reads (%)") / 100.0
+                                  if sn_float("percentage of properly paired reads (%)") is not None else None),
+        "error_rate": sn_float("error rate"),
+        "mean_base_quality": sn_float("average quality"),
+        "insert_median": med, "insert_mad": mad,
+        "read_indels_per_kb": (1000.0 * indels / bases) if bases else None,
+    }
+
+
+def cmd_sample(args):
+    row = sample_metrics(args.barcode, read_counts(args.counts), args.stats)
+    if row["chr20_reads"] is None:
+        die(f"{args.barcode}: no chr20 read count in {args.counts}")
+    write_tsv(args.out, SAMPLE_COLUMNS, [row])
+
+
+# ---------------------------------------------------------------------------------------------
+# family
+# ---------------------------------------------------------------------------------------------
+
+TRANSITIONS = ({"A", "G"}, {"C", "T"})
+
+
+def parse_genotype(field):
+    """GT:GQ:DP:AD -> (alt allele count, ref depth, alt depth), or None when not counted."""
+    parts = field.split(":")
+    if len(parts) < 4:
+        return None
+    gt, gq, dp, ad = parts[:4]
+    alleles = gt.replace("|", "/").split("/")
+    if "." in alleles:
+        return None
+    try:
+        if int(gq) < MIN_GQ or int(dp) < MIN_DP:
+            return None
+    except ValueError:
+        return None
+    n_alt = sum(1 for a in alleles if a == "1")
+    depths = ad.split(",")
+    try:
+        ref_d, alt_d = int(depths[0]), int(depths[1])
+    except (ValueError, IndexError):
+        ref_d = alt_d = None
+    return n_alt, ref_d, alt_d, len(alleles)
+
+
+def query(bcf, kind, tr_bed=None):
+    targets = ["-T", tr_bed] if tr_bed else ["-t", ",".join(AUTOSOMES)]
+    view = ["bcftools", "view", "-v", kind] + targets + ["-Ou", bcf]
+    q = ["bcftools", "query", "-f", "%CHROM\t%REF\t%ALT[\t%GT:%GQ:%DP:%AD]\n"]
+    p1 = subprocess.Popen(view, stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(q, stdin=p1.stdout, stdout=subprocess.PIPE, text=True)
+    p1.stdout.close()
+    for line in p2.stdout:
+        yield line.rstrip("\n").split("\t")
+    if p2.wait() != 0 or p1.wait() != 0:
+        die(f"bcftools failed on {bcf}")
+
+
+def family_metrics(bcf, fid, tr_bed=None):
+    samples = subprocess.run(["bcftools", "query", "-l", bcf], capture_output=True, text=True,
+                             check=True).stdout.split()
+    autosomes = set(AUTOSOMES)
+    m = {s: dict(het=0, hom=0, ti=0, tv=0, private=0, low_vaf=0, het_ad=0,
+                 indel=0, ins=0, dele=0, one=0, ins10=0, tr=0) for s in samples}
+    for f in query(bcf, "snps"):
+        if f[0] not in autosomes:
+            continue
+        ref, alt = f[1], f[2]
+        transition = {ref, alt} in TRANSITIONS
+        calls = [parse_genotype(g) for g in f[3:]]
+        carriers = [i for i, c in enumerate(calls) if c and c[0] > 0]
+        for i in carriers:
+            n_alt, ref_d, alt_d, ploidy = calls[i]
+            s = m[samples[i]]
+            if n_alt == ploidy:
+                s["hom"] += 1
+            else:
+                s["het"] += 1
+                if ref_d is not None and ref_d + alt_d > 0:
+                    s["het_ad"] += 1
+                    if alt_d / (ref_d + alt_d) < LOW_VAF:
+                        s["low_vaf"] += 1
+            s["ti" if transition else "tv"] += 1
+        # Private: one carrier, and every other member called reference at the site
+        if len(carriers) == 1 and len(samples) > 1 and all(
+                c is not None and c[0] == 0 for i, c in enumerate(calls) if i != carriers[0]):
+            m[samples[carriers[0]]]["private"] += 1
+    for f in query(bcf, "indels"):
+        if f[0] not in autosomes:
+            continue
+        d = len(f[2]) - len(f[1])
+        for i, g in enumerate(f[3:]):
+            c = parse_genotype(g)
+            if not c or c[0] == 0:
+                continue
+            s = m[samples[i]]
+            s["indel"] += 1
+            s["ins" if d > 0 else "dele"] += 1
+            s["one"] += abs(d) == 1
+            s["ins10"] += d > 10
+    if tr_bed:
+        for f in query(bcf, "indels", tr_bed):
+            if f[0] not in autosomes:
+                continue
+            for i, g in enumerate(f[3:]):
+                c = parse_genotype(g)
+                if c and c[0] > 0:
+                    m[samples[i]]["tr"] += 1
+    rows = []
+    for sample in samples:
+        s = m[sample]
+        n_snv = s["het"] + s["hom"]
+        rows.append({
+            "family_id": fid, "sample": sample,
+            "n_snv": n_snv, "n_snv_het": s["het"], "n_snv_hom": s["hom"],
+            "het_hom_ratio": ratio(s["het"], s["hom"]), "ti_tv": ratio(s["ti"], s["tv"]),
+            "private_snvs": s["private"] if len(samples) > 1 else None,
+            "low_vaf_het_share": ratio(s["low_vaf"], s["het_ad"]),
+            "n_indel": s["indel"], "ins_del_ratio": ratio(s["ins"], s["dele"]),
+            "indel_1bp_share": ratio(s["one"], s["indel"]),
+            "ins_over_10bp_share": ratio(s["ins10"], s["indel"]),
+            "indel_tr_share": ratio(s["tr"], s["indel"]) if tr_bed else None,
+        })
+    return rows
+
+
+def cmd_family(args):
+    write_tsv(args.out, FAMILY_COLUMNS, family_metrics(args.bcf, args.family, args.tr_bed))
+
+
+# ---------------------------------------------------------------------------------------------
+# cohort
+# ---------------------------------------------------------------------------------------------
+
+def seq_class(row):
+    length = as_float(row.get("read_length"))
+    base = ("rl100" if length < SHORT_READS else "rl150") if length else "unknown"
+    return base + "_pcr" if row.get("library") == "pcr" else base
+
+
+def read_sample_info(path):
+    """sample -> {library, dna_source}, lower case, None for unknown."""
+    if not path:
+        return {}
+    columns, rows = read_tsv(path)
+    if "sample" not in columns:
+        die(f"{path}: no 'sample' column")
+    info = {}
+    for r in rows:
+        values = {}
+        for key in ("library", "dna_source"):
+            v = (r.get(key) or "").strip().lower()
+            values[key] = None if v in ("", ".", "na", "unknown") else v
+        if values["library"] not in (None, "pcr", "pcr_free"):
+            die(f"{path}: library '{values['library']}' of {r['sample']} is not pcr or pcr_free")
+        info[r["sample"].strip()] = values
+    return info
+
+
+def class_flags(rows):
+    """Robust outliers within each seq_class: (sample, flag, evidence) triples."""
+    out = []
+    by_class = {}
+    for r in rows:
+        by_class.setdefault(r["seq_class"], []).append(r)
+    for cls, members in sorted(by_class.items()):
+        if len(members) < MIN_CLASS:
+            continue
+        for column, side, flag in CLASS_TESTS:
+            values = [(r, as_float(r.get(column))) for r in members]
+            values = [(r, v) for r, v in values if v is not None]
+            if len(values) < MIN_CLASS:
+                continue
+            med = statistics.median(v for _, v in values)
+            mad = 1.4826 * statistics.median(abs(v - med) for _, v in values)
+            if mad <= 0:
+                continue
+            for r, v in values:
+                z = (v - med) / mad
+                if (side == "high" and z >= MAD_K) or (side == "low" and z <= -MAD_K) or \
+                        (side == "both" and abs(z) >= MAD_K):
+                    out.append((r["sample"], flag,
+                                f"{column} {fmt(v)} against a {cls} median of {fmt(med)} ({z:+.1f} scaled MADs, "
+                                f"{len(values)} samples)"))
+    return out
+
+
+def tables(paths):
+    """The files given, and the *.tsv of the directories given, sorted."""
+    out = []
+    for path in paths:
+        if os.path.isdir(path):
+            out.extend(os.path.join(path, name) for name in os.listdir(path) if name.endswith(".tsv"))
+        else:
+            out.append(path)
+    return sorted(out)
+
+
+def cmd_cohort(args):
+    samples = {}
+    for path in tables(args.samples):
+        for row in read_tsv(path)[1]:
+            samples[row["sample"]] = dict(row)
+    members = {}
+    for path in tables(args.families):
+        for row in read_tsv(path)[1]:
+            members[row["sample"]] = row
+    family_of = {}
+    if args.pedigree:
+        with open(args.pedigree) as fh:
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if len(f) >= 2 and not line.startswith("#") and f[0].lower() not in ("family_id", "fid"):
+                    family_of.setdefault(f[1], f[0])
+    info = read_sample_info(args.sample_info)
+    rows = []
+    for sample in sorted(set(samples) | set(members)):
+        row = {"sample": sample}
+        row.update(samples.get(sample, {}))
+        row.update(info.get(sample, {}))
+        fam = members.get(sample)
+        if fam:
+            row.update({k: v for k, v in fam.items() if k != "sample"})
+        row["family_id"] = (fam or {}).get("family_id") or family_of.get(sample)
+        row["seq_class"] = seq_class(row)
+        rows.append(row)
+
+    flags = {r["sample"]: [] for r in rows}
+    for r in rows:
+        ebv = as_float(r.get("ebv_copies_per_cell"))
+        if r.get("dna_source") == "cell_line" and (ebv is None or ebv < EBV_CELL_LINE):
+            flags[r["sample"]].append(("CELL_LINE", "high",
+                                       "dna_source is cell_line in the sample information table"))
+        elif ebv is not None and ebv >= EBV_CELL_LINE:
+            flags[r["sample"]].append(("CELL_LINE", "high",
+                                       f"{fmt(ebv, 1)} EBV genomes per cell ({r.get('ebv_reads')} reads): DNA from an "
+                                       f"EBV-transformed cell line; de novo, UPD and CNV calls need primary DNA"))
+        elif ebv is not None and ebv >= EBV_TRACE:
+            flags[r["sample"]].append(("EBV_TRACE", "low",
+                                       f"{fmt(ebv, 3)} EBV genomes per cell ({r.get('ebv_reads')} reads): EBV in blood "
+                                       f"or saliva, or a trace of cell-line DNA"))
+        depth = as_float(r.get("chr20_depth"))
+        if depth is not None and depth < MIN_DEPTH:
+            flags[r["sample"]].append(("LOW_DEPTH", "medium", f"chr20 depth {fmt(depth, 1)}, under {MIN_DEPTH:g}"))
+    for sample, flag, evidence in class_flags(rows):
+        if flag not in [f for f, _, _ in flags[sample]]:
+            flags[sample].append((flag, "medium", evidence))
+
+    flag_rows = []
+    for r in rows:
+        r["flags"] = ",".join(f for f, _, _ in flags[r["sample"]]) or "."
+        for flag, severity, evidence in flags[r["sample"]]:
+            flag_rows.append({"sample": r["sample"], "family_id": r["family_id"], "seq_class": r["seq_class"],
+                              "flag": flag, "severity": severity, "evidence": evidence})
+    write_tsv(f"{args.out_prefix}.samples.tsv", COHORT_COLUMNS, rows)
+    write_tsv(f"{args.out_prefix}.flags.tsv", FLAG_COLUMNS, flag_rows)
+    classes = {}
+    for r in rows:
+        classes[r["seq_class"]] = classes.get(r["seq_class"], 0) + 1
+    print(f"{len(rows)} samples ({', '.join(f'{k}: {v}' for k, v in sorted(classes.items()))}), "
+          f"{len(flag_rows)} flags", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("sample")
+    p.add_argument("--barcode", required=True)
+    p.add_argument("--counts", required=True, help="contig<TAB>reads, for chrEBV, chrM and chr20")
+    p.add_argument("--stats", required=True, help="samtools stats of the reads on chr20")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_sample)
+
+    p = sub.add_parser("family")
+    p.add_argument("--family", required=True)
+    p.add_argument("--bcf", required=True, help="the family's norm.bcf, indexed")
+    p.add_argument("--tr-bed", default=None, help="tandem repeats and homopolymers, bgzipped and indexed")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_family)
+
+    p = sub.add_parser("cohort")
+    p.add_argument("--samples", nargs="*", default=[], help="the sample tables, or directories of them")
+    p.add_argument("--families", nargs="*", default=[], help="the family tables, or directories of them")
+    p.add_argument("--pedigree", default=None, help="the cohort's pedigree, for the family of each sample")
+    p.add_argument("--sample-info", default=None, help="sample information table: sample, library, dna_source")
+    p.add_argument("--out-prefix", required=True)
+    p.set_defaults(func=cmd_cohort)
+
+    args = parser.parse_args()
+    if args.command == "family" and not os.path.exists(args.bcf):
+        die(f"no such BCF: {args.bcf}")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

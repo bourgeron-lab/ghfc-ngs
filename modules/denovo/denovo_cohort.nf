@@ -26,6 +26,8 @@ process DENOVO_COHORT {
     Every family's dnm and qc tables
   sampleqc_flags : path
     The cohort's sampleqc flags table, or nothing
+  genomeqc_samples : path
+    The cohort's genome QC samples table, or nothing: each child's seq_class and CELL_LINE flag
   snapshot : val
     The cohort's inputs snapshot, as text
   label : val
@@ -48,7 +50,7 @@ process DENOVO_COHORT {
 
   input:
   tuple val(cohort), path(tables, stageAs: 'families/*'), path(sampleqc_flags, stageAs: 'sampleqc/*'),
-        val(snapshot), val(label), path(tables_script)
+        path(genomeqc_samples, stageAs: 'genomeqc/*'), val(snapshot), val(label), path(tables_script)
 
   output:
   tuple val(cohort), path("${prefix}.dnm.tsv"), path("${prefix}.qc.tsv"), path("${prefix}.inputs.tsv"), emit: tables
@@ -56,6 +58,7 @@ process DENOVO_COHORT {
   script:
   prefix = "${cohort}.${label}"
   def flags = sampleqc_flags instanceof List ? sampleqc_flags : (sampleqc_flags ? [sampleqc_flags] : [])
+  def gq = genomeqc_samples instanceof List ? genomeqc_samples : (genomeqc_samples ? [genomeqc_samples] : [])
   """
   set -euo pipefail
 
@@ -65,6 +68,7 @@ process DENOVO_COHORT {
     --dnm families/*.dnm.tsv \\
     --qc families/*.qc.tsv \\
     ${flags ? "--sampleqc-flags ${flags[0]}" : ''} \\
+    ${gq ? "--genomeqc-samples ${gq[0]}" : ''} \\
     --out-prefix ${prefix}
   """
 

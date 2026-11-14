@@ -29,6 +29,7 @@ include { CNV_PANEL } from './workflows/cnv_panel'
 include { SAMPLEQC } from './workflows/sampleqc'
 include { UPD } from './workflows/upd'
 include { DENOVO } from './workflows/denovo'
+include { GENOMEQC } from './workflows/genomeqc'
 
 /*
 ========================================================================================
@@ -122,6 +123,10 @@ def buildCompletionBlock(plan, Integer n_families, Integer n_individuals) {
         // Samples extracted; the family and cohort tables follow from them and the pedigree
         sampleqc:           ('sampleqc' in RunContext.steps)
                                 ? CohortState.progress(plan.sampleqc.existing.size(), n_individuals)
+                                : null,
+        // Samples measured; the family and cohort tables follow from them and the family BCFs
+        genomeqc:           ('genomeqc' in RunContext.steps)
+                                ? CohortState.progress(plan.genomeqc.existing.size(), n_individuals)
                                 : null,
         // Families with their tables built from the current snapshot
         upd:                ('upd' in RunContext.steps)
@@ -415,11 +420,11 @@ def validateParams() {
 
     if (RunContext.steps.isEmpty()) {
         recordFailedRun("no steps requested")
-        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo"
+        exit 1, "ERROR: --steps parameter is required. Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, genomeqc, upd, denovo"
     }
 
     // Validate steps
-    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc', 'upd', 'denovo']
+    def valid_steps = ['alignment', 'deepvariant_sample', 'deepvariant_family', 'annotation', 'wombat', 'wombat_cohort', 'snvs_cohort', 'wisecondorx', 'extractor', 'ancestry', 'roh', 'expansionhunter', 'melt', 'cnv_coverage', 'cnv_panel', 'sampleqc', 'genomeqc', 'upd', 'denovo']
     def invalid_steps = RunContext.steps - valid_steps
     if (invalid_steps) {
         recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
@@ -606,6 +611,37 @@ def validateParams() {
         if (absent) {
             recordFailedRun("sampleqc inputs not found: ${absent.keySet().join(', ')}")
             exit 1, "ERROR: the 'sampleqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
+        }
+    }
+
+    // The genome QC reads each CRAM and family BCF, and names every file after genomeqc_label. Its
+    // sample, family and cohort tables sit beside sampleqc's, in the same qc directories, so the
+    // two labels must differ
+    if ('genomeqc' in RunContext.steps) {
+        def missing_genomeqc_params = ['genomeqc_label', 'ref'].findAll { key -> !params[key] }
+        if (missing_genomeqc_params) {
+            recordFailedRun("genomeqc step is missing ${missing_genomeqc_params.join(', ')}")
+            exit 1, "ERROR: the 'genomeqc' step requires ${missing_genomeqc_params.join(', ')} to be set"
+        }
+        if (!(params.genomeqc_label.toString() ==~ /[A-Za-z0-9_.-]+/)) {
+            recordFailedRun("invalid genomeqc_label")
+            exit 1, "ERROR: genomeqc_label '${params.genomeqc_label}' may only hold letters, digits, '.', '_' and '-': it is part of every genome QC file name"
+        }
+        if (params.sampleqc_label && params.genomeqc_label.toString() == params.sampleqc_label.toString()) {
+            recordFailedRun("genomeqc_label equals sampleqc_label")
+            exit 1, "ERROR: genomeqc_label and sampleqc_label are both '${params.genomeqc_label}': their tables share the qc directories, so they must differ"
+        }
+        def genomeqc_files = [ref: params.ref, 'ref .fai': "${params.ref}.fai"]
+        if (params.genomeqc_tr_bed) {
+            genomeqc_files.genomeqc_tr_bed = params.genomeqc_tr_bed
+        }
+        if (params.genomeqc_sample_info) {
+            genomeqc_files.genomeqc_sample_info = params.genomeqc_sample_info
+        }
+        def absent = genomeqc_files.findAll { _key, path -> !new File(path.toString()).exists() }
+        if (absent) {
+            recordFailedRun("genomeqc inputs not found: ${absent.keySet().join(', ')}")
+            exit 1, "ERROR: the 'genomeqc' step cannot find ${absent.collect { key, path -> "${key} (${path})" }.join(', ')}"
         }
     }
 
@@ -1143,6 +1179,34 @@ workflow {
         sampleqc_cohort_flags = SAMPLEQC.out.cohort_tables
             .map { _cohort, _samples, _pairs, flags, _html, _inputs -> flags }
     }
+
+    genomeqc_cohort_samples = Channel.empty()
+    // Run the genome QC if needed and allowed. It reads the CRAMs, existing and newly aligned,
+    // and the family BCFs, existing and newly called
+    if ((analysis_plan.genomeqc.needed.size() > 0 ||
+         analysis_plan.genomeqc.need_family.size() > 0 ||
+         analysis_plan.genomeqc.need_cohort) && 'genomeqc' in RunContext.steps) {
+
+        def gq_tasks = []
+        if (analysis_plan.genomeqc.needed.size() > 0) {
+            gq_tasks.add("metrics of ${analysis_plan.genomeqc.needed.size()} individuals")
+        }
+        if (analysis_plan.genomeqc.need_family.size() > 0) {
+            gq_tasks.add("variant profiles of ${analysis_plan.genomeqc.need_family.size()} families")
+        }
+        if (analysis_plan.genomeqc.need_cohort) {
+            gq_tasks.add("cohort tables")
+        }
+        log.info "Running genome QC: ${gq_tasks.join(', ')}..."
+
+        GENOMEQC(
+            all_available_crams,
+            channels.existing_normalized_bcfs.mix(normalized_bcfs_output),
+            analysis_plan.genomeqc
+        )
+        genomeqc_cohort_samples = GENOMEQC.out.cohort_tables
+            .map { _cohort, samples, _flags, _inputs -> samples }
+    }
     
     // Run Extractor if TSV files are provided and step is allowed
     if (analysis_plan.extractor.tsv_count > 0 && 'extractor' in RunContext.steps) {
@@ -1311,6 +1375,7 @@ workflow {
             aligned_crams,
             aligned_bedgraphs,
             sampleqc_cohort_flags,
+            genomeqc_cohort_samples,
             pedigree_data.family_members,
             analysis_plan.denovo
         )
@@ -1552,6 +1617,12 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                    family_existing: planBucket(), edited: planBucket(), need_cohort: false, cohort_edited: false,
                    extract_members: [:], coverage_members: [:], coverage_from_run: planBucket(),
                    mendelian: planBucket(), snapshots: [:], cohort_snapshot: null],
+        // needed/existing/no_cram are samples, by their metrics table; need_family, family_existing
+        // and edited are families with a BCF, as for sampleqc. snapshots: family -> its inputs
+        // snapshot (lib/InputsSnapshot.groovy).
+        genomeqc: [needed: planBucket(), existing: planBucket(), no_cram: planBucket(), need_family: planBucket(),
+                   family_existing: planBucket(), edited: planBucket(), need_cohort: false, cohort_edited: false,
+                   snapshots: [:], cohort_snapshot: null],
         // need_family, family_existing and edited are families, as for sampleqc. coverage_members:
         // family -> its members in the BCF with a coverage JSON; coverage_from_run: members whose
         // JSON the cnv_coverage step makes in this run; roh_families: families whose roh tables are
@@ -1570,11 +1641,13 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // on disk or made in this run; crams_from_run, bedgraphs_from_run: the members whose
         // file this run makes. snapshots: family -> its inputs snapshot.
         // sampleqc_flags: the cohort's sampleqc flags table on disk, null without one;
-        // sampleqc_from_run: whether this run's sampleqc step writes it.
+        // sampleqc_from_run: whether this run's sampleqc step writes it. genomeqc_samples and
+        // genomeqc_from_run: the same for the genome QC samples table (seq_class, CELL_LINE).
         denovo: [eligible: planBucket(), need_family: planBucket(), family_existing: planBucket(), edited: planBucket(), waiting: planBucket(),
                  need_cohort: false, cohort_edited: false, wombat_from_run: planBucket(), crams: [:], bedgraphs: [:],
                  crams_from_run: planBucket(), bedgraphs_from_run: planBucket(),
-                 snapshots: [:], cohort_snapshot: null, sampleqc_flags: null, sampleqc_from_run: false],
+                 snapshots: [:], cohort_snapshot: null, sampleqc_flags: null, sampleqc_from_run: false,
+                 genomeqc_samples: null, genomeqc_from_run: false],
         pedigree_drift: [:],
         // The families' own {FID}.pedigree.tsv (lib/FamilyPedigree.groovy). on_disk: family -> the
         // rows its file holds, null when it cannot be read. outdated: family -> what differs from
@@ -2264,6 +2337,75 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         }
     }
 
+    // Check existing genome QC, as for sampleqc: only when the step is requested, with
+    // genomeqc_label in every file name. A sample is measured once, from its CRAM on disk or
+    // aligned in this run. A family with a BCF, on disk or called in this run, is redone when its
+    // inputs snapshot - its pedigree rows and the TR BED - differs from the one on disk, or when
+    // its BCF is called in this run or is newer than its table. The cohort's snapshot names its
+    // samples and families, the sample information table and genomeqc_tables by checksum, so an
+    // edited table or new flag rules regather it, which is cheap.
+    if ('genomeqc' in RunContext.steps) {
+        def gq = plan.genomeqc
+        def label = params.genomeqc_label.toString()
+        def tr_name = params.genomeqc_tr_bed ? new File(params.genomeqc_tr_bed.toString()).name : 'none'
+        def aligning = 'alignment' in RunContext.steps
+
+        individuals.each { barcode ->
+            def table = "${Sharding.getSampleDir(params.data, barcode)}/qc/genomeqc/${barcode}.${label}.tsv"
+            if (new File(table).length() > 0) {
+                gq.existing.add(barcode)
+            } else if (barcode in plan.alignment.existing || (aligning && barcode in plan.alignment.needed)) {
+                gq.needed.add(barcode)
+            } else {
+                gq.no_cram.add(barcode)
+            }
+        }
+
+        def rows_by_family = [:]
+        InputsSnapshot.pedigreeRows(new File(RunContext.state.pedigree_file.toString()).readLines()).each { row ->
+            rows_by_family.get(row[0], []) << row
+        }
+        families.each { fid ->
+            def bcf_from_run = 'deepvariant_family' in RunContext.steps && fid in plan.deepvariant_family.needed
+            if (!(fid in plan.deepvariant_family.existing) && !bcf_from_run) {
+                return
+            }
+            def snapshot = InputsSnapshot.render([step: 'genomeqc', label: label, family: fid.toString(), tr_bed: tr_name],
+                                                 rows_by_family[fid] ?: [])
+            gq.snapshots[fid] = snapshot
+            def fam_dir = Sharding.getFamilyDir(params.data, fid)
+            def prefix = "${fam_dir}/qc/${fid}.${label}"
+            def table = new File("${prefix}.variants.tsv")
+            def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
+            def newer = table.length() > 0 && new File("${fam_dir}/vcfs/${fid}.norm.bcf").lastModified() > table.lastModified()
+            if (table.length() > 0 && same_inputs && !bcf_from_run && !newer) {
+                gq.family_existing.add(fid)
+            } else {
+                gq.need_family.add(fid)
+                if (table.length() > 0 && new File("${prefix}.inputs.tsv").exists() && !same_inputs) {
+                    gq.edited.add(fid)
+                }
+            }
+        }
+
+        def all_samples = (gq.existing + gq.needed) as List
+        if (all_samples || gq.snapshots) {
+            def info_key = params.genomeqc_sample_info ?
+                (CohortState.sha256(params.genomeqc_sample_info.toString()) ?: 'missing').take(16) : 'none'
+            def rules_key = CohortState.sha256("${projectDir}/modules/genomeqc/scripts/genomeqc_tables".toString()).take(16)
+            def cohort_rows = all_samples.collect { barcode -> ['sample', barcode.toString()] }.sort() +
+                (gq.snapshots.keySet() as List).collect { fid -> ['family', fid.toString()] }.sort()
+            gq.cohort_snapshot = InputsSnapshot.render([step: 'genomeqc', label: label, cohort: params.cohort_name.toString(),
+                                                        tr_bed: tr_name, sample_info: info_key, rules: rules_key],
+                                                       cohort_rows)
+            def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/qc/${params.cohort_name}.${label}"
+            def cohort_exist = ['samples', 'flags'].every { kind -> new File("${cohort_prefix}.${kind}.tsv").length() > 0 }
+            def cohort_same = InputsSnapshot.matches("${cohort_prefix}.inputs.tsv", gq.cohort_snapshot)
+            gq.cohort_edited = cohort_exist && new File("${cohort_prefix}.inputs.tsv").exists() && !cohort_same
+            gq.need_cohort = !cohort_exist || !cohort_same || gq.needed.size() > 0 || gq.need_family.size() > 0
+        }
+    }
+
     // Check existing UPD tables, as for sampleqc: only when the step is requested, with upd_label in
     // every file name, and against the inputs snapshot they were built from - the pedigree rows,
     // which members are in the family BCF and have a coverage JSON, which ROH tables are read, the
@@ -2546,7 +2688,25 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
             def qc_key = qc_inputs == null ? 'none' :
                 "${params.sampleqc_label}@${java.security.MessageDigest.getInstance('SHA-256').digest(qc_inputs.getBytes('UTF-8')).encodeHex().toString().take(16)}".toString()
-            def cohort_settings = settings + [cohort: params.cohort_name.toString(), sampleqc_flags: qc_key]
+            // The genome QC samples table, the same way: each child's seq_class, which sets its
+            // reference, and its CELL_LINE flag, which leaves it out of the reference
+            def gq_prefix = params.genomeqc_label ?
+                "${params.data}/cohorts/${params.cohort_name}/qc/${params.cohort_name}.${params.genomeqc_label}" : null
+            def gq_inputs = null
+            if (gq_prefix && 'genomeqc' in RunContext.steps && plan.genomeqc.need_cohort && plan.genomeqc.cohort_snapshot) {
+                denovo.genomeqc_from_run = true
+                gq_inputs = plan.genomeqc.cohort_snapshot
+            } else if (gq_prefix && new File("${gq_prefix}.samples.tsv").exists()) {
+                denovo.genomeqc_samples = "${gq_prefix}.samples.tsv".toString()
+                def stored = new File("${gq_prefix}.inputs.tsv")
+                gq_inputs = stored.isFile() ? stored.getText('UTF-8') : "mtime ${new File(denovo.genomeqc_samples).lastModified()}".toString()
+            }
+            def gq_key = gq_inputs == null ? 'none' :
+                "${params.genomeqc_label}@${java.security.MessageDigest.getInstance('SHA-256').digest(gq_inputs.getBytes('UTF-8')).encodeHex().toString().take(16)}".toString()
+            // cohort_qc: the version of the cohort pass's per-child QC, so that new columns
+            // regather tables built before them
+            def cohort_settings = settings + [cohort: params.cohort_name.toString(), sampleqc_flags: qc_key,
+                                              genomeqc_samples: gq_key, cohort_qc: 'v2']
             denovo.cohort_snapshot = InputsSnapshot.render(cohort_settings, cohort_rows)
             def cohort_prefix = "${params.data}/cohorts/${params.cohort_name}/denovo/${params.cohort_name}.${label}"
             def cohort_exist = ['dnm', 'qc'].every { kind -> new File("${cohort_prefix}.${kind}.tsv").length() > 0 }
@@ -2594,6 +2754,7 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
     CNV_PANEL: ${'cnv_panel' in RunContext.steps ? "v${params.cnv_panel_version}: ${analysis_plan.cnv_panel.existing ? 'done' : (analysis_plan.cnv_panel.needed ? 'to build' : 'nothing to build it from')}" : 'Skipped (step not requested)'}
     == Sample QC ==
     SAMPLEQC: ${'sampleqc' in RunContext.steps ? "${analysis_plan.sampleqc.existing.size()} individuals extracted and ${analysis_plan.sampleqc.needed.size()} to do (${analysis_plan.sampleqc.no_cram.size()} with no CRAM), ${analysis_plan.sampleqc.need_family.size()} families to check (${analysis_plan.sampleqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.sampleqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
+    GENOMEQC: ${'genomeqc' in RunContext.steps ? "${analysis_plan.genomeqc.existing.size()} individuals measured and ${analysis_plan.genomeqc.needed.size()} to do (${analysis_plan.genomeqc.no_cram.size()} with no CRAM), ${analysis_plan.genomeqc.need_family.size()} families to profile (${analysis_plan.genomeqc.edited.size()} with changed inputs), cohort tables: ${analysis_plan.genomeqc.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     UPD: ${'upd' in RunContext.steps ? "${analysis_plan.upd.family_existing.size()} families done and ${analysis_plan.upd.need_family.size()} to do (${analysis_plan.upd.edited.size()} with changed inputs, ${analysis_plan.upd.roh_families.size()} with ROH tables for their members without a parent), cohort tables: ${analysis_plan.upd.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
     == De novo ==
     DENOVO: ${'denovo' in RunContext.steps ? "${analysis_plan.denovo.family_existing.size()} families done and ${analysis_plan.denovo.need_family.size()} to do (${analysis_plan.denovo.edited.size()} with changed inputs, ${analysis_plan.denovo.waiting.size()} waiting for their Wombat table), cohort tables: ${analysis_plan.denovo.need_cohort ? 'Yes' : 'No'}" : 'Skipped (step not requested)'}
@@ -3029,7 +3190,7 @@ def validateStepsAvailability(analysis_plan, resolved_inputs, family_members) {
         ${errors.join('\n        ')}
         
         Please add the required steps to your parameters or ensure all required files exist.
-        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, upd, denovo
+        Available steps: alignment, deepvariant_sample, deepvariant_family, annotation, wombat, wombat_cohort, snvs_cohort, wisecondorx, extractor, ancestry, roh, expansionhunter, melt, cnv_coverage, cnv_panel, sampleqc, genomeqc, upd, denovo
         ========================================================================================
         """
         recordFailedRun("${errors.size()} unmet step requirement${errors.size() == 1 ? '' : 's'}")

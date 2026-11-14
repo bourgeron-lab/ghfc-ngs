@@ -6,7 +6,7 @@
 #      its message (-preview, so nothing is written even if a check stops working);
 #      then the Slurm options of a task under the slurm profile, with and without exclude_nodes,
 #      read from what a fake sbatch is given;
-#   2. fresh      - all 18 steps with -stub-run on the untouched cohort;
+#   2. fresh      - all 19 steps with -stub-run on the untouched cohort;
 #   3. rerun      - the same again, on the tree the fresh run published;
 #   4. addfamily  - the same again, after a new family (FAM03, a FASTQ singleton) is added to
 #                   the pedigree;
@@ -61,12 +61,13 @@ params() {
 
 valid_scenario=(
     'cohort_name: "STUB"'
-    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc", "upd", "denovo"]'
+    'steps: ["alignment", "deepvariant_sample", "deepvariant_family", "annotation", "wombat", "wombat_cohort", "snvs_cohort", "wisecondorx", "extractor", "ancestry", "roh", "expansionhunter", "melt", "cnv_coverage", "cnv_panel", "sampleqc", "genomeqc", "upd", "denovo"]'
     "ancestry_reference: \"${fixture}/refs/bundle\""
     'expansionhunter_catalog_name: "eh_stub"'
     'melt_label: "melt_stub"'
     'cnv_panel_version: "stub1"'
     'sampleqc_label: "sqc_stub"'
+    'genomeqc_label: "gqc_stub"'
     'upd_label: "upd_stub"'
     'denovo_label: "dnm_stub"'
     "denovo_masks: \"${fixture}/refs/denovo_masks\""
@@ -116,6 +117,12 @@ expect_refusal sampleqc_no_sites "the 'sampleqc' step cannot find somalier_sites
 expect_refusal upd_bad_label "upd_label 'upd/stub' may only hold" "${v[0]}" 'steps: ["upd"]' 'upd_label: "upd/stub"'
 expect_refusal upd_no_gnomad_index "with a .csi or .tbi index" "${v[0]}" 'steps: ["upd"]' \
     "gnomad_file: \"${fixture}/refs/ref.fa\""
+expect_refusal genomeqc_bad_label "genomeqc_label 'gqc/stub' may only hold" "${v[0]}" 'steps: ["genomeqc"]' \
+    'genomeqc_label: "gqc/stub"'
+expect_refusal genomeqc_same_label "genomeqc_label and sampleqc_label are both 'sqc_stub'" "${v[0]}" \
+    'steps: ["genomeqc"]' 'sampleqc_label: "sqc_stub"' 'genomeqc_label: "sqc_stub"'
+expect_refusal genomeqc_no_sample_info "the 'genomeqc' step cannot find genomeqc_sample_info" "${v[0]}" \
+    'steps: ["genomeqc"]' 'genomeqc_label: "gqc_stub"' "genomeqc_sample_info: \"${fixture}/refs/none.tsv\""
 expect_refusal denovo_bad_label "denovo_label 'dnm/stub' may only hold" "${v[0]}" 'steps: ["denovo"]' \
     'denovo_label: "dnm/stub"' "denovo_masks: \"${fixture}/refs/denovo_masks\""
 expect_refusal denovo_not_a_bundle "is not a mask bundle" "${v[0]}" 'steps: ["denovo"]' \

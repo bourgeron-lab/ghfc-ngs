@@ -34,7 +34,9 @@ class StaleFamily {
      *  - `mei/melt/` - the same holds for the MELT files.
      *  - `qc/` - the sample QC tables. They do not come from the joint call either, and they
      *    are redone whenever the family's inputs snapshot changes (InputsSnapshot), which a
-     *    member added or removed always does.
+     *    member added or removed always does. The genome QC variants table beside them comes
+     *    from the joint call, but the plan redoes it whenever the family's BCF is called in the
+     *    run or is newer than it, and whenever its snapshot changes.
      *  - `upd/` - the UPD tables. They do come from the joint call, but the plan redoes them
      *    whenever the family's BCF is called in the run, and whenever their inputs snapshot,
      *    which lists the members the BCF holds, changes.
