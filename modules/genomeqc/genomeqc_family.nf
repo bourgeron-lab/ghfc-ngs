@@ -13,7 +13,8 @@ process GENOMEQC_FAMILY {
 
   genomeqc_tables family counts each member's non-reference genotypes of GQ >= 20 and DP >= 10:
   heterozygous and homozygous SNVs, Ti/Tv, the SNVs private to the member in the family, the
-  share of heterozygous SNVs under 0.3 of the reads; the indels by size and type, and, with
+  share of heterozygous SNVs under 0.3 of the reads, the share of heterozygous SNVs of DP >= 10
+  whose GQ is under 20 (before the GQ filter); the indels by size and type, and, with
   genomeqc_tr_bed, the share in tandem repeats and homopolymers. bcftools stats gives indel
   sizes for the whole family only, hence a pass of our own.
 
