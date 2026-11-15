@@ -738,7 +738,7 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   | `HIGH_DUPLICATES`, `HIGH_ERROR_RATE`, `READ_INDEL_EXCESS` | medium | duplicates, mismatch rate, indels in the alignments 5 scaled MADs over the class. No fixed duplicate ceiling: 151 bp genomes run 10-15% on chr20 |
   | `SHORT_INSERT` | medium | median insert size 5 scaled MADs under the class |
   | `TITV_OUTLIER` | medium | Ti/Tv 5 scaled MADs under the class |
-  | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads 5 scaled MADs over the class: contamination, mosaicism |
+  | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads, less the share a true heterozygote gives at the same depths (binomial at each call's depth), 5 scaled MADs over the class: heavy contamination, mosaicism. The share alone follows depth, so it flagged the lowest-depth genomes, whose low-fraction heterozygotes were inherited. Contamination of a few percent is `sampleqc`'s CHARR: its alleles are too rare in the reads to be called heterozygous |
   | `LOW_GQ_HET_EXCESS` | medium | the share of heterozygous SNVs with GQ under 20 5 scaled MADs over the class: heterozygous calls lost to the GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5, their hets of mean GQ about 20 at 65x) |
   | `INDEL_PROFILE_OUTLIER` | medium | the share of 1 bp indels, the share in tandem repeats and homopolymers, or the insertion/deletion ratio 5 scaled MADs away from the class, either side: a library or calling problem changes what the indels are, where ancestry mostly changes how many there are |
 

@@ -23,9 +23,12 @@ family
     the member's non-reference genotypes of GQ >= MIN_GQ and DP >= MIN_DP:
     - SNVs: heterozygous and homozygous counts and their ratio, Ti/Tv, the SNVs private to the
       member in the family (no other member carries them; only meaningful with relatives), the
-      share of heterozygous SNVs with an allele fraction below LOW_VAF, which contamination and
-      mosaicism raise, and the share of heterozygous SNVs of DP >= MIN_DP whose GQ is below
-      MIN_GQ (counted before the GQ filter), which a calling problem raises;
+      share of heterozygous SNVs with an allele fraction below LOW_VAF, the share a true
+      heterozygote would give at the same depths (the chance that half the reads fall below
+      LOW_VAF, binomial at each call's depth, summed over the calls) and the excess of the first
+      over the second, which contamination and mosaicism raise, and the share of heterozygous
+      SNVs of DP >= MIN_DP whose GQ is below MIN_GQ (counted before the GQ filter), which a
+      calling problem raises;
     - indels: count, insertion/deletion ratio, share of 1 bp indels, of insertions over 10 bp,
       and, with --tr-bed, of indels in tandem repeats and homopolymers. bcftools stats gives
       indel sizes for the whole family only, so they are counted here. Read length shows
@@ -71,8 +74,15 @@ Flags (column flags of samples.tsv; '.' when none). Report only: nothing is filt
         mismatch rate, indels in the reads' alignments, median insert size: MAD_K scaled MADs
         above (below for the insert) the class. READ_INDEL_EXCESS points to a PCR or damaged
         library
-    TITV_OUTLIER, LOW_VAF_HET_EXCESS (medium)
-        Ti/Tv below, share of low-fraction heterozygotes above the class
+    TITV_OUTLIER (medium)
+        Ti/Tv below the class
+    LOW_VAF_HET_EXCESS (medium)
+        share of low-fraction heterozygotes, less the share their depths alone give, above the
+        class: contamination or mosaicism. The share alone follows depth (Spearman -0.95 with the
+        chr20 depth on 300 genomes): a 27x genome's heterozygotes, all inherited, fall under 0.3
+        three times as often as a 39x genome's, by the binomial sampling of their reads alone.
+        Contamination of a few percent (sampleqc's CHARR) leaves it unchanged: its alleles are
+        too rare in the reads to be called heterozygous
     LOW_GQ_HET_EXCESS (medium)
         share of heterozygous SNVs with a low GQ above the class: heterozygous calls lost to the
         GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5,
@@ -122,7 +132,7 @@ SAMPLE_COLUMNS = [
 FAMILY_COLUMNS = [
     "family_id", "sample",
     "n_snv", "n_snv_het", "n_snv_hom", "het_hom_ratio", "ti_tv", "private_snvs", "low_vaf_het_share",
-    "het_low_gq_share",
+    "low_vaf_het_expected", "low_vaf_het_excess", "het_low_gq_share",
     "n_indel", "ins_del_ratio", "indel_1bp_share", "ins_over_10bp_share", "indel_tr_share",
 ]
 COHORT_COLUMNS = (["sample", "family_id", "seq_class", "library", "dna_source"] + SAMPLE_COLUMNS[1:] +
@@ -138,7 +148,7 @@ CLASS_TESTS = [
     ("read_indels_per_kb", "high", "READ_INDEL_EXCESS"),
     ("insert_median", "low", "SHORT_INSERT"),
     ("ti_tv", "low", "TITV_OUTLIER"),
-    ("low_vaf_het_share", "high", "LOW_VAF_HET_EXCESS"),
+    ("low_vaf_het_excess", "high", "LOW_VAF_HET_EXCESS"),
     ("het_low_gq_share", "high", "LOW_GQ_HET_EXCESS"),
     ("indel_1bp_share", "both", "INDEL_PROFILE_OUTLIER"),
     ("indel_tr_share", "both", "INDEL_PROFILE_OUTLIER"),
@@ -330,6 +340,19 @@ def het_depth_gq(field):
     return gq if dp >= MIN_DP else None
 
 
+_LOW_VAF_CHANCE = {}
+
+
+def low_vaf_chance(depth):
+    """The chance that a true heterozygote's alt reads, Binomial(depth, 0.5), make an allele
+    fraction under LOW_VAF: the same test as the observed count, so the two compare."""
+    p = _LOW_VAF_CHANCE.get(depth)
+    if p is None:
+        p = sum(math.comb(depth, k) for k in range(depth + 1) if k / depth < LOW_VAF) / 2 ** depth
+        _LOW_VAF_CHANCE[depth] = p
+    return p
+
+
 def query(bcf, kind, tr_bed=None):
     targets = ["-T", tr_bed] if tr_bed else ["-t", ",".join(AUTOSOMES)]
     view = ["bcftools", "view", "-v", kind] + targets + ["-Ou", bcf]
@@ -347,7 +370,7 @@ def family_metrics(bcf, fid, tr_bed=None):
     samples = subprocess.run(["bcftools", "query", "-l", bcf], capture_output=True, text=True,
                              check=True).stdout.split()
     autosomes = set(AUTOSOMES)
-    m = {s: dict(het=0, hom=0, ti=0, tv=0, private=0, low_vaf=0, het_ad=0, het_dp=0, het_low_gq=0,
+    m = {s: dict(het=0, hom=0, ti=0, tv=0, private=0, low_vaf=0, low_vaf_expected=0.0, het_ad=0, het_dp=0, het_low_gq=0,
                  indel=0, ins=0, dele=0, one=0, ins10=0, tr=0) for s in samples}
     for f in query(bcf, "snps"):
         if f[0] not in autosomes:
@@ -370,6 +393,7 @@ def family_metrics(bcf, fid, tr_bed=None):
                 s["het"] += 1
                 if ref_d is not None and ref_d + alt_d > 0:
                     s["het_ad"] += 1
+                    s["low_vaf_expected"] += low_vaf_chance(ref_d + alt_d)
                     if alt_d / (ref_d + alt_d) < LOW_VAF:
                         s["low_vaf"] += 1
             s["ti" if transition else "tv"] += 1
@@ -402,12 +426,16 @@ def family_metrics(bcf, fid, tr_bed=None):
     for sample in samples:
         s = m[sample]
         n_snv = s["het"] + s["hom"]
+        low_vaf = ratio(s["low_vaf"], s["het_ad"])
+        low_vaf_expected = ratio(s["low_vaf_expected"], s["het_ad"])
         rows.append({
             "family_id": fid, "sample": sample,
             "n_snv": n_snv, "n_snv_het": s["het"], "n_snv_hom": s["hom"],
             "het_hom_ratio": ratio(s["het"], s["hom"]), "ti_tv": ratio(s["ti"], s["tv"]),
             "private_snvs": s["private"] if len(samples) > 1 else None,
-            "low_vaf_het_share": ratio(s["low_vaf"], s["het_ad"]),
+            "low_vaf_het_share": low_vaf,
+            "low_vaf_het_expected": low_vaf_expected,
+            "low_vaf_het_excess": (low_vaf - low_vaf_expected) if low_vaf is not None else None,
             "het_low_gq_share": ratio(s["het_low_gq"], s["het_dp"]),
             "n_indel": s["indel"], "ins_del_ratio": ratio(s["ins"], s["dele"]),
             "indel_1bp_share": ratio(s["one"], s["indel"]),

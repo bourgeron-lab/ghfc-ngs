@@ -2371,9 +2371,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                 return
             }
             // columns: the version of the family table's columns, so that a table written before
-            // het_low_gq_share is redone (seconds per family) rather than read without it
+            // het_low_gq_share (v2) or low_vaf_het_excess (v3) is redone (seconds per family) rather
+            // than read without it
             def snapshot = InputsSnapshot.render([step: 'genomeqc', label: label, family: fid.toString(), tr_bed: tr_name,
-                                                  columns: 'v2'],
+                                                  columns: 'v3'],
                                                  rows_by_family[fid] ?: [])
             gq.snapshots[fid] = snapshot
             def fam_dir = Sharding.getFamilyDir(params.data, fid)
