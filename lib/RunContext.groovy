@@ -19,5 +19,8 @@ class RunContext {
      */
     static final Map state = [terminal_written: false, warned_no_cohort: false,
                               pedigree_file: null, pedigree_data: null, plan: null,
-                              alignment_scan: null, stale_family_clean: null, progress: null]
+                              alignment_scan: null, stale_family_clean: null, progress: null,
+                              // the families another cohort lists with other rows (FamilyPedigree
+                              // .conflicts), those of them the plan holds, and the aliases
+                              pedigree_conflicts: null, held_families: [] as Set, pedigree_aliases: null]
 }

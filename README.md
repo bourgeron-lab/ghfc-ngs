@@ -119,6 +119,11 @@ ${data}/cohorts/<COHORT_NAME>/<COHORT_NAME>.pedigree.tsv
 
 A pedigree kept anywhere else has to be named with the `pedigree` parameter.
 
+The cohorts of a data directory share its `families/` tree. A family another cohort lists with
+other parents, sex or members (the phenotype aside) is held by default: the run leaves its
+family-level outputs as they are rather than redo them from its own rows, and says so - see
+[`pedigree_conflicts`](documentation/params.md#pedigree_conflicts-a-family-two-cohorts-list-differently).
+
 ```tsv
 FID barcode father mother sex phenotype
 FAM001 C000F2W 0 0 1 2
