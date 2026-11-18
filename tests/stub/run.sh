@@ -18,6 +18,15 @@
 #                   dummy parents of her own (DUMMY_..., rows with no data): only FAM02's
 #                   pedigree-reading tables and pedigree file, and the cohort's tables, are
 #                   redone, and nothing is planned for a dummy.
+#   7. editphenotype - the same again, after FAM02's phenotype is edited: only its own pedigree
+#                   file is written again; no step reads the phenotype, so nothing else is redone.
+#   8. conflict   - the same again, after another cohort, OTHER, lists FAM01 with BC003's father
+#                   and has last written FAM01's pedigree file and joint call: FAM01 is held, so
+#                   nothing family-level runs for it and its pedigree file is left as OTHER wrote
+#                   it. OTHER also lists FAM03 with another phenotype, which is no conflict, and
+#                   BC004 under FAM99, which is reported as FAM02's alias. Then a real run with
+#                   nothing to do writes the state file, which must record FAM01 as held, and a
+#                   run with pedigree_conflicts: fail is refused.
 #
 # A pass fails on any FAILED task, and when the tasks it ran - name and tag, sorted - differ from
 # expected/<pass>.tasks.txt. The rerun is the planner's own test: anything it schedules is
@@ -131,6 +140,8 @@ expect_refusal denovo_not_a_bundle "is not a mask bundle" "${v[0]}" 'steps: ["de
     > "${fixture}/conflict.pedigree.tsv"
 expect_refusal pedigree_conflict "Pedigree file has two different rows for BC003" "${v[@]}" \
     "pedigree: \"${fixture}/conflict.pedigree.tsv\""
+expect_refusal pedigree_conflicts_value "pedigree_conflicts is 'maybe': it must be one of hold, fail, overwrite" \
+    "${v[@]}" 'pedigree_conflicts: "maybe"'
 expect_refusal resources_typo "no process is called PYWOMBATT" "${v[@]}" 'resources: {PYWOMBATT: {cpus: 2}}'
 expect_refusal exclude_nodes_space "invalid exclude_nodes: 'bad node' is not a node name" "${v[@]}" \
     'exclude_nodes: "maestro-1096,bad node"'
@@ -299,6 +310,82 @@ fi
 if ! grep -qF 'Pedigree has 4 dummy member(s)' "${out}/adddummy.out"; then
     echo "  FAIL  adddummy: the plan does not report the 4 dummies"; fail=1
 fi
+
+# --- 7. a phenotype edited ------------------------------------------------------------------
+
+awk -F '\t' -v OFS='\t' '$2 == "BC004" { $6 = "1" } { print }' "${data}/cohorts/STUB/STUB.pedigree.tsv" \
+    > "${out}/phenotype.pedigree.tsv"
+mv "${out}/phenotype.pedigree.tsv" "${data}/cohorts/STUB/STUB.pedigree.tsv"
+stub_pass editphenotype
+
+# FAM02's pedigree file is written again, and nothing but that and the extractor runs
+if ! grep -qxF 'DEEPVARIANT_FAMILY:FAMILIAL_PEDIGREE (FAM02)' "${out}/editphenotype.tasks.txt"; then
+    echo "  FAIL  editphenotype: FAM02's pedigree file was not written again"; fail=1
+fi
+if grep -vE '^EXTRACTOR:|^DEEPVARIANT_FAMILY:FAMILIAL_PEDIGREE \(FAM02\)$' "${out}/editphenotype.tasks.txt"; then
+    echo "  FAIL  editphenotype: a phenotype edit redid more than the family's pedigree file"; fail=1
+fi
+
+# --- 8. another cohort lists a family with other rows ---------------------------------------
+
+# OTHER lists FAM01 with BC003's father, which STUB has removed (pass 5), and has run since STUB
+# last did: FAM01's pedigree file holds OTHER's rows, and its joint call is being redone
+mkdir -p "${data}/cohorts/OTHER" "${data}/cohorts/.trash"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    FAM01 BC001 0 0 1 1 \
+    FAM01 BC002 0 0 2 1 \
+    FAM01 BC003 BC001 BC002 1 2 \
+    FAM03 BC005 0 0 2 2 \
+    FAM99 BC004 0 0 2 2 \
+    > "${data}/cohorts/OTHER/OTHER.pedigree.tsv"
+# A hidden directory is not a cohort
+printf 'FAM01\tBC003\tX\tY\t1\n' > "${data}/cohorts/.trash/.trash.pedigree.tsv"
+fam01=$(dirname "$(find "${data}/families" -name FAM01.pedigree.tsv)")
+grep -v $'^FAM0[23]\t' "${data}/cohorts/OTHER/OTHER.pedigree.tsv" > "${fam01}/FAM01.pedigree.tsv"
+cp "${fam01}/FAM01.pedigree.tsv" "${out}/FAM01.pedigree.before.tsv"
+rm -f "${fam01}/vcfs/FAM01.norm.bcf" "${fam01}/vcfs/FAM01.norm.bcf.csi" "${fam01}/qc/FAM01.sqc_stub.samples.tsv"
+stub_pass conflict
+
+if grep -E '\(FAM01' "${out}/conflict.tasks.txt" | grep -v '^EXTRACTOR:'; then
+    echo "  FAIL  conflict: a family-level task ran for FAM01, which is held"; fail=1
+fi
+if ! cmp -s "${out}/FAM01.pedigree.before.tsv" "${fam01}/FAM01.pedigree.tsv"; then
+    echo "  FAIL  conflict: FAM01's pedigree file was written again"; fail=1
+fi
+if ! grep -qF 'FAM01 differs from OTHER: BC003: father 0 -> BC001' "${out}/conflict.out"; then
+    echo "  FAIL  conflict: the summary does not list FAM01 as held, with what differs"; fail=1
+fi
+if grep -qE 'FAM03 differs|differs from \.trash' "${out}/conflict.out"; then
+    echo "  FAIL  conflict: a phenotype-only difference, or a hidden directory, was taken for a conflict"; fail=1
+fi
+if ! grep -qF 'FAM02 is FAM99 in OTHER (BC004)' "${out}/conflict.out"; then
+    echo "  FAIL  conflict: FAM02's alias in OTHER is not reported"; fail=1
+fi
+
+# A real run, not a stub, so that the state file is written: the one step asked for has nothing
+# to do but FAM01's joint call, which is held
+file=$(params state "${valid_scenario[0]}" 'steps: ["deepvariant_family"]')
+state="${data}/cohorts/STUB/.ghfc-ngs.state.json"
+rm -f "${state}"
+if ! (cd "${out}/launch" && "${nextflow}" run "${root}/main.nf" -params-file "${file}" \
+        -c "${here}/ci.config" > "${out}/state.out" 2>&1); then
+    echo "  FAIL  conflict: the real run failed (see ${out}/state.out)"; fail=1
+elif ! python3 - "${state}" << 'PY'
+import json, sys
+run = json.load(open(sys.argv[1]))["last_run"]
+assert run["status"] == "success", run["status"]
+assert run["pedigree_conflicts"] == [
+    {"family": "FAM01", "cohorts": ["OTHER"], "changes": {"OTHER": ["BC003: father 0 -> BC001"]}}
+], run["pedigree_conflicts"]
+PY
+then
+    echo "  FAIL  conflict: the state file does not record FAM01 as held (${state})"; fail=1
+else
+    echo "  ok    conflict: FAM01 held and recorded in the state file"
+fi
+
+expect_refusal pedigree_conflicts_fail "another cohort lists with other rows, and pedigree_conflicts is fail" \
+    "${valid_scenario[@]}" 'pedigree_conflicts: "fail"'
 
 if (( fail )); then
     echo "stub runs FAILED - logs in ${out}"

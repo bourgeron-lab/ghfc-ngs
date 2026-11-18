@@ -125,7 +125,8 @@ across many cohorts into one list without losing track of which is which.
         "needs_alignment": false, "blocked": true }
     ]
   },
-  "stale_family_clean": null
+  "stale_family_clean": null,
+  "pedigree_conflicts": []
 }
 ```
 
@@ -158,6 +159,7 @@ across many cohorts into one list without losing track of which is which.
 | `completion` | object | **no plan was built** | Per-step progress. See below. |
 | `samples_without_cram` | object | **the input scan did not run** | Which individuals have no CRAM, and whether anything on disk could align them. See below. |
 | `stale_family_clean` | object | **no clean was requested** | What `--clean-stale-families` removed and refused. See below. |
+| `pedigree_conflicts` | array | absent unless set | The families held because another cohort of the data directory lists them with other rows; `[]` when none. **Absent** from records written before it existed, from runs stopped before the pedigree was read, and under `pedigree_conflicts: overwrite`, which holds nothing. See [Pedigree conflicts](#pedigree-conflicts). |
 | `reason` | string | absent unless set | Short human explanation, present on records written by a validation failure, e.g. `invalid steps requested: bogus`. |
 
 ### A failed record
@@ -314,6 +316,38 @@ jq -r '.last_run.samples_without_cram.samples[] | select(.blocked)
        | "\(.barcode)\t\(.family_id)\t\(.input_source)\t\(.input_path // "-")"' \
    .ghfc-ngs.state.json | column -t -s $'\t'
 ```
+
+## Pedigree conflicts
+
+`pedigree_conflicts` lists the families of this cohort that another cohort of the same data
+directory lists with other rows — another father, mother or sex, a member or a dummy added,
+removed or renamed; a phenotype alone does not count — and that the run therefore **held**: their
+`{FID}.pedigree.tsv` and family-level outputs were left as they were, and none of their
+family-level steps ran (`documentation/params.md`, `pedigree_conflicts`). Under
+`pedigree_conflicts: fail` it lists the families that stopped the run, on a `failed` record.
+
+```json
+"pedigree_conflicts": [
+  { "family": "FID001", "cohorts": ["OTHER_COHORT"],
+    "changes": { "OTHER_COHORT": ["C0KID: father 0 -> C0DAD"] } },
+  { "family": "FID002", "cohorts": ["COHORT_A", "COHORT_B"],
+    "changes": { "COHORT_A": ["DUMMY_C0SIB_F: removed", "C0SIB: father DUMMY_C0SIB_F -> 0"],
+                 "COHORT_B": ["C0NEW: removed"] } }
+]
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `family` | string | The family ID, the same in both cohorts. Sorted by it. |
+| `cohorts` | array of strings | The other cohorts whose rows differ, sorted. |
+| `changes` | object | For each of `cohorts`, one clause per member that differs: `<member>: <field> <this cohort's value> -> <the other's>` for `father`, `mother` or `sex`, comma-separated when several; `<member>: added` for a member only the other cohort lists, `<member>: removed` for one only this cohort lists. The run summary prints the same clauses as `FID001 differs from OTHER_COHORT: C0KID: father 0 -> C0DAD`. |
+
+It describes the pedigrees when the run started, not the family directories: a family is listed
+again on every run until the cohorts' pedigrees agree, or a run with `overwrite` redoes it from
+one cohort's rows (and the other cohort's next run holds it in turn).
+
+Samples a family shares with a family another cohort lists under another family ID (aliases)
+are only warned about in the run log, not recorded here.
 
 ## Stale family cleans
 

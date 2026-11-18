@@ -312,6 +312,12 @@ def buildStateRecord(Map opts) {
         // same "this was not measured" convention the blocks above use
         stale_family_clean: RunContext.state.stale_family_clean
     ]
+    // The families held because another cohort lists them with other rows (checkPedigreeConflicts),
+    // [] for none. Absent before the check has run, and under pedigree_conflicts: overwrite, which
+    // holds nothing; under fail, the families that stopped the run.
+    if (RunContext.state.pedigree_conflicts != null && params.pedigree_conflicts?.toString() != 'overwrite') {
+        record.pedigree_conflicts = RunContext.state.pedigree_conflicts
+    }
     if (opts.reason) record.reason = opts.reason
     return record
 }
@@ -429,6 +435,12 @@ def validateParams() {
     if (invalid_steps) {
         recordFailedRun("invalid steps requested: ${invalid_steps.join(', ')}")
         exit 1, "ERROR: Invalid steps specified: ${invalid_steps.join(', ')}. Valid steps are: ${valid_steps.join(', ')}"
+    }
+
+    def conflict_modes = ['hold', 'fail', 'overwrite']
+    if (!(params.pedigree_conflicts?.toString() in conflict_modes)) {
+        recordFailedRun("invalid pedigree_conflicts")
+        exit 1, "ERROR: pedigree_conflicts is '${params.pedigree_conflicts}': it must be one of ${conflict_modes.join(', ')}"
     }
 
     // Read by every task's clusterOptions (process.ext.slurm_options in nextflow.config), where a
@@ -759,6 +771,10 @@ workflow {
     RunContext.state.pedigree_data = pedigree_data
 
     log.info "Found ${families.size()} families with ${individuals.size()} individuals total"
+
+    // Families another cohort of the data directory lists with other rows: held, or the run
+    // stopped, before anything is planned for them
+    checkPedigreeConflicts(pedigree_file)
     
     // --clean-stale-families reaches Nextflow as clean_stale_families; cleanStaleFamilies is
     // the camelCase spelling Nextflow produces when the hyphenated flag bypasses the wrapper
@@ -1568,6 +1584,34 @@ def hasGvcf(Map known, barcode) {
     return known[barcode]
 }
 
+// The cohorts of a data directory share one families/ tree, but each has its own pedigree. A
+// family this cohort lists that another cohort lists with other rows - parents, sex, members or
+// dummies, not the phenotype - would have its {FID}.pedigree.tsv and every family-level output
+// written by each cohort's run in turn, from its own rows (lib/FamilyPedigree.groovy).
+// pedigree_conflicts says what to do with one: 'hold' it (RunContext.state.held_families, which
+// createAnalysisPlan schedules no family-level work for), 'fail' the run here, or 'overwrite' it.
+// Samples another cohort lists under another family ID are reported: their family-level work is
+// done twice, which is wasteful but not wrong.
+def checkPedigreeConflicts(pedigree_file) {
+    def mode = params.pedigree_conflicts.toString()
+    def mine = FamilyPedigree.rowsByFamily(new File(pedigree_file.toString()).readLines())
+    def others = FamilyPedigree.otherCohorts(params.data.toString(), params.cohort_name.toString(), pedigree_file.toString())
+    others.unreadable.each { cohort, why ->
+        log.warn "The pedigree of cohort ${cohort} cannot be read, so its families are not compared with this cohort's: ${why}"
+    }
+    def conflicts = FamilyPedigree.conflicts(mine, others.rows)
+    RunContext.state.pedigree_conflicts = conflicts
+    RunContext.state.pedigree_aliases = FamilyPedigree.aliases(mine, others.rows)
+    RunContext.state.held_families = mode == 'hold' ? (conflicts.collect { it.family } as Set) : ([] as Set)
+
+    if (mode == 'fail' && conflicts) {
+        def lines = conflicts.collectMany { FamilyPedigree.describeConflict(it) }
+        log.error "PEDIGREE CONFLICTS: ${conflicts.size()} ${conflicts.size() == 1 ? 'family' : 'families'} of ${params.cohort_name} another cohort lists with other rows:\n    ${lines.take(50).join('\n    ')}${lines.size() > 50 ? '\n    and others' : ''}"
+        recordFailedRun("${conflicts.size()} ${conflicts.size() == 1 ? 'family' : 'families'} another cohort lists with other rows, and pedigree_conflicts is fail")
+        exit 1, "ERROR: ${conflicts.size()} ${conflicts.size() == 1 ? 'family' : 'families'} another cohort lists with other rows, and pedigree_conflicts is fail - see PEDIGREE CONFLICTS above. Make the cohorts' pedigrees agree, or set pedigree_conflicts to hold or overwrite"
+    }
+}
+
 def createAnalysisPlan(families, individuals, family_members, quiet = false) {
     def plan = [
         // no_cram is every individual with no usable CRAM, whatever the reason and whether or
@@ -1653,8 +1697,15 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // rows its file holds, null when it cannot be read. outdated: family -> what differs from
         // the cohort pedigree, for every family whose file exists and does not hold its rows;
         // the deepvariant_family step writes those files again.
-        family_pedigree: [on_disk: [:], outdated: [:]]
+        family_pedigree: [on_disk: [:], outdated: [:]],
+        // families: the families another cohort lists with other rows, held under
+        // pedigree_conflicts: hold (checkPedigreeConflicts). Nothing family-level is scheduled for
+        // them: an output on disk counts as existing, as it is, and a missing one is not made.
+        // Their samples' own steps still run. uncalled: those of them with no joint call, whose
+        // members still get their gVCFs.
+        pedigree_hold: [families: (RunContext.state.held_families ?: []) as Set, uncalled: planBucket()]
     ]
+    def held = plan.pedigree_hold.families
 
     def members_by_family = membersByFamily(family_members)
 
@@ -1697,7 +1748,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // The file is only written when it is missing, so it keeps the rows it was first written
         // with: an edit of the cohort pedigree since, or another cohort listing the family with
         // other rows, leaves it out of date. Such a file is written again (DEEPVARIANT_FAMILY).
-        if (pedigree_ok) {
+        // A held family's file is left as the other cohort wrote it
+        if (pedigree_ok && !(fid in held)) {
             def on_disk = FamilyPedigree.onDisk(pedigree_path, fid)
             plan.family_pedigree.on_disk[fid] = on_disk
             def expected = cohort_family_rows[fid] ?: []
@@ -1728,10 +1780,14 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             } else {
                 plan.deepvariant_family.bcf_samples[fid] = in_bcf
             }
-            def drift = StaleFamily.drift(members, in_bcf, { barcode -> hasGvcf(gvcf_exists, barcode) })
+            // A held family's call was made from another cohort's members: not stale for this one
+            // to report, nor for --clean-stale-families to delete
+            def drift = fid in held ? null : StaleFamily.drift(members, in_bcf, { barcode -> hasGvcf(gvcf_exists, barcode) })
             if (drift) {
                 plan.pedigree_drift[fid] = drift
             }
+        } else if (fid in held) {
+            plan.pedigree_hold.uncalled.add(fid)
         } else {
             plan.deepvariant_family.needed.add(fid)
         }
@@ -1758,7 +1814,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             new File(vep_vcf_path).exists() && new File(vep_tbi_path).exists() &&
             new File(annotated_bcf_path).exists() && new File(annotated_csi_path).exists()) {
             plan.annotation.existing.add(fid)
-        } else {
+        } else if (!(fid in held)) {
             // Need annotation if normalized BCFs exist or will be created
             if (fid in plan.deepvariant_family.existing || fid in plan.deepvariant_family.needed) {
                 plan.annotation.needed.add(fid)
@@ -1818,6 +1874,13 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def tables_exist = table_kinds.every { kind ->
                 new File("${fam_dir}/ancestry/${fid}.${panel_name}.${kind}.tsv").exists()
             }
+            if (fid in held) {
+                // Its members' panel extractions still run; its family panel and tables stay as they are
+                plan.ancestry.need_family_merge[fid] = false
+                plan.ancestry.need_family_score[fid] = false
+                if (fam_panel_exists && tables_exist) plan.ancestry.existing.add(fid)
+                return
+            }
             plan.ancestry.need_family_score[fid] = !tables_exist || plan.ancestry.need_family_merge[fid]
 
             if (plan.ancestry.need_family_merge[fid] || plan.ancestry.need_family_score[fid]) {
@@ -1848,6 +1911,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                                 plan.ancestry.need_family_score[fid] == true
             def outputs_exist = kinds.every { kind ->
                 new File("${fam_dir}/roh/${fid}.${panel_name}.${kind}.tsv").exists()
+            }
+            if (fid in held) {
+                if (outputs_exist) plan.roh.existing.add(fid)
+                return
             }
             if (outputs_exist && !ancestry_redo) {
                 plan.roh.existing.add(fid)
@@ -1887,9 +1954,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         if (hasGvcf(gvcf_exists, barcode) && new File(gvcf_tbi_path).exists() && has_vaf_bedgraph) {
             plan.deepvariant_sample.existing.add(barcode)
         } else {
-            // Only need DeepVariant if the individual's family needs deepvariant_family
+            // Only need DeepVariant if the individual's family needs deepvariant_family, or would
+            // were it not held: a sample's own gVCF is the same for every cohort
             def fid = family_members[barcode]
-            if (fid in plan.deepvariant_family.needed) {
+            if (fid in plan.deepvariant_family.needed || fid in plan.pedigree_hold.uncalled) {
                 plan.deepvariant_sample.needed.add(barcode)
             }
         }
@@ -1992,7 +2060,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def family_aberrations_path = "${Sharding.getFamilyDir(params.data, fid)}/svs/wisecondorx/${fid}_aberrations.bed"
             def family_aberrations_exists = new File(family_aberrations_path).exists()
 
-            if (!family_aberrations_exists) {
+            if (!family_aberrations_exists && !(fid in held)) {
                 // Check if any family members have or will have individual aberrations
                 def family_has_aberrations = (members_by_family[fid] ?: []).any { barcode ->
                     barcode in plan.wisecondorx.existing || barcode in plan.wisecondorx.needed
@@ -2010,7 +2078,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def annotated_aberrations_path = "${fam_dir}/svs/wisecondorx/${fid}_aberrations.annotated.bed"
             def annotated_aberrations_exists = new File(annotated_aberrations_path).exists()
 
-            if (!annotated_aberrations_exists) {
+            if (!annotated_aberrations_exists && !(fid in held)) {
                 // Check if family has or will have merged aberrations
                 def family_aberrations_path = "${fam_dir}/svs/wisecondorx/${fid}_aberrations.bed"
                 def has_family_aberrations = new File(family_aberrations_path).exists() || plan.wisecondorx.need_family_merge[fid] == true
@@ -2091,6 +2159,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
                                                   thresholds: eh_thresholds, table_script: eh_table_script],
                                                  eh_rows[fid] ?: [])
             plan.expansionhunter.snapshots[fid] = snapshot
+            if (fid in held) {
+                if (outputs_exist) plan.expansionhunter.family_existing.add(fid)
+                return
+            }
             if (outputs_exist && InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot) &&
                     !callable.any { barcode -> barcode in plan.expansionhunter.needed }) {
                 plan.expansionhunter.family_existing.add(fid)
@@ -2115,7 +2187,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             individuals.each { barcode ->
                 def fid = family_members[barcode]
                 def has_table = fid in plan.expansionhunter.need_family || fid in plan.expansionhunter.family_existing
-                if (!has_table || !(barcode in plan.expansionhunter.existing || barcode in plan.expansionhunter.needed)) {
+                // What is flagged comes from the family table, which a held family's is not
+                if (!has_table || fid in held || !(barcode in plan.expansionhunter.existing || barcode in plan.expansionhunter.needed)) {
                     return
                 }
                 if (barcode in plan.expansionhunter.needed) {
@@ -2167,6 +2240,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             }
             def prefix = "${Sharding.getFamilyDir(params.data, fid)}/mei/melt/${fid}.${label}"
             def outputs_exist = ['vcf.gz', 'vcf.gz.tbi', 'transmission.tsv'].every { ext -> new File("${prefix}.${ext}").exists() }
+            if (fid in held) {
+                if (outputs_exist) plan.melt.family_existing.add(fid)
+                return
+            }
             if (outputs_exist && !callable.any { barcode -> barcode in plan.melt.needed }) {
                 plan.melt.family_existing.add(fid)
             } else {
@@ -2312,6 +2389,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
 
             def prefix = "${Sharding.getFamilyDir(params.data, fid)}/qc/${fid}.${label}"
             def tables_exist = ['samples', 'pairs', 'flags'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
+            if (fid in held) {
+                if (tables_exist) qc.family_existing.add(fid)
+                return
+            }
             def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
             if (tables_exist && same_inputs && !with_extract.any { barcode -> barcode in qc.needed }) {
                 qc.family_existing.add(fid)
@@ -2382,6 +2463,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def table = new File("${prefix}.variants.tsv")
             def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
             def newer = table.length() > 0 && new File("${fam_dir}/vcfs/${fid}.norm.bcf").lastModified() > table.lastModified()
+            if (fid in held) {
+                if (table.length() > 0) gq.family_existing.add(fid)
+                return
+            }
             if (table.length() > 0 && same_inputs && !bcf_from_run && !newer) {
                 gq.family_existing.add(fid)
             } else {
@@ -2444,7 +2529,8 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             // remade in this run, else a member only with a gVCF, on disk or made in this run.
             // A dummy never.
             def header_samples = bcf_from_run ? null : plan.deepvariant_family.bcf_samples[fid] as Set
-            if (header_samples != null) {
+            // A held family's call may hold another cohort's members: it is not stale, and is held below
+            if (header_samples != null && !(fid in held)) {
                 def listed = rows.collect { row -> row[1] } as Set
                 if (header_samples.any { sample -> !(sample in listed) }) {
                     // A call holding a sample the pedigree no longer puts in the family is stale
@@ -2497,6 +2583,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def tables_exist = ['segments', 'events', 'members', 'windows'].every { kind -> new File("${prefix}.${kind}.tsv").length() > 0 }
             def same_inputs = InputsSnapshot.matches("${prefix}.inputs.tsv", snapshot)
             def remade = bcf_from_run || roh_from_run || with_coverage.any { barcode -> barcode in upd.coverage_from_run }
+            if (fid in held) {
+                if (tables_exist) upd.family_existing.add(fid)
+                return
+            }
             if (tables_exist && same_inputs && !remade) {
                 upd.family_existing.add(fid)
             } else {
@@ -2554,8 +2644,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
         // Track BCF2PARQUET status
         plan.wombat.need_bcf2parquet[fid] = !bcf2parquet_exists
 
-        // Determine if family needs Wombat processing
-        if (fid in plan.annotation.existing || fid in plan.annotation.needed) {
+        // Determine if family needs Wombat processing. A held family's tables are taken as they are.
+        if (fid in held) {
+            if (pywombat_exist) plan.wombat.existing.add(fid)
+        } else if (fid in plan.annotation.existing || fid in plan.annotation.needed) {
             if (pywombat_complete) {
                 plan.wombat.existing.add(fid)
             } else {
@@ -2621,7 +2713,7 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def wombat_due = fid in plan.wombat.needed || !table.exists()
             def wombat_from_run = wombat_due && 'wombat' in RunContext.steps && config_name in configs &&
                 (fid in plan.wombat.needed)
-            if (wombat_due && !wombat_from_run) {
+            if (wombat_due && !wombat_from_run && !(fid in held)) {
                 denovo.waiting.add(fid)
                 return
             }
@@ -2664,6 +2756,10 @@ def createAnalysisPlan(families, individuals, family_members, quiet = false) {
             def newer = tables_exist && (table.lastModified() > dnm.lastModified() || bcf.lastModified() > dnm.lastModified())
             def remade = bcf_from_run || wombat_from_run || newer ||
                 with_cram.any { barcode -> barcode in denovo.crams_from_run }
+            if (fid in held) {
+                if (tables_exist) denovo.family_existing.add(fid)
+                return
+            }
             if (tables_exist && same_inputs && !remade) {
                 denovo.family_existing.add(fid)
             } else {
@@ -2841,6 +2937,22 @@ def displayAnalysisSummary(analysis_plan, resolved_inputs = null, clean_report =
             (rewritten ? ", and ${outdated.size() == 1 ? 'it is' : 'they are'} written again:" : ". The deepvariant_family step is not requested, so ${outdated.size() == 1 ? 'it is' : 'they are'} left as ${outdated.size() == 1 ? 'it is' : 'they are'}:") +
             "\n${shown.join('\n')}${outdated.size() > 50 ? '\n    and others' : ''}"
         if (rewritten) log.info message else log.warn message
+    }
+    def conflicts = RunContext.state.pedigree_conflicts ?: []
+    if (conflicts) {
+        // Families another cohort of the data directory lists with other rows (checkPedigreeConflicts)
+        def n = conflicts.size()
+        def lines = conflicts.collectMany { conflict -> FamilyPedigree.describeConflict(conflict) }
+        def what = params.pedigree_conflicts.toString() == 'hold'
+            ? "${n == 1 ? 'It is' : 'They are'} held: ${n == 1 ? 'its' : 'their'} {FID}.pedigree.tsv and family-level outputs are left as they are and none of ${n == 1 ? 'its' : 'their'} family-level steps is run; ${n == 1 ? 'its' : 'their'} samples' own steps are. Make the cohorts' pedigrees agree, or set pedigree_conflicts: overwrite to redo ${n == 1 ? 'it' : 'them'} from ${params.cohort_name}'s rows"
+            : "pedigree_conflicts is overwrite, so ${n == 1 ? 'its' : 'their'} {FID}.pedigree.tsv and family-level outputs are redone from ${params.cohort_name}'s rows, for the other ${n == 1 ? 'cohort' : 'cohorts'} to redo again"
+        log.warn "PEDIGREE CONFLICTS: ${n} ${n == 1 ? 'family' : 'families'} of ${params.cohort_name} another cohort of the data directory lists with other rows (each change reads ${params.cohort_name}'s value -> the other cohort's). ${what}:\n    ${lines.take(50).join('\n    ')}${lines.size() > 50 ? '\n    and others' : ''}"
+    }
+    def aliases = RunContext.state.pedigree_aliases ?: []
+    if (aliases) {
+        def lines = aliases.collect { alias -> "${alias.family} is ${alias.as} in ${alias.cohort} (${alias.samples.join(', ')})" }
+        def n = (aliases.collect { alias -> alias.family } as Set).size()
+        log.warn "${n} ${n == 1 ? 'family' : 'families'} of ${params.cohort_name} ${n == 1 ? 'shares' : 'share'} samples with a family another cohort lists under another family ID: the same people twice, so their family-level work is done twice:\n    ${lines.take(50).join('\n    ')}${lines.size() > 50 ? '\n    and others' : ''}"
     }
     if (analysis_plan.upd.edited) {
         log.info "Families whose UPD analysis is redone for an edited pedigree, new evidence or new settings: ${analysis_plan.upd.edited.take(50).join(', ')}${analysis_plan.upd.edited.size() > 50 ? ' and others' : ''}"

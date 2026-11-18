@@ -7,6 +7,10 @@
  * sex - left the old file in place for good, and a family listed by two cohorts kept the rows of
  * whichever wrote it first. The plan now compares the two and has the file written again.
  *
+ * Unless another cohort of the data directory lists the family with other rows (conflicts):
+ * then each cohort's run would write the file, and redo the family's outputs, in turn. Such a
+ * family is held by default (main.nf, pedigree_conflicts), and its file left as it is.
+ *
  * The wombat step no longer reads the file at all. It is given the cohort's rows of the family,
  * and records them in an inputs snapshot (InputsSnapshot) beside each of its tables, so that an
  * edit of the parents or the sex rebuilds them, as it does the sampleqc and upd tables.
@@ -91,6 +95,114 @@ class FamilyPedigree {
             }
         }
         return clauses
+    }
+
+    // ------------------------------------------------------------------------------------
+    // The other cohorts of a data directory
+    // ------------------------------------------------------------------------------------
+    //
+    // The cohorts of a data directory share one families/ tree, but each has its own pedigree.
+    // A family two cohorts list with different rows would be written by each cohort's run in
+    // turn, {FID}.pedigree.tsv and every family-level output, and belong to whichever ran last.
+
+    /**
+     * The pedigrees of the data directory's other cohorts: every cohorts/<NAME>/<NAME>.pedigree.tsv
+     * but this cohort's, and but the file this cohort's run reads (ownPedigree, may be null).
+     * Hidden directories are skipped. Returns [rows: cohort -> rowsByFamily, unreadable: cohort ->
+     * why], each sorted by cohort: a pedigree that cannot be read is reported, not fatal.
+     */
+    static Map otherCohorts(String data, String cohort, String ownPedigree = null) {
+        def rows = new TreeMap<String, Map<String, List<List<String>>>>()
+        def unreadable = new TreeMap<String, String>()
+        def dirs = new File(data, 'cohorts').listFiles()?.findAll { it.isDirectory() && !it.name.startsWith('.') } ?: []
+        def own = ownPedigree ? canonical(new File(ownPedigree)) : null
+        dirs.each { File dir ->
+            if (dir.name == cohort) return
+            def file = new File(dir, "${dir.name}.pedigree.tsv")
+            if (!file.isFile() || (own != null && canonical(file) == own)) return
+            try {
+                rows[dir.name] = rowsByFamily(file.readLines('UTF-8'))
+            } catch (IllegalArgumentException | IOException e) {
+                unreadable[dir.name] = "${file.path}: ${e.message}".toString()
+            }
+        }
+        return [rows: rows, unreadable: unreadable]
+    }
+
+    private static String canonical(File file) {
+        try {
+            return file.canonicalPath
+        } catch (IOException ignored) {
+            return file.absolutePath
+        }
+    }
+
+    /**
+     * The families of this cohort (mine, as rowsByFamily) that another cohort lists with other
+     * rows once the phenotype is dropped: another father, mother, sex, member or dummy. A family
+     * whose rows differ only in the phenotype is not one: two cohorts may study one family for two
+     * different conditions. One entry per family, sorted:
+     *
+     *   [family: 'FAM01', cohorts: ['OTHER'], changes: [OTHER: ['KID: father 0 -> DAD']]]
+     *
+     * Each clause, as describe words it, reads this cohort's rows -> the other cohort's.
+     */
+    static List<Map> conflicts(Map<String, List<List<String>>> mine, Map<String, Map<String, List<List<String>>>> others) {
+        def found = []
+        (mine.keySet() as List).sort().each { fid ->
+            def ours = withoutPhenotype(mine[fid])
+            def changes = new TreeMap<String, List<String>>()
+            others.each { cohort, families ->
+                def theirs = families[fid]
+                if (theirs == null) return
+                theirs = withoutPhenotype(theirs)
+                if (theirs != ours) changes[cohort] = describe(ours, theirs)
+            }
+            if (changes) {
+                found << [family: fid, cohorts: changes.keySet() as List, changes: changes as LinkedHashMap]
+            }
+        }
+        return found
+    }
+
+    /** How the run summary words a conflict: "FAM01 differs from OTHER: KID: father 0 -> DAD" */
+    static List<String> describeConflict(Map conflict) {
+        return conflict.changes.collect { cohort, clauses ->
+            "${conflict.family} differs from ${cohort}: ${clauses.join('; ')}".toString()
+        }
+    }
+
+    /**
+     * The families of this cohort whose samples another cohort lists under another family ID:
+     * the same people twice, so their family-level work is done twice. A dummy is not a sample,
+     * so one shared by two families is not an alias. One entry per family and other cohort's
+     * family, sorted: [family: 'FAM02', cohort: 'OTHER', as: 'FAM99', samples: ['BC004']].
+     */
+    static List<Map> aliases(Map<String, List<List<String>>> mine, Map<String, Map<String, List<List<String>>>> others) {
+        // Each other cohort's sample -> its family, once
+        def familyOf = new TreeMap<String, Map<String, String>>()
+        others.each { cohort, families ->
+            def index = [:]
+            families.each { otherFid, rows ->
+                rows.each { row -> if (!DummyMember.isDummy(row[1])) index[row[1]] = otherFid }
+            }
+            familyOf[cohort] = index
+        }
+        def found = []
+        (mine.keySet() as List).sort().each { fid ->
+            def samples = mine[fid].collect { it[1] }.findAll { !DummyMember.isDummy(it) }
+            familyOf.each { cohort, index ->
+                def shared = new TreeMap<String, List<String>>()
+                samples.each { sample ->
+                    def otherFid = index[sample]
+                    if (otherFid != null && otherFid != fid) shared.computeIfAbsent(otherFid) { [] } << sample
+                }
+                shared.each { otherFid, list ->
+                    found << [family: fid, cohort: cohort, as: otherFid, samples: list.sort()]
+                }
+            }
+        }
+        return found
     }
 
     /**

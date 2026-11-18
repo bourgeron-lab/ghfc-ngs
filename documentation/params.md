@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-81 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+82 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -120,6 +120,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `old_ref_38` | `alignment`, realignment only | [Reference genomes](#reference-genomes) |
 | `oldref` ✗ | never — you want `old_ref_38` | [**Inert — does nothing**](#keys-that-look-live-but-are-inert) |
 | `pedigree` | optional — defaults to the cohort's pedigree | [Core paths and identity](#core-paths-and-identity) |
+| `pedigree_conflicts` | always | [Core paths and identity](#core-paths-and-identity) |
 | `pedigree_strict` | always | [Core paths and identity](#core-paths-and-identity) |
 | `ref` | most steps | [Reference genomes](#reference-genomes) |
 | `ref_name` 📄 | `alignment` and everything downstream | [Reference genomes](#reference-genomes) |
@@ -339,7 +340,7 @@ they should be set.
 
 ## Key reference
 
-75 keys are read by the code. In the tables below, **no default** means the key is `null` when
+76 keys are read by the code. In the tables below, **no default** means the key is `null` when
 omitted — see [the `null` trap](#keys-with-no-default-become-the-string-null). A 📄 marks a key
 whose value is **part of output filenames**.
 
@@ -353,6 +354,7 @@ whose value is **part of output filenames**.
 | `work_dir` | path | *no default* → `work` | — | Nextflow's work directory. Read at config-parse time. |
 | `pedigree` | path | *no default* → the cohort's own pedigree | rarely | Only needed for a pedigree kept outside the cohort directory. See below. |
 | `pedigree_strict` | boolean | `false` | — | Stop the run on stale family outputs instead of warning. |
+| `pedigree_conflicts` | `hold`, `fail` or `overwrite` | `hold` | — | What to do with a family another cohort of the data directory lists with other rows. See below. |
 | `clean_stale_families` | boolean | `false` | — | Delete stale family outputs so they are re-called, instead of only reporting them. See below. |
 | `steps` | list of strings | `['alignment']` | **always** | See [above](#steps-the-key-that-decides-everything-else). |
 
@@ -373,6 +375,43 @@ somewhere else. Either way the file must exist, or the run aborts naming the pat
 saying which of the two it was.
 
 The list of samples is **not** in the parameters file — it comes from the pedigree.
+
+#### `pedigree_conflicts`: a family two cohorts list differently
+
+The cohorts of a data directory share one `families/` tree, but each has its own pedigree. When
+two cohorts list the same family ID with different rows, each cohort's run would write the
+family's `{FID}.pedigree.tsv` and redo its family-level steps from its own rows, and the family's
+outputs would belong to whichever cohort ran last. So every run reads the other cohorts'
+pedigrees first — every `<data>/cohorts/<NAME>/<NAME>.pedigree.tsv` but its own, skipping hidden
+directories; one that cannot be read is warned about and left out — and compares each of its
+families with theirs.
+
+A **conflict** is a family whose rows differ once the phenotype is dropped: another father,
+mother or sex, a member or a dummy added, removed or renamed. A difference in the phenotype
+alone is not one: two cohorts may study one family for two conditions. `pedigree_conflicts` says
+what to do with a conflict:
+
+| Value | What the run does |
+|---|---|
+| `hold` (default) | Schedules none of the family's family-level steps: joint call, annotation, Wombat, ancestry and ROH family tables, WisecondorX family merge, ExpansionHunter and MELT family files, sample QC, genome QC, UPD and de novo tables, and its `{FID}.pedigree.tsv`. They are left as they are, and those on disk are read by the cohort merges as they are. Its samples' own steps still run, the extractor too. |
+| `fail` | Stops before any work, listing the conflicts. |
+| `overwrite` | Writes the family's pedigree file and redoes its family-level steps from this cohort's rows, as before this check existed — for the other cohort to redo again on its next run. |
+
+Each held family is listed in the run summary, under `PEDIGREE CONFLICTS`, one line per other
+cohort, each change reading this cohort's value, then the other cohort's:
+
+```
+FAM01 differs from OTHER_COHORT: KID01: father 0 -> DAD01
+```
+
+and recorded in the cohort's state file as `last_run.pedigree_conflicts` (see
+[COHORT_STATE.md](../COHORT_STATE.md)). To release a family, make the two pedigrees agree, or
+run the cohort whose rows are right once with `pedigree_conflicts: overwrite`. A held family's
+call is never reported as `STALE FAMILY OUTPUTS`, so `clean_stale_families` never deletes it.
+
+The run also warns about **aliases**: samples of one of its families that another cohort lists
+under another family ID (dummies aside). They are the same people twice, so their family-level
+work is done twice. That costs time but is not wrong, so nothing is held for it.
 
 #### `clean_stale_families`: repairing a drifted cohort
 
