@@ -753,7 +753,7 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   the whole family only, hence a pass of the step's own.
 - **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,flags,inputs}.tsv`:
   every sample's metrics and its members' row, its `family_id`, `library`, `dna_source`,
-  `seq_class`, `read_indels_per_kb_adj` (see `READ_INDEL_EXCESS`) and `flags`, and one row per flag (`sample, family_id, seq_class, flag, severity,
+  `seq_class`, `read_indels_per_kb_adj` (see `READ_INDEL_EXCESS`), `het_low_gq_share_adj` (see `LOW_GQ_HET_EXCESS`) and `flags`, and one row per flag (`sample, family_id, seq_class, flag, severity,
   evidence`).
 - **`seq_class`** is the read length class, `rl100` under 125 bp and `rl150` above (150 and 151 bp alike), with `_pcr` for a PCR library. Every
   outlier test is made within the class, against its median and 1.4826 × its MAD, and only when
@@ -781,7 +781,7 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   | `SHORT_INSERT` | medium | median insert size 5 scaled MADs under the class |
   | `TITV_OUTLIER` | medium | Ti/Tv 5 scaled MADs under the class |
   | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads, less the share a true heterozygote gives at the same depths (binomial at each call's depth), 5 scaled MADs over the class: heavy contamination, mosaicism. The share alone follows depth, so it flagged the lowest-depth genomes, whose low-fraction heterozygotes were inherited. Contamination of a few percent is `sampleqc`'s CHARR: its alleles are too rare in the reads to be called heterozygous |
-  | `LOW_GQ_HET_EXCESS` | medium | the share of heterozygous SNVs with GQ under 20 5 scaled MADs over the class: heterozygous calls lost to the GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5, their hets of mean GQ about 20 at 65x) |
+  | `LOW_GQ_HET_EXCESS` | medium | the share of heterozygous SNVs with GQ under 20 5 scaled MADs over the class once the genome's number of heterozygotes is accounted for: heterozygous calls lost to the GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5, their hets of mean GQ about 20 at 65x). Every genome has about as many low-GQ calls from paralogous and mismapped reads, so the share rises as the real heterozygotes get fewer: on 533 rl150 genomes it fell from PEL to PUR with the het/hom ratio, sat at -1.9 scaled MADs for African genomes at the median, and at +8.6 for a genome with 944 Mb in runs of homozygosity. The test is on `het_low_gq_share_adj`: a robust (Huber) line of `het_low_gq_share` on the inverse of the genome's heterozygotes of DP >= 10, whatever their GQ, is fitted within the class, and each sample's share is moved along it to the class's median. The African median comes to +0.1 and the runs of homozygosity to +5.1: a consanguineous genome can stay flagged, to be acknowledged. Depth is not accounted for: very deep genomes (65x) get lower GQs and can be flagged. A sample without a family table is not tested |
   | `INDEL_PROFILE_OUTLIER` | medium | the share of 1 bp indels, the share in tandem repeats and homopolymers, or the insertion/deletion ratio 5 scaled MADs away from the class, either side: a library or calling problem changes what the indels are, where ancestry mostly changes how many there are |
 
 - **What reruns.** The label is the cache for the sample tables. A family is redone when its

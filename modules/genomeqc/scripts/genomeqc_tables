@@ -95,9 +95,22 @@ Flags (column flags of samples.tsv; '.' when none). Report only: nothing is filt
         Contamination of a few percent (sampleqc's CHARR) leaves it unchanged: its alleles are
         too rare in the reads to be called heterozygous
     LOW_GQ_HET_EXCESS (medium)
-        share of heterozygous SNVs with a low GQ above the class: heterozygous calls lost to the
-        GQ filter, as in three 100 bp genomes of one family (het/hom 0.6-0.9 against about 1.5,
-        their hets of mean GQ about 20 at 65x)
+        share of heterozygous SNVs with a low GQ above the class, once the genome's number of
+        heterozygotes is accounted for: heterozygous calls lost to the GQ filter, as in three 100
+        bp genomes of one family (het/hom 0.6-0.9 against about 1.5, their hets of mean GQ about
+        20 at 65x). Every genome has low-GQ calls from paralogous and mismapped reads, about as
+        many whatever the person, so the share rises as the real heterozygotes get fewer: on 533
+        rl150 genomes it fell from PUR (het/hom 1.72) to PEL (1.40) and sat lowest in African
+        genomes (-1.9 scaled MADs at the median), and a genome with 944 Mb in runs of
+        homozygosity (het/hom 0.80) sat at +8.6. Neither leaving out its runs nor counting only
+        hets of normal depth and allele fraction brought it back, so the count is accounted for
+        instead. The test is on het_low_gq_share_adj: het_low_gq_share less what the genome's
+        heterozygotes of DP >= MIN_DP, whatever their GQ (n_snv_het / (1 - het_low_gq_share)),
+        put in it, a robust (Huber) line of the share on their inverse fitted within the class,
+        moved to the class's median. The African median comes to +0.1, the runs of homozygosity
+        to +5.1: a consanguineous genome's flag can remain, to be acknowledged. A sample without a
+        family table is not tested. Depth is not accounted for: very deep genomes (65x) get lower
+        GQs and can be flagged, and the step's own example is such a genome
     INDEL_PROFILE_OUTLIER (medium)
         share of 1 bp indels, share in tandem repeats and homopolymers, or insertion/deletion
         ratio away from the class, either side: a library or calling problem changes what the
@@ -128,8 +141,8 @@ MIN_CLASS = 20
 MAD_K = 5.0
 MIN_RELATIVE = 0.05
 MIN_DEPTH = 20.0
-# The Huber line of read_indels_per_kb on n_indel: residuals beyond HUBER_K scaled MADs are
-# down-weighted, so the outliers tested do not bend the line
+# The Huber lines (read_indels_per_kb on n_indel, het_low_gq_share on the heterozygotes): residuals
+# beyond HUBER_K scaled MADs are down-weighted, so the outliers tested do not bend the line
 HUBER_K = 1.345
 HUBER_ROUNDS = 50
 # Read length classes: rl100 below, rl150 at or above
@@ -151,12 +164,19 @@ FAMILY_COLUMNS = [
     "n_indel", "ins_del_ratio", "indel_1bp_share", "ins_over_10bp_share", "indel_tr_share",
 ]
 COHORT_COLUMNS = (["sample", "family_id", "seq_class", "library", "dna_source"] + SAMPLE_COLUMNS[1:] +
-                  FAMILY_COLUMNS[2:] + ["read_indels_per_kb_adj", "flags"])
+                  FAMILY_COLUMNS[2:] + ["read_indels_per_kb_adj", "het_low_gq_share_adj", "flags"])
+# The columns a test's evidence gives beside an adjusted value
+EVIDENCE_COLUMNS = {
+    "read_indels_per_kb_adj": ["read_indels_per_kb", "n_indel"],
+    "het_low_gq_share_adj": ["het_low_gq_share", "n_snv_het"],
+}
 FLAG_COLUMNS = ["sample", "family_id", "seq_class", "flag", "severity", "evidence"]
 
 # (column, side, flag): the tests made within a seq_class. side is 'high', 'low' or 'both'.
 # Shares and compositions only: counts follow ancestry (see the docstring). read_indels_per_kb
-# is a rate that holds the genome's own indels, so it is tested once they are taken out
+# is a rate that holds the genome's own indels, so it is tested once they are taken out, and
+# het_low_gq_share has a floor of artefacts over the genome's heterozygotes, so it is tested once
+# their number is accounted for
 CLASS_TESTS = [
     ("chr20_depth", "low", "LOW_DEPTH"),
     ("duplicate_share", "high", "HIGH_DUPLICATES"),
@@ -165,7 +185,7 @@ CLASS_TESTS = [
     ("insert_median", "low", "SHORT_INSERT"),
     ("ti_tv", "low", "TITV_OUTLIER"),
     ("low_vaf_het_excess", "high", "LOW_VAF_HET_EXCESS"),
-    ("het_low_gq_share", "high", "LOW_GQ_HET_EXCESS"),
+    ("het_low_gq_share_adj", "high", "LOW_GQ_HET_EXCESS"),
     ("indel_1bp_share", "both", "INDEL_PROFILE_OUTLIER"),
     ("indel_tr_share", "both", "INDEL_PROFILE_OUTLIER"),
     ("ins_del_ratio", "both", "INDEL_PROFILE_OUTLIER"),
@@ -518,24 +538,45 @@ def huber_line(points):
     return line
 
 
-def adjust_read_indels(rows):
-    """read_indels_per_kb_adj of every row: its read_indels_per_kb less what its own indels
-    (n_indel) put in it beyond the class's median n_indel, from a Huber line fitted within the
-    seq_class. '.' for a sample without n_indel or in a class of under MIN_CLASS such samples."""
+def adjust_along_line(rows, column, x_of, out):
+    """Sets out on every row: its column less what x_of(row) puts in it beyond the class's median
+    x, from a Huber line fitted within the seq_class. A slope under 0 is taken as 0: each x adds to
+    its column, never takes away. Left unset ('.') for a row without either value or in a class of
+    under MIN_CLASS such rows."""
     by_class = {}
     for r in rows:
-        y, x = as_float(r.get("read_indels_per_kb")), as_float(r.get("n_indel"))
+        y, x = as_float(r.get(column)), x_of(r)
         if x is not None and y is not None:
             by_class.setdefault(r["seq_class"], []).append((r, x, y))
     for members in by_class.values():
         if len(members) < MIN_CLASS:
             continue
         line = huber_line([(x, y) for _, x, y in members])
-        # A genome's own indels cannot lower its reads' indels: a slope under 0 is noise
         slope = max(line[1], 0.0) if line else 0.0
         mid = statistics.median(x for _, x, _ in members)
         for r, x, y in members:
-            r["read_indels_per_kb_adj"] = y - slope * (x - mid)
+            r[out] = y - slope * (x - mid)
+
+
+def adjust_read_indels(rows):
+    """read_indels_per_kb_adj: the reads' indels less what the genome's own indels (n_indel) put
+    in them, at the class's median n_indel."""
+    adjust_along_line(rows, "read_indels_per_kb", lambda r: as_float(r.get("n_indel")), "read_indels_per_kb_adj")
+
+
+def inverse_hets(row):
+    """1e6 over the heterozygous SNVs of DP >= MIN_DP whatever their GQ, n_snv_het (GQ >= MIN_GQ)
+    over 1 - het_low_gq_share, or None. Low-GQ artefacts make a share of about a / hets."""
+    het, share = as_float(row.get("n_snv_het")), as_float(row.get("het_low_gq_share"))
+    if het is None or share is None or het <= 0 or share >= 1:
+        return None
+    return 1e6 * (1 - share) / het
+
+
+def adjust_low_gq(rows):
+    """het_low_gq_share_adj: the low-GQ share less what the genome's number of heterozygotes puts
+    in it, at the class's median."""
+    adjust_along_line(rows, "het_low_gq_share", inverse_hets, "het_low_gq_share_adj")
 
 
 def class_flags(rows):
@@ -562,8 +603,8 @@ def class_flags(rows):
                     continue
                 if (side == "high" and z >= MAD_K) or (side == "low" and z <= -MAD_K) or \
                         (side == "both" and abs(z) >= MAD_K):
-                    raw = (f" (read_indels_per_kb {fmt(as_float(r.get('read_indels_per_kb')))}, n_indel "
-                           f"{r.get('n_indel')})" if column == "read_indels_per_kb_adj" else "")
+                    extra = EVIDENCE_COLUMNS.get(column, [])
+                    raw = (" (" + ", ".join(f"{c} {r.get(c) or '.'}" for c in extra) + ")") if extra else ""
                     out.append((r["sample"], flag,
                                 f"{column} {fmt(v)}{raw} against a {cls} median of {fmt(med)} ({z:+.1f} scaled "
                                 f"MADs, {len(values)} samples)"))
@@ -610,6 +651,7 @@ def cmd_cohort(args):
         row["seq_class"] = seq_class(row)
         rows.append(row)
     adjust_read_indels(rows)
+    adjust_low_gq(rows)
 
     flags = {r["sample"]: [] for r in rows}
     for r in rows:

@@ -16,7 +16,9 @@
 #     within-class outlier on 25 rl150 samples (151 bp reads), none in a class under 20 (rl100),
 #     none under 5% of the median however many MADs, '_pcr' added to the class of a PCR library,
 #     and the family of a sample from the pedigree; on the family columns, INDEL_PROFILE_OUTLIER
-#     LOW_GQ_HET_EXCESS and LOW_VAF_HET_EXCESS (on the excess: a high share that its depths
+#     LOW_GQ_HET_EXCESS (on het_low_gq_share_adj: a share that the genome's few heterozygotes raise,
+#     as long runs of homozygosity do, brought back to the class's median and not flagged; '.'
+#     without a family table) and LOW_VAF_HET_EXCESS (on the excess: a high share that its depths
 #     account for is not flagged), two reasons kept in one flag, and no flag for a sample with the
 #     counts of African ancestry (22% more SNVs and indels, a higher het/hom), since counts are
 #     never tested, nor READ_INDEL_EXCESS for the reads' indels its own indels add: the test is on
@@ -196,21 +198,31 @@ for s in samples:
         fh.write("\t".join(cols) + "\n" + "\t".join(s[c] for c in cols) + "\n")
     paths.append(path)
 # Family rows of the A samples but A00 (whose family comes from the pedigree)
-fcols = ["family_id", "sample", "n_snv", "n_indel", "het_hom_ratio", "ti_tv", "het_low_gq_share",
+fcols = ["family_id", "sample", "n_snv", "n_snv_het", "n_indel", "het_hom_ratio", "ti_tv", "het_low_gq_share",
          "indel_1bp_share", "indel_tr_share", "ins_del_ratio", "low_vaf_het_share", "low_vaf_het_expected",
          "low_vaf_het_excess"]
+# Low-GQ shares as on real genomes: a floor of 25,000 artefact calls over the heterozygotes of DP >=
+# 10 (whatever their GQ), above 4% of the real ones. n_snv_het counts those of GQ >= 20
+def low_gq(het_dp, noise=0.0):
+    share = 0.04 + 25000 / het_dp + noise
+    return dict(het_low_gq_share=f"{share:.4f}", n_snv_het=str(round(het_dp * (1 - share))))
+
+
 frows = []
 for i in range(1, 25):
     frows.append(dict(family_id="FAMA", sample=f"A{i:02d}", n_snv="3530000", n_indel=str(n_indel(i)), het_hom_ratio="1.50",
-                      ti_tv=f"{2.06 + 0.001 * (i % 5):.3f}", het_low_gq_share=f"{0.10 + 0.002 * (i % 5):.3f}",
+                      ti_tv=f"{2.06 + 0.001 * (i % 5):.3f}",
+                      **low_gq(2100000 + 50000 * (i % 5), 0.0002 * ((i // 5) % 5 - 2)),
                       indel_1bp_share=f"{0.53 + 0.001 * (i % 5):.3f}", indel_tr_share=f"{0.66 + 0.001 * (i % 5):.3f}",
                       ins_del_ratio=f"{0.94 + 0.001 * (i % 5):.3f}",
                       low_vaf_het_share=f"{0.0076 + 0.0002 * (i % 5):.4f}",
                       low_vaf_het_expected=f"{0.0072 + 0.0002 * (i % 5):.4f}",
                       low_vaf_het_excess=f"{0.0004 + 0.0001 * (i % 5):.4f}"))
-frows[8].update(n_snv="4310000", n_indel="720000", het_hom_ratio="2.00")    # A09: African-like counts
+frows[8].update(n_snv="4310000", n_indel="720000", het_hom_ratio="2.00",
+                **low_gq(2900000))                                          # A09: African-like counts
 frows[9]["indel_1bp_share"] = "0.65"                                        # A10
 frows[10]["het_low_gq_share"] = "0.30"                                      # A11
+frows[15].update(het_hom_ratio="0.80", **low_gq(1500000))                  # A16: long runs of homozygosity
 frows[11].update(indel_1bp_share="0.66", indel_tr_share="0.80")            # A12: two reasons
 frows[12].update(low_vaf_het_share="0.0198", low_vaf_het_expected="0.0195",
                  low_vaf_het_excess="0.0003")                               # A13: low depth, no excess
@@ -240,6 +252,13 @@ check("READ_INDEL_EXCESS beyond the genome's own indels", out["A15"]["flags"], "
 check("no adjusted reads' indels without n_indel", out["A00"]["read_indels_per_kb_adj"], ".")
 check("INDEL_PROFILE_OUTLIER", out["A10"]["flags"], "INDEL_PROFILE_OUTLIER")
 check("LOW_GQ_HET_EXCESS", out["A11"]["flags"], "LOW_GQ_HET_EXCESS")
+gq_evidence = [r["evidence"] for r in rows("C.flags.tsv") if (r["sample"], r["flag"]) == ("A11", "LOW_GQ_HET_EXCESS")]
+check("LOW_GQ_HET_EXCESS evidence gives the raw share and the heterozygotes",
+      bool(gq_evidence) and "(het_low_gq_share 0.30, n_snv_het " in gq_evidence[0], True)
+check("few heterozygotes raise the low-GQ share", float(out["A16"]["het_low_gq_share"]) > 0.056, True)
+check("... brought back to the class's median", out["A16"]["het_low_gq_share_adj"], 0.0514, tol=0.001)
+check("no LOW_GQ_HET_EXCESS for a share its few heterozygotes account for", out["A16"]["flags"], ".")
+check("no adjusted low-GQ share without a family table", out["A00"]["het_low_gq_share_adj"], ".")
 check("no LOW_VAF_HET_EXCESS when the depths account for the share", out["A13"]["flags"], ".")
 check("LOW_VAF_HET_EXCESS", out["A14"]["flags"], "LOW_VAF_HET_EXCESS")
 reasons = [r["evidence"] for r in rows("C.flags.tsv") if r["sample"] == "A12"]
