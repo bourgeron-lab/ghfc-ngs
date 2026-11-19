@@ -19,7 +19,9 @@
 #     LOW_GQ_HET_EXCESS and LOW_VAF_HET_EXCESS (on the excess: a high share that its depths
 #     account for is not flagged), two reasons kept in one flag, and no flag for a sample with the
 #     counts of African ancestry (22% more SNVs and indels, a higher het/hom), since counts are
-#     never tested.
+#     never tested, nor READ_INDEL_EXCESS for the reads' indels its own indels add: the test is on
+#     read_indels_per_kb_adj, brought back to the class's median n_indel, which flags an excess
+#     beyond them and is '.' without n_indel.
 
 set -euo pipefail
 
@@ -161,15 +163,28 @@ check("C low-GQ het share (its DP 5 het left out)", fam["C"]["het_low_gq_share"]
 cols = ["sample", "read_length", "chr20_depth", "ebv_copies_per_cell", "ebv_reads", "duplicate_share",
         "error_rate", "read_indels_per_kb", "insert_median"]
 samples = []
+
+
+def n_indel(i):
+    return 580000 + 5000 * (i % 5)
+
+
+# Reads' indels that rise with the genome's own indels, 2.5e-7 per kb per indel, as on real genomes
+def read_indels(n, i):
+    return f"{0.28 + 2.5e-7 * (n - 590000) + 0.0005 * ((7 * i) % 5 - 2):.5f}"
+
+
 for i in range(25):
     samples.append(dict(sample=f"A{i:02d}", read_length="151", chr20_depth=f"{35 + i % 5}",
                         ebv_copies_per_cell="0.001", ebv_reads="10", duplicate_share=f"{0.10 + 0.002 * (i % 5)}",
-                        error_rate=f"{0.0070 + 0.00001 * (i % 5):.5f}", read_indels_per_kb="0.1",
+                        error_rate=f"{0.0070 + 0.00001 * (i % 5):.5f}", read_indels_per_kb=read_indels(n_indel(i), i),
                         insert_median="350"))
 samples[3]["duplicate_share"] = "0.40"          # an outlier of its class
 samples[8]["error_rate"] = "0.00715"            # many MADs away, but 2% of the median: no flag
 samples[4]["ebv_copies_per_cell"] = "50.0"      # a cell line
 samples[5]["ebv_copies_per_cell"] = "0.05"      # a trace
+samples[9]["read_indels_per_kb"] = read_indels(720000, 9)   # A09: African-like, its own indels raise it
+samples[15]["read_indels_per_kb"] = "0.40"      # A15: a slippage excess
 for i in range(5):                               # a class too small for outliers
     samples.append(dict(sample=f"B{i}", read_length="100", chr20_depth="50", ebv_copies_per_cell="0.001",
                         ebv_reads="10", duplicate_share="0.9" if i == 0 else "0.05", error_rate="0.007",
@@ -186,7 +201,7 @@ fcols = ["family_id", "sample", "n_snv", "n_indel", "het_hom_ratio", "ti_tv", "h
          "low_vaf_het_excess"]
 frows = []
 for i in range(1, 25):
-    frows.append(dict(family_id="FAMA", sample=f"A{i:02d}", n_snv="3530000", n_indel="590000", het_hom_ratio="1.50",
+    frows.append(dict(family_id="FAMA", sample=f"A{i:02d}", n_snv="3530000", n_indel=str(n_indel(i)), het_hom_ratio="1.50",
                       ti_tv=f"{2.06 + 0.001 * (i % 5):.3f}", het_low_gq_share=f"{0.10 + 0.002 * (i % 5):.3f}",
                       indel_1bp_share=f"{0.53 + 0.001 * (i % 5):.3f}", indel_tr_share=f"{0.66 + 0.001 * (i % 5):.3f}",
                       ins_del_ratio=f"{0.94 + 0.001 * (i % 5):.3f}",
@@ -219,6 +234,10 @@ check("EBV_TRACE", ("A05", "EBV_TRACE") in flags, True)
 check("no flag on a clean sample", out["A01"]["flags"], ".")
 check("no flag under 5% of the median", out["A08"]["flags"], ".")
 check("no flag for African-like counts", out["A09"]["flags"], ".")
+check("African-like reads' indels, raised by its own indels", float(out["A09"]["read_indels_per_kb"]) > 0.31, True)
+check("... brought back to the class's median n_indel", out["A09"]["read_indels_per_kb_adj"], 0.28, tol=0.003)
+check("READ_INDEL_EXCESS beyond the genome's own indels", out["A15"]["flags"], "READ_INDEL_EXCESS")
+check("no adjusted reads' indels without n_indel", out["A00"]["read_indels_per_kb_adj"], ".")
 check("INDEL_PROFILE_OUTLIER", out["A10"]["flags"], "INDEL_PROFILE_OUTLIER")
 check("LOW_GQ_HET_EXCESS", out["A11"]["flags"], "LOW_GQ_HET_EXCESS")
 check("no LOW_VAF_HET_EXCESS when the depths account for the share", out["A13"]["flags"], ".")

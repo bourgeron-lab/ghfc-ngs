@@ -753,7 +753,7 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   the whole family only, hence a pass of the step's own.
 - **Per cohort:** `cohorts/<cohort_name>/qc/<cohort_name>.<label>.{samples,flags,inputs}.tsv`:
   every sample's metrics and its members' row, its `family_id`, `library`, `dna_source`,
-  `seq_class` and `flags`, and one row per flag (`sample, family_id, seq_class, flag, severity,
+  `seq_class`, `read_indels_per_kb_adj` (see `READ_INDEL_EXCESS`) and `flags`, and one row per flag (`sample, family_id, seq_class, flag, severity,
   evidence`).
 - **`seq_class`** is the read length class, `rl100` under 125 bp and `rl150` above (150 and 151 bp alike), with `_pcr` for a PCR library. Every
   outlier test is made within the class, against its median and 1.4826 × its MAD, and only when
@@ -766,7 +766,9 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   indels than European ones (1000 Genomes phase 3, Table 1), and a class's median is its majority
   ancestry's, so a count test would flag African-ancestry samples for their ancestry. They also
   follow consanguinity and depth. The tests are on shares and compositions instead: indel sizes
-  and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv.
+  and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv. The indels in the reads'
+  alignments hold the genome's own indels, so they are tested once those are taken out
+  (`READ_INDEL_EXCESS`).
 - **Flags.**
 
   | Flag | Severity | Raised when |
@@ -774,7 +776,8 @@ hundreds of extra de novo calls, and culture can make CNVs and isodisomies of it
   | `CELL_LINE` | high | 1 EBV genome per cell or more, or a `dna_source` of `cell_line`: DNA from an EBV-transformed cell line. Its de novo calls, UPD isodisomies and CNVs need confirmation on primary DNA. Measured on one cohort: blood under 0.002, cell lines 10-150 |
   | `EBV_TRACE` | low | 0.01 to 1 EBV genome per cell: EBV in blood or saliva, or a trace of cell-line DNA |
   | `LOW_DEPTH` | medium | chr20 depth under 20, or 5 scaled MADs under the class |
-  | `HIGH_DUPLICATES`, `HIGH_ERROR_RATE`, `READ_INDEL_EXCESS` | medium | duplicates, mismatch rate, indels in the alignments 5 scaled MADs over the class. No fixed duplicate ceiling: 151 bp genomes run 10-15% on chr20 |
+  | `HIGH_DUPLICATES`, `HIGH_ERROR_RATE` | medium | duplicates, mismatch rate 5 scaled MADs over the class. No fixed duplicate ceiling: 151 bp genomes run 10-15% on chr20 |
+  | `READ_INDEL_EXCESS` | medium | indels in the reads' alignments 5 scaled MADs over the class once the genome's own indels are accounted for: a PCR or damaged library. `read_indels_per_kb` counts the person's germline indels as well as polymerase slippage, so it follows ancestry: on 586 rl150 genomes the African ones sat +2.7 scaled MADs over the class at the median, and the only three flags were African genomes with a normal mismatch rate. The test is on `read_indels_per_kb_adj`: a robust (Huber) line of `read_indels_per_kb` on `n_indel` is fitted within the class, and each sample's value is moved along it to the class's median `n_indel`. The African median falls to +0.7, none flagged. A sample without a family table (no `n_indel`) is not tested |
   | `SHORT_INSERT` | medium | median insert size 5 scaled MADs under the class |
   | `TITV_OUTLIER` | medium | Ti/Tv 5 scaled MADs under the class |
   | `LOW_VAF_HET_EXCESS` | medium | the share of heterozygotes under 0.3 of the reads, less the share a true heterozygote gives at the same depths (binomial at each call's depth), 5 scaled MADs over the class: heavy contamination, mosaicism. The share alone follows depth, so it flagged the lowest-depth genomes, whose low-fraction heterozygotes were inherited. Contamination of a few percent is `sampleqc`'s CHARR: its alleles are too rare in the reads to be called heterozygous |

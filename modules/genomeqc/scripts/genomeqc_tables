@@ -50,7 +50,9 @@ cohort
     private SNVs follow ancestry (African genomes carry about 22% more SNP sites and 14% more
     indels than European ones, 1000 Genomes phase 3, Table 1), consanguinity and depth, and a
     cohort's median is its majority ancestry's. The tests are on shares and compositions, which
-    do not: indel sizes and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv.
+    do not: indel sizes and repeat context, low-GQ and low-fraction heterozygotes, Ti/Tv. The
+    indels in the reads' alignments hold the genome's own indels, so they are tested once those
+    are taken out (READ_INDEL_EXCESS below).
 
     The sample information table (--sample-info, optional) is a TSV with a 'sample' column and
     any of 'library' (pcr, pcr_free) and 'dna_source' (blood, saliva, cell_line, ...); empty or
@@ -70,10 +72,19 @@ Flags (column flags of samples.tsv; '.' when none). Report only: nothing is filt
     HIGH_DUPLICATES (medium)
         duplicate share MAD_K scaled MADs above its class. No fixed ceiling: the 151 bp genomes
         run 10-15% on chr20, as samblaster marks them
-    HIGH_ERROR_RATE, READ_INDEL_EXCESS, SHORT_INSERT (medium)
-        mismatch rate, indels in the reads' alignments, median insert size: MAD_K scaled MADs
-        above (below for the insert) the class. READ_INDEL_EXCESS points to a PCR or damaged
-        library
+    HIGH_ERROR_RATE, SHORT_INSERT (medium)
+        mismatch rate, median insert size: MAD_K scaled MADs above (below for the insert) the
+        class
+    READ_INDEL_EXCESS (medium)
+        indels in the reads' alignments above the class, once the genome's own indels are
+        accounted for: a PCR or damaged library. read_indels_per_kb counts the person's germline
+        indels as well as polymerase slippage, and most of it is germline, so it follows
+        ancestry: on 586 rl150 genomes, African ones sat +2.7 scaled MADs above the class at the
+        median, and the only three flags were African genomes with a normal mismatch rate. The
+        test is on read_indels_per_kb_adj: read_indels_per_kb less the share of n_indel in it,
+        a robust (Huber) line of read_indels_per_kb on n_indel fitted within the class, moved to
+        the class's median n_indel. The African median falls to +0.7 and none is flagged. A
+        sample without a family table (no n_indel) is not tested
     TITV_OUTLIER (medium)
         Ti/Tv below the class
     LOW_VAF_HET_EXCESS (medium)
@@ -117,6 +128,10 @@ MIN_CLASS = 20
 MAD_K = 5.0
 MIN_RELATIVE = 0.05
 MIN_DEPTH = 20.0
+# The Huber line of read_indels_per_kb on n_indel: residuals beyond HUBER_K scaled MADs are
+# down-weighted, so the outliers tested do not bend the line
+HUBER_K = 1.345
+HUBER_ROUNDS = 50
 # Read length classes: rl100 below, rl150 at or above
 SHORT_READS = 125
 
@@ -136,16 +151,17 @@ FAMILY_COLUMNS = [
     "n_indel", "ins_del_ratio", "indel_1bp_share", "ins_over_10bp_share", "indel_tr_share",
 ]
 COHORT_COLUMNS = (["sample", "family_id", "seq_class", "library", "dna_source"] + SAMPLE_COLUMNS[1:] +
-                  FAMILY_COLUMNS[2:] + ["flags"])
+                  FAMILY_COLUMNS[2:] + ["read_indels_per_kb_adj", "flags"])
 FLAG_COLUMNS = ["sample", "family_id", "seq_class", "flag", "severity", "evidence"]
 
 # (column, side, flag): the tests made within a seq_class. side is 'high', 'low' or 'both'.
-# Shares and compositions only: counts follow ancestry (see the docstring)
+# Shares and compositions only: counts follow ancestry (see the docstring). read_indels_per_kb
+# is a rate that holds the genome's own indels, so it is tested once they are taken out
 CLASS_TESTS = [
     ("chr20_depth", "low", "LOW_DEPTH"),
     ("duplicate_share", "high", "HIGH_DUPLICATES"),
     ("error_rate", "high", "HIGH_ERROR_RATE"),
-    ("read_indels_per_kb", "high", "READ_INDEL_EXCESS"),
+    ("read_indels_per_kb_adj", "high", "READ_INDEL_EXCESS"),
     ("insert_median", "low", "SHORT_INSERT"),
     ("ti_tv", "low", "TITV_OUTLIER"),
     ("low_vaf_het_excess", "high", "LOW_VAF_HET_EXCESS"),
@@ -478,6 +494,50 @@ def read_sample_info(path):
     return info
 
 
+def huber_line(points):
+    """Intercept and slope of a robust line through (x, y) points: least squares reweighted so
+    that a residual beyond HUBER_K scaled MADs counts as if it were HUBER_K. None when x does not
+    vary."""
+    weights = [1.0] * len(points)
+    line = None
+    for _ in range(HUBER_ROUNDS):
+        sw = sum(weights)
+        mx = sum(w * x for w, (x, _) in zip(weights, points)) / sw
+        my = sum(w * y for w, (_, y) in zip(weights, points)) / sw
+        sxx = sum(w * (x - mx) ** 2 for w, (x, _) in zip(weights, points))
+        if sxx <= 0:
+            return None
+        slope = sum(w * (x - mx) * (y - my) for w, (x, y) in zip(weights, points)) / sxx
+        line = (my - slope * mx, slope)
+        residuals = [y - line[0] - line[1] * x for x, y in points]
+        med = statistics.median(residuals)
+        scale = 1.4826 * statistics.median(abs(r - med) for r in residuals)
+        if scale <= 0:
+            return line
+        weights = [1.0 if abs(r) <= HUBER_K * scale else HUBER_K * scale / abs(r) for r in residuals]
+    return line
+
+
+def adjust_read_indels(rows):
+    """read_indels_per_kb_adj of every row: its read_indels_per_kb less what its own indels
+    (n_indel) put in it beyond the class's median n_indel, from a Huber line fitted within the
+    seq_class. '.' for a sample without n_indel or in a class of under MIN_CLASS such samples."""
+    by_class = {}
+    for r in rows:
+        y, x = as_float(r.get("read_indels_per_kb")), as_float(r.get("n_indel"))
+        if x is not None and y is not None:
+            by_class.setdefault(r["seq_class"], []).append((r, x, y))
+    for members in by_class.values():
+        if len(members) < MIN_CLASS:
+            continue
+        line = huber_line([(x, y) for _, x, y in members])
+        # A genome's own indels cannot lower its reads' indels: a slope under 0 is noise
+        slope = max(line[1], 0.0) if line else 0.0
+        mid = statistics.median(x for _, x, _ in members)
+        for r, x, y in members:
+            r["read_indels_per_kb_adj"] = y - slope * (x - mid)
+
+
 def class_flags(rows):
     """Robust outliers within each seq_class: (sample, flag, evidence) triples."""
     out = []
@@ -502,9 +562,11 @@ def class_flags(rows):
                     continue
                 if (side == "high" and z >= MAD_K) or (side == "low" and z <= -MAD_K) or \
                         (side == "both" and abs(z) >= MAD_K):
+                    raw = (f" (read_indels_per_kb {fmt(as_float(r.get('read_indels_per_kb')))}, n_indel "
+                           f"{r.get('n_indel')})" if column == "read_indels_per_kb_adj" else "")
                     out.append((r["sample"], flag,
-                                f"{column} {fmt(v)} against a {cls} median of {fmt(med)} ({z:+.1f} scaled MADs, "
-                                f"{len(values)} samples)"))
+                                f"{column} {fmt(v)}{raw} against a {cls} median of {fmt(med)} ({z:+.1f} scaled "
+                                f"MADs, {len(values)} samples)"))
     return out
 
 
@@ -547,6 +609,7 @@ def cmd_cohort(args):
         row["family_id"] = (fam or {}).get("family_id") or family_of.get(sample)
         row["seq_class"] = seq_class(row)
         rows.append(row)
+    adjust_read_indels(rows)
 
     flags = {r["sample"]: [] for r in rows}
     for r in rows:
