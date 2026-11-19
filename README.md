@@ -1237,7 +1237,7 @@ Paths use `${G}` as shorthand for `${genomeqc_label}`. Missing values are `.`. F
 
 - **Sample metrics**: `${data}/samples/{S1}/{S2}/${barcode}/qc/genomeqc/${barcode}.${G}.tsv` - one row: `sample read_length mean_read_length chr20_reads chr20_depth ebv_reads ebv_copies_per_cell chrm_reads mt_copies_per_cell duplicate_share mapq0_share properly_paired_share error_rate mean_base_quality insert_median insert_mad read_indels_per_kb`, and `${barcode}.${G}.stats.txt`, `samtools stats` of chr20
 - **Family variants**: `${data}/families/{S1}/{S2}/${FID}/qc/${FID}.${G}.variants.tsv` - one row per member in the BCF: `family_id sample n_snv n_snv_het n_snv_hom het_hom_ratio ti_tv private_snvs low_vaf_het_share low_vaf_het_expected low_vaf_het_excess het_low_gq_share n_indel ins_del_ratio indel_1bp_share ins_over_10bp_share indel_tr_share`, and `${FID}.${G}.inputs.tsv` beside it
-- **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${G}.samples.tsv` - one row per sample: `sample family_id seq_class library dna_source`, the sample metrics, the member's variants and `flags`; `${cohort_name}.${G}.flags.tsv` - `sample family_id seq_class flag severity evidence`
+- **Cohort tables**: `${data}/cohorts/${cohort_name}/qc/${cohort_name}.${G}.samples.tsv` - one row per sample: `sample family_id seq_class library dna_source`, the sample metrics, the member's variants, `read_indels_per_kb_adj` (the reads' indels at the class's median `n_indel`, which `READ_INDEL_EXCESS` tests) and `flags`; `${cohort_name}.${G}.flags.tsv` - `sample family_id seq_class flag severity evidence`
 
 ### UPD Outputs
 
