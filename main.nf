@@ -39,9 +39,9 @@ include { GENOMEQC } from './workflows/genomeqc'
     was last run, whether it finished, which pedigree and parameters produced its outputs,
     and how complete each step is. See COHORT_STATE.md for the schema.
 
-    The mechanics (checksums, atomic write, history) live in lib/CohortState.groovy, which
-    has no Nextflow dependency and is unit testable on its own. What a "step" is, and all
-    logging, stays here.
+    The mechanics (checksums, atomic write, history, the per-step record) live in
+    lib/CohortState.groovy, which has no Nextflow dependency and is unit testable on its own.
+    What a "step" is, and all logging, stays here.
 */
 
 // What the run has learnt so far is kept in RunContext.state (lib/RunContext.groovy), where
