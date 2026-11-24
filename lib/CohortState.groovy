@@ -27,7 +27,14 @@ class CohortState {
 
     /** Key order in the written file, which is also the order a human wants to read it in. */
     private static final List TOP_LEVEL_KEYS =
-        ['schema_version', 'cohort_name', 'last_run', 'last_successful_run', 'history']
+        ['schema_version', 'cohort_name', 'last_run', 'last_successful_run', 'last_run_by_step', 'history']
+
+    /** Top-level key of the per-step record: for each step, the last runs that requested it. */
+    static final String BY_STEP = 'last_run_by_step'
+
+    /** What a per-step entry keeps of a run record: enough to date it, check it and read its step. */
+    private static final List STEP_ENTRY_KEYS =
+        ['run_id', 'status', 'started_at', 'finished_at', 'completion_measured', 'outputs_may_be_incomplete']
 
     // ------------------------------------------------------------------------------------
     // Checksums
@@ -120,6 +127,13 @@ class CohortState {
 
         state.schema_version = SCHEMA_VERSION
         if (record?.cohort_name) state.cohort_name = record.cohort_name
+
+        // A file written before the per-step record gets it from what it already holds, so
+        // the first run after the upgrade does not leave every step it skipped unrecorded.
+        def byStep = (state[BY_STEP] instanceof Map) ? copyByStep((Map) state[BY_STEP]) : seedByStep(state)
+        foldIntoByStep(byStep, record)
+        if (byStep) state[BY_STEP] = byStep
+
         state.last_run = record
 
         if (record?.status == 'success') {
@@ -140,6 +154,65 @@ class CohortState {
             : history
 
         return reorder(state)
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Per-step record
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * The steps a record speaks for: those it requested *and* planned. A validation failure
+     * has no completion block and did nothing, so it speaks for none; a name outside the
+     * completion block (`bogus`) is not a step.
+     */
+    static List stepsOf(Map record) {
+        if (!(record instanceof Map) || !(record.completion instanceof Map)) return []
+        if (!(record.status in ['success', 'failed'])) return []
+        def requested = (record.steps_requested instanceof List) ? (List) record.steps_requested : []
+        def planned = ((Map) record.completion).keySet()
+        return requested.findAll { it instanceof String && planned.contains(it) }.unique()
+    }
+
+    /** One step's entry for a record: the record's dates, checksums and that step's completion. */
+    static Map stepEntry(Map record, String step) {
+        def entry = [:]
+        STEP_ENTRY_KEYS.each { key -> if (record.containsKey(key)) entry[key] = record[key] }
+        entry.pedigree_sha256 = (record.pedigree instanceof Map) ? record.pedigree.sha256 : null
+        entry.params_sha256 = (record.params_file instanceof Map) ? record.params_file.sha256 : null
+        entry.completion = ((Map) record.completion)[step]
+        return entry
+    }
+
+    /**
+     * Record a terminal run under every step it speaks for: always as that step's `last`, and
+     * as its `last_success` when it succeeded. A run that skipped a step leaves its entry be.
+     */
+    static void foldIntoByStep(Map byStep, Map record) {
+        stepsOf(record).each { step ->
+            def slot = byStep[step] instanceof Map ? new LinkedHashMap((Map) byStep[step]) : [:]
+            def entry = stepEntry(record, (String) step)
+            slot.last = entry
+            if (record.status == 'success') slot.last_success = entry
+            byStep[step] = [last: slot.last, last_success: slot.last_success].findAll { it.value != null }
+        }
+    }
+
+    /** The per-step record rebuilt from a file that has none: the last success, then history. */
+    private static Map seedByStep(Map state) {
+        def byStep = [:]
+        def history = (state.history instanceof List) ? ((List) state.history).findAll { it instanceof Map } : []
+        def success = state.last_successful_run
+        if (success instanceof Map && !history.any { it.run_id == success.run_id }) {
+            foldIntoByStep(byStep, (Map) success)
+        }
+        history.reverse().each { foldIntoByStep(byStep, (Map) it) }  // oldest first
+        return new TreeMap(byStep)
+    }
+
+    private static Map copyByStep(Map byStep) {
+        def copy = new TreeMap()
+        byStep.each { step, slot -> copy[step] = (slot instanceof Map) ? new LinkedHashMap((Map) slot) : slot }
+        return copy
     }
 
     /**

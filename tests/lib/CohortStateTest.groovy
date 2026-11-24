@@ -61,4 +61,78 @@ Check.that('a missing or corrupt state file reads as empty') {
     finally { dir.toFile().deleteDir() }
 }
 
+// --- last_run_by_step ---------------------------------------------------------------------
+
+ALL = ['alignment', 'wombat', 'sampleqc', 'genomeqc', 'roh', 'extractor']
+def planned(String id, String status, List steps, Map extra = [:]) {
+    def completion = ALL.collectEntries { s -> [(s): s in steps && s != 'extractor' ? CohortState.progress(5, 10) : null] }
+    run(id, status, [steps_requested: steps, completion: completion, started_at: "t-${id}".toString(),
+                     pedigree: [sha256: "ped-${id}".toString()],
+                     params_file: [path: 'p.yml', sha256: "par-${id}".toString()]] + extra)
+}
+
+Check.that('a QC-only run after a full one leaves every other step its own entry') {
+    def s = CohortState.merge([:], planned('r1', 'success', ['alignment', 'wombat', 'sampleqc', 'genomeqc']))
+    s = CohortState.merge(s, planned('r2', 'success', ['sampleqc', 'genomeqc']))
+    def by = s[CohortState.BY_STEP]
+    assert by.keySet().toList() == ['alignment', 'genomeqc', 'sampleqc', 'wombat']
+    assert by.alignment.last.run_id == 'r1' && by.wombat.last_success.run_id == 'r1'
+    assert by.sampleqc.last.run_id == 'r2' && by.genomeqc.last_success.run_id == 'r2'
+    assert by.wombat.last == [run_id: 'r1', status: 'success', started_at: 't-r1', pedigree_sha256: 'ped-r1',
+                              params_sha256: 'par-r1', completion: [done: 5, total: 10, pct: 50.0d]]
+    assert s.keySet().toList() == ['schema_version', 'cohort_name', 'last_run', 'last_successful_run',
+                                   'last_run_by_step', 'history']
+}
+Check.that('a failed run is a step\'s last run, never its last success') {
+    def s = CohortState.merge([:], planned('r1', 'success', ['roh']))
+    s = CohortState.merge(s, planned('r2', 'failed', ['roh'], [outputs_may_be_incomplete: true]))
+    def roh = s[CohortState.BY_STEP].roh
+    assert roh.last.run_id == 'r2' && roh.last.outputs_may_be_incomplete == true
+    assert roh.last_success.run_id == 'r1'
+}
+Check.that('a running record, an interruption and a validation failure record nothing') {
+    def s = CohortState.merge([:], planned('r1', 'success', ['roh']))
+    def before = s[CohortState.BY_STEP]
+    s = CohortState.merge(s, planned('r2', 'running', ['roh']))
+    s = CohortState.merge(s, planned('r3', 'running', ['roh']))   // r2 is filed as interrupted
+    s = CohortState.merge(s, run('r4', 'failed', [steps_requested: ['roh', 'bogus'], completion: null]))
+    assert s.history*.status.contains('interrupted')
+    assert s[CohortState.BY_STEP] == before && before.roh.last.run_id == 'r1'
+}
+Check.that('only requested steps with a completion block count; extractor, never measured, is kept') {
+    def by = CohortState.merge([:], planned('r1', 'success', ['roh', 'extractor', 'bogus']))[CohortState.BY_STEP]
+    assert by.keySet().toList() == ['extractor', 'roh']
+    assert by.extractor.last.completion == null && by.extractor.last.run_id == 'r1'
+}
+Check.that('a file written before the per-step record is seeded from its history and last success') {
+    def r0 = planned('r0', 'success', ['alignment', 'wombat'])
+    def r1 = planned('r1', 'failed', ['alignment'])
+    def r2 = planned('r2', 'success', ['sampleqc'])
+    def old = [schema_version: 1, cohort_name: 'C', last_run: r2, last_successful_run: r2, history: [r2, r1]]
+    def by = CohortState.merge(old, planned('r3', 'running', ['roh']))[CohortState.BY_STEP]
+    assert by.alignment.last.run_id == 'r1' && !by.alignment.containsKey('last_success')
+    assert by.sampleqc.last_success.run_id == 'r2' && !by.containsKey('roh')
+    // A last success older than the whole history is folded in first, history over it
+    old = [schema_version: 1, cohort_name: 'C', last_run: r1, last_successful_run: r0, history: [r1]]
+    by = CohortState.merge(old, planned('r3', 'running', ['roh']))[CohortState.BY_STEP]
+    assert by.wombat.last_success.run_id == 'r0' && by.wombat.last.run_id == 'r0'
+    assert by.alignment.last.run_id == 'r1' && by.alignment.last_success.run_id == 'r0'
+}
+Check.that('a record written twice does not change the per-step record') {
+    def s = CohortState.merge([:], planned('r1', 'success', ['roh']))
+    assert CohortState.merge(s, planned('r1', 'success', ['roh'])) == s
+}
+Check.that('the per-step record round-trips through the file') {
+    def dir = Files.createTempDirectory('cohort-state')
+    try {
+        def s = CohortState.merge(CohortState.merge([:], planned('r1', 'success', ['roh', 'wombat'])),
+                                  planned('r2', 'failed', ['roh']))
+        CohortState.write(dir, s)
+        def back = CohortState.read(dir)
+        assert back == s
+        assert CohortState.merge(back, planned('r3', 'success', ['wombat']))[CohortState.BY_STEP].roh.last.run_id == 'r2'
+    }
+    finally { dir.toFile().deleteDir() }
+}
+
 Check.done()

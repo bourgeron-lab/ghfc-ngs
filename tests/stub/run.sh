@@ -372,16 +372,25 @@ if ! (cd "${out}/launch" && "${nextflow}" run "${root}/main.nf" -params-file "${
     echo "  FAIL  conflict: the real run failed (see ${out}/state.out)"; fail=1
 elif ! python3 - "${state}" << 'PY'
 import json, sys
-run = json.load(open(sys.argv[1]))["last_run"]
+state = json.load(open(sys.argv[1]))
+run = state["last_run"]
 assert run["status"] == "success", run["status"]
+# The per-step record holds the one step asked for, under this run, and no other step
+by_step = state["last_run_by_step"]
+assert list(by_step) == ["deepvariant_family"], list(by_step)
+for slot in ("last", "last_success"):
+    entry = by_step["deepvariant_family"][slot]
+    assert entry["run_id"] == run["run_id"] and entry["status"] == "success", entry
+    assert entry["pedigree_sha256"] == run["pedigree"]["sha256"], entry
+    assert entry["completion"] == run["completion"]["deepvariant_family"], entry
 assert run["pedigree_conflicts"] == [
     {"family": "FAM01", "cohorts": ["OTHER"], "changes": {"OTHER": ["BC003: father 0 -> BC001"]}}
 ], run["pedigree_conflicts"]
 PY
 then
-    echo "  FAIL  conflict: the state file does not record FAM01 as held (${state})"; fail=1
+    echo "  FAIL  conflict: the state file does not record FAM01 as held, or its per-step record (${state})"; fail=1
 else
-    echo "  ok    conflict: FAM01 held and recorded in the state file"
+    echo "  ok    conflict: FAM01 held and recorded in the state file, with the per-step record"
 fi
 
 expect_refusal pedigree_conflicts_fail "another cohort lists with other rows, and pedigree_conflicts is fail" \

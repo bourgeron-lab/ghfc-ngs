@@ -47,6 +47,7 @@ Read these before trusting a field.
 | `cohort_name` | string | The cohort this file describes. |
 | `last_run` | record | The most recent run. May still be `running`. |
 | `last_successful_run` | record \| absent | The most recent run that finished successfully. Only ever replaced by another success, so a later failure never erases it. |
+| `last_run_by_step` | object \| absent | Per step, the last run that requested it and the last that did so successfully. **Read a step's completion and drift here**, not in `last_run`: a `--steps sampleqc,genomeqc` run becomes `last_run` and says nothing of the other steps. See [Per-step record](#per-step-record). |
 | `history` | array of records | Up to 10 **terminal** records, newest first. A `running` record is never in here; it is added once it reaches a terminal status. |
 
 `last_run` is usually also `history[0]`. The exception is while a run is in flight, when
@@ -393,6 +394,59 @@ requested, or the run died before it could run.
   family's `norm.bcf`, that family also appears in `families_skipped`, because a family whose
   `norm.bcf` survived still looks complete to the next run.
 
+## Per-step record
+
+`last_run` and `last_successful_run` describe whole runs, and a run with a shorter `steps` list
+replaces them all the same. After `ghfc-ngs EAGER --steps sampleqc,genomeqc`, `last_run`
+measures two steps and leaves the rest `null`, and its `pedigree.sha256` is the edited
+pedigree. Read through `last_run` alone, the cohort then looks unmeasured everywhere else and up
+to date with its pedigree, while Wombat, UPD and de novo still hold the old one.
+`last_run_by_step` keeps each step's own last runs:
+
+```json
+"last_run_by_step": {
+  "sampleqc": {
+    "last":         { "run_id": "9c0e…", "status": "success", "started_at": "2026-11-25T09:02:11+01:00",
+                      "finished_at": "2026-11-25T09:40:57+01:00", "completion_measured": "after",
+                      "outputs_may_be_incomplete": false, "pedigree_sha256": "51d2…",
+                      "params_sha256": "fb6d…", "completion": { "done": 941, "total": 941, "pct": 100.0 } },
+    "last_success": { "…": "the same entry, here the same run" }
+  },
+  "wombat": {
+    "last":         { "run_id": "6f1a…", "status": "failed", "…": "…" },
+    "last_success": { "run_id": "1b7d…", "status": "success", "…": "…" }
+  }
+}
+```
+
+- **Keys are step names, sorted.** A step that no recorded run requested is absent.
+- **`last`**: the last run that finished (`success` or `failed`) having requested the step and
+  built a plan. **`last_success`**: the last such run that succeeded; absent when none did.
+- **An entry** is the run's `run_id`, `status`, `started_at`, `finished_at`,
+  `completion_measured`, `outputs_may_be_incomplete`, `pedigree_sha256` (`pedigree.sha256`),
+  `params_sha256` (`params_file.sha256`), and `completion`: that step's block alone, `null` for
+  `extractor`, which is never measured.
+- **What does not count**:
+  - a `running` record (the progress file is the live view);
+  - an `interrupted` one;
+  - a validation failure, which has no `completion` and did nothing;
+  - a name in `steps_requested` that is not in `completion` (`bogus`).
+- **Seeded on the first write after it shipped** from what the file already holds:
+  `last_successful_run` when it is older than all of `history`, then `history` oldest first.
+  A step last run more than ten runs ago, or before the record existed, is missing until it runs
+  again.
+- **Absent from files not written since**, and from a file whose runs all failed validation.
+  A reader can do the same merge itself: `history`, newest first, for each step the first record
+  that requested and planned it.
+
+Which entry answers which question:
+
+| question | read |
+| --- | --- |
+| how far along is step S? | `last_run_by_step.S.last.completion`, with its `completion_measured` and `outputs_may_be_incomplete` |
+| was S's output made from the current pedigree? | `last_run_by_step.S.last_success.pedigree_sha256` against the file's hash |
+| has S run since an edit made at time T? | `last_run_by_step.S.last.started_at` after T |
+
 ## Checksums
 
 Two different questions, two different fields.
@@ -446,6 +500,22 @@ f=.ghfc-ngs.state.json
 recorded=$(jq -r '.last_successful_run.pedigree.sha256' "$f")
 current=$(shasum -a 256 "$(jq -r '.last_successful_run.pedigree.path' "$f")" | cut -d' ' -f1)
 [ "$recorded" = "$current" ] && echo "pedigree unchanged" || echo "PEDIGREE CHANGED since last success"
+```
+
+```bash
+# Each step's own last run, whatever later runs left out
+jq -r '.last_run_by_step // {} | to_entries[]
+       | [.key, .value.last.status, .value.last.started_at,
+          (.value.last.completion | if . then "\(.done)/\(.total)" else "not measured" end)] | @tsv' \
+   .ghfc-ngs.state.json | column -t -s $'\t'
+```
+
+```bash
+# Steps whose last successful output predates the current pedigree
+f=.ghfc-ngs.state.json
+current=$(shasum -a 256 "$(jq -r '.last_run.pedigree.path' "$f")" | cut -d' ' -f1)
+jq -r --arg h "$current" '.last_run_by_step // {} | to_entries[]
+       | select(.value.last_success.pedigree_sha256 != $h) | .key' "$f"
 ```
 
 ```bash
@@ -523,6 +593,7 @@ New fields are additive: a consumer must ignore keys it does not know. Bump `sch
 only when an existing field changes meaning or disappears.
 
 To add a field, extend `buildStateRecord` in [`main.nf`](main.nf). To change how records are
-folded into the file — the history rules, the `interrupted` promotion, the atomic write — edit
+folded into the file — the history rules, the `interrupted` promotion, the per-step record, the
+atomic write — edit
 [`lib/CohortState.groovy`](lib/CohortState.groovy), which has no Nextflow dependency and can be
 exercised on its own.
