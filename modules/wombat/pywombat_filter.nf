@@ -12,7 +12,7 @@ process PYWOMBAT_FILTER {
     """
     ${InputsSnapshot.decodeCommand(pedigree, "${fid}.pedigree.tsv")}
     wombat filter ${annotated_parquet} -p ${fid}.pedigree.tsv -F ${wombat_config} \
-        --bcf ${norm_bcf} --fasta ${params.ref} \
+        --bcf ${norm_bcf} --fasta ${params.ref}${params.wombat_acmg_ruleset ? " --acmg-ruleset ${params.wombat_acmg_ruleset}" : ''} \
         -o ${fid}.rare.${vep_config_name}.filtered.${wombat_config_name} -v
     """
 

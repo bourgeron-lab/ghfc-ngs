@@ -35,7 +35,7 @@ process PYWOMBAT {
     echo "===="
     cat ${fid}.pedigree.tsv
     echo "===="
-    wombat filter ${annotated_parquet} -p ${fid}.pedigree.tsv -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref} -v
+    wombat filter ${annotated_parquet} -p ${fid}.pedigree.tsv -F ${wombat_config} --bcf ${norm_bcf} --fasta ${params.ref}${params.wombat_acmg_ruleset ? " --acmg-ruleset ${params.wombat_acmg_ruleset}" : ''} -v
     """
 
     stub:

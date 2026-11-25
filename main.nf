@@ -302,6 +302,7 @@ def buildStateRecord(Map opts) {
         launch: launchInfo(),
         params_effective_sha256: effectiveParamsSha(),
         steps_requested: RunContext.steps,
+        wombat_acmg_ruleset: params.wombat_acmg_ruleset ?: null,
         // The Slurm nodes its tasks were kept off, [] for none
         exclude_nodes: ExcludeNodes.parse(params.exclude_nodes),
         completion_measured: opts.measured,

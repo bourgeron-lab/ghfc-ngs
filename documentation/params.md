@@ -48,7 +48,7 @@ The example files are full of `""`, and it means three different things:
 
 ## Every key, A to Z
 
-82 keys are read by the code; 17 more are in circulation and do nothing. Everything either
+83 keys are read by the code; 17 more are in circulation and do nothing. Everything either
 program can see is in this table. A key that is not here is not read by anything.
 
 📄 marks a key whose value becomes part of output filenames — see
@@ -152,6 +152,7 @@ program can see is in this table. A key that is not here is not read by anything
 | `wisecondorx_binsize` 📄 | `wisecondorx` | [WisecondorX](#wisecondorx) |
 | `wisecondorx_predict_args` | `wisecondorx` | [WisecondorX](#wisecondorx) |
 | `wisecondorx_reference` | `wisecondorx` | [WisecondorX](#wisecondorx) |
+| `wombat_acmg_ruleset` | `wombat` | [Wombat](#wombat) |
 | `wombat_config_list` 📄 | `wombat`; `denovo`, to check `denovo_wombat_config` is in it | [Wombat](#wombat) |
 | `wombat_config_path` | `wombat` | [Wombat](#wombat) |
 | `work_dir` | always, at config-parse time | [Core paths and identity](#core-paths-and-identity) |
@@ -574,6 +575,7 @@ pointing at a different file, which must exist.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
+| `wombat_acmg_ruleset` | string | `""` | ACMG/AMP evidence ruleset passed to `wombat filter --acmg-ruleset`. When set, every wombat filter call adds 12 `acmg_*` evidence columns and an `acmg_ruleset` column (`<ruleset>/pywombat-<version>`) to the output TSV. The built-in default ruleset is `acmg-svi-2024.1`. Empty disables ACMG annotation. Recorded in the run record. |
 | `wombat_config_path` | dir | *no default* | Directory of PyWombat YAML configs. |
 | `wombat_config_list` 📄 | list of filenames | *no default* | One output TSV per entry. Basenames, resolved under `wombat_config_path`. Each **stem becomes part of its output filename**, so renaming a config orphans its previous results. |
 
